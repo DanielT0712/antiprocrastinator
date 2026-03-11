@@ -11,6 +11,21 @@ pub fn run_migrations(connection: &Connection) -> Result<(), rusqlite::Error> {
         connection.execute_batch(INITIAL_SCHEMA)?;
     }
 
+    if current_version < 2 {
+        let has_source_column: i32 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('time_blocks') WHERE name = 'source'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        if has_source_column == 0 {
+            connection.execute(
+                "ALTER TABLE time_blocks ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'",
+                [],
+            )?;
+        }
+    }
+
     if current_version != CURRENT_SCHEMA_VERSION {
         connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     }

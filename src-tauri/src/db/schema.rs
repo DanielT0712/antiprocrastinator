@@ -1,4 +1,4 @@
-pub const CURRENT_SCHEMA_VERSION: i32 = 1;
+pub const CURRENT_SCHEMA_VERSION: i32 = 2;
 
 pub const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS task_groups (
@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS time_blocks (
     task_id INTEGER,
     status TEXT NOT NULL DEFAULT 'scheduled',
     intensity INTEGER NOT NULL DEFAULT 3 CHECK (intensity BETWEEN 1 AND 5),
+    source TEXT NOT NULL DEFAULT 'manual',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
