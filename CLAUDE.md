@@ -1,7 +1,7 @@
 # AntiProcrastinator - Development Guidelines
 
 ## Workflow Rules
-- **Commit frequently**: Commit on every change, addition, or fix of a feature. Do not batch commits. Write clear commit messages explaining what changed and why.
+- **Commit frequently**: Commit on every change, addition, or fix of a feature. Do not batch commits. Write clear but concise commit messages explaining what changed and why.
 - **Maintain a completed task list**: Update task tracking as each item is finished.
 - **GUI verification**: Whenever a new UI element or window is added, ask the user to run the app and verify it looks good. Wait for feedback before proceeding.
 
