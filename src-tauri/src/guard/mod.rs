@@ -1,2 +1,2 @@
-pub mod watchdog;
 pub mod commands;
+pub mod watchdog;
