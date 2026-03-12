@@ -27,6 +27,7 @@ pub fn run() {
             schedule::commands::extend_current_block,
             schedule::commands::pause_current_block,
             schedule::commands::resume_current_block,
+            schedule::commands::rebuild_schedule,
             analytics::commands::get_daily_summary,
             analytics::commands::get_focus_stats,
             analytics::commands::get_task_completion_stats,
