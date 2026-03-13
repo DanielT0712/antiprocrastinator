@@ -37,6 +37,7 @@ pub enum BlockStatus {
 pub enum BlockSource {
     Manual,
     Template,
+    Planner,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +54,21 @@ pub struct TimeBlock {
     pub source: BlockSource,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleWarning {
+    pub kind: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleRebuildResult {
+    pub blocks: Vec<TimeBlock>,
+    pub warnings: Vec<ScheduleWarning>,
+    pub pseudo_deadline: i64,
 }
 
 impl TimeBlock {

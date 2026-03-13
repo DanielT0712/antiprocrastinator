@@ -1,10 +1,10 @@
 use tauri::State;
 
-use crate::db::DatabaseState;
+use crate::{config::manager::ConfigState, db::DatabaseState};
 
 use super::{
     engine,
-    models::{NewTimeBlock, TimeBlock, TimeBlockUpdate, WeeklyTemplate},
+    models::{NewTimeBlock, ScheduleRebuildResult, TimeBlock, TimeBlockUpdate, WeeklyTemplate},
 };
 
 #[tauri::command]
@@ -132,4 +132,19 @@ pub fn resume_current_block(
 ) -> Result<Option<TimeBlock>, String> {
     let connection = database.connection()?;
     engine::resume_current_block(&connection, &schedule)
+}
+
+#[tauri::command]
+pub fn rebuild_schedule(
+    from: Option<i64>,
+    database: State<'_, DatabaseState>,
+    config: State<'_, ConfigState>,
+) -> Result<ScheduleRebuildResult, String> {
+    let connection = database.connection()?;
+    let preferences = config.get_preferences()?;
+    engine::rebuild_schedule(
+        &connection,
+        from.unwrap_or_else(engine::now_ms),
+        &preferences,
+    )
 }

@@ -8,11 +8,12 @@ use chrono::{Datelike, Days, NaiveDate, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::db::DatabaseState;
+use crate::{config::models::UserPreferences, db::DatabaseState};
 
 use super::models::{
-    BlockSource, BlockStatus, BlockType, DayTemplate, FixedTemplateBlock, NewTimeBlock, TimeBlock,
-    TimeBlockUpdate, TimerTickPayload, Weekday, WeeklyTemplate,
+    BlockSource, BlockStatus, BlockType, DayTemplate, FixedTemplateBlock, NewTimeBlock,
+    ScheduleRebuildResult, ScheduleWarning, TimeBlock, TimeBlockUpdate, TimerTickPayload, Weekday,
+    WeeklyTemplate,
 };
 
 pub struct ScheduleState {
@@ -39,8 +40,48 @@ struct TemplateInterval {
     block_type: BlockType,
     start_time: i64,
     end_time: i64,
+    task_id: Option<i64>,
     intensity: u8,
     source: BlockSource,
+}
+
+#[derive(Debug, Clone)]
+struct PlannerTask {
+    task_id: i64,
+    title: String,
+    priority: i64,
+    deadline: Option<i64>,
+    estimated_minutes: i64,
+    required_share: f64,
+    section_allocations: Vec<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct ScheduleSection {
+    end_time: i64,
+    windows: Vec<TimeWindow>,
+    scoring_work_capacity_minutes: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimeWindow {
+    start_time: i64,
+    end_time: i64,
+}
+
+impl TimeWindow {
+    fn duration_minutes(self) -> i64 {
+        (self.end_time - self.start_time) / 60_000
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ChunkCandidate {
+    task_index: usize,
+    task_id: i64,
+    title: String,
+    priority: i64,
+    duration_minutes: i64,
 }
 
 impl ScheduleState {
@@ -314,7 +355,7 @@ pub fn apply_weekly_template(
                 block_type: interval.block_type,
                 start_time: interval.start_time,
                 end_time: interval.end_time,
-                task_id: None,
+                task_id: interval.task_id,
                 intensity: interval.intensity,
                 source: Some(interval.source),
             },
@@ -323,6 +364,70 @@ pub fn apply_weekly_template(
     }
 
     Ok(created)
+}
+
+pub fn rebuild_schedule(
+    connection: &Connection,
+    from: i64,
+    preferences: &UserPreferences,
+) -> Result<ScheduleRebuildResult, String> {
+    let template = get_weekly_template(connection)?.unwrap_or_default();
+    let tasks = load_plannable_tasks(connection, from)?;
+
+    if tasks.is_empty() {
+        clear_generated_future_blocks(connection, from)?;
+        let fixed_blocks = generate_fixed_template_blocks(
+            connection,
+            &template,
+            from,
+            end_of_day(date_from_timestamp(from)?)?,
+        )?;
+        persist_generated_blocks(connection, &fixed_blocks)?;
+        return Ok(ScheduleRebuildResult {
+            blocks: get_schedule_range(connection, from, from + 7 * 24 * 60 * 60 * 1_000)?,
+            warnings: vec![],
+            pseudo_deadline: from,
+        });
+    }
+
+    let pseudo_deadline =
+        compute_pseudo_deadline(connection, &template, preferences, from, &tasks)?;
+    let existing_immutables = load_preserved_intervals(connection, from, pseudo_deadline)?;
+    let generated_fixed_intervals =
+        generate_fixed_template_blocks(connection, &template, from, pseudo_deadline)?;
+    let immutable_intervals = merge_intervals(
+        [existing_immutables, generated_fixed_intervals.clone()].concat(),
+        from,
+        pseudo_deadline,
+    );
+    let windows = invert_intervals_to_windows(&immutable_intervals, from, pseudo_deadline);
+
+    let section_endpoints = build_section_endpoints(from, pseudo_deadline, &tasks);
+    let sections =
+        build_sections_from_windows(&windows, &section_endpoints, from, preferences, &template);
+    let mut warnings = detect_theoretical_overflow(&sections, &tasks, &section_endpoints, from);
+    let mut planner_tasks = allocate_tasks_to_sections(
+        &sections,
+        section_endpoints.len() - 1,
+        tasks,
+        &section_endpoints,
+        from,
+        &mut warnings,
+    );
+
+    let mut generated_blocks = generated_fixed_intervals;
+    let packed_result =
+        materialize_sections(&sections, &mut planner_tasks, preferences, &mut warnings)?;
+    generated_blocks.extend(packed_result);
+
+    clear_generated_future_blocks(connection, from)?;
+    persist_generated_blocks(connection, &generated_blocks)?;
+
+    Ok(ScheduleRebuildResult {
+        blocks: get_schedule_range(connection, from, pseudo_deadline)?,
+        warnings,
+        pseudo_deadline,
+    })
 }
 
 pub fn complete_current_block(
@@ -645,6 +750,7 @@ fn load_preserved_intervals(
             block_type: block.block_type,
             start_time: block.start_time,
             end_time: block.end_time,
+            task_id: block.task_id,
             intensity: block.intensity,
             source: block.source,
         })
@@ -733,6 +839,7 @@ fn generate_gap_blocks(
             block_type: next_type,
             start_time: cursor,
             end_time,
+            task_id: None,
             intensity: if next_type == BlockType::Work { 4 } else { 2 },
             source: BlockSource::Template,
         });
@@ -812,6 +919,7 @@ fn build_interval(
         block_type,
         start_time,
         end_time,
+        task_id: None,
         intensity,
         source: BlockSource::Template,
     }])
@@ -841,6 +949,657 @@ fn merge_intervals(
     }
 
     merged
+}
+
+fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<PlannerTask>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT id, name, priority, estimated_minutes, deadline
+            FROM tasks
+            WHERE estimated_minutes IS NOT NULL
+              AND estimated_minutes > 0
+              AND (deadline IS NULL OR deadline >= ?1)
+            ORDER BY priority DESC, deadline ASC, updated_at DESC, name ASC
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let tasks = statement
+        .query_map(params![from], |row| {
+            Ok(PlannerTask {
+                task_id: row.get(0)?,
+                title: row.get(1)?,
+                priority: row.get(2)?,
+                deadline: row.get(4)?,
+                estimated_minutes: row.get(3)?,
+                required_share: 0.0,
+                section_allocations: vec![],
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    Ok(tasks)
+}
+
+fn compute_pseudo_deadline(
+    connection: &Connection,
+    template: &WeeklyTemplate,
+    preferences: &UserPreferences,
+    from: i64,
+    tasks: &[PlannerTask],
+) -> Result<i64, String> {
+    let total_work_minutes: i64 = tasks.iter().map(|task| task.estimated_minutes).sum();
+    let latest_real_deadline = tasks
+        .iter()
+        .filter_map(|task| task.deadline)
+        .max()
+        .unwrap_or(from);
+    let ratio_work = i64::from(resolve_work_minutes(preferences, template));
+    let ratio_break = i64::from(resolve_break_minutes(preferences, template));
+    let preferred_total_minutes = ((total_work_minutes as f64)
+        * ((ratio_work + ratio_break) as f64 / ratio_work as f64))
+        .ceil() as i64;
+
+    let mut horizon = max(
+        latest_real_deadline,
+        from + preferred_total_minutes.max(1) * 60 * 1_000,
+    );
+
+    loop {
+        let immutable_intervals = merge_intervals(
+            [
+                load_preserved_intervals(connection, from, horizon)?,
+                generate_fixed_template_blocks(connection, template, from, horizon)?,
+            ]
+            .concat(),
+            from,
+            horizon,
+        );
+        let windows = invert_intervals_to_windows(&immutable_intervals, from, horizon);
+        let scoring_capacity: i64 = windows
+            .iter()
+            .map(|window| {
+                ideal_work_capacity_minutes(window.duration_minutes(), preferences, template)
+            })
+            .sum();
+
+        if scoring_capacity >= total_work_minutes {
+            return Ok(horizon);
+        }
+
+        horizon += 24 * 60 * 60 * 1_000;
+    }
+}
+
+fn generate_fixed_template_blocks(
+    connection: &Connection,
+    template: &WeeklyTemplate,
+    from: i64,
+    to: i64,
+) -> Result<Vec<TemplateInterval>, String> {
+    let preserved_manual = load_preserved_intervals(connection, from, to)?;
+    let start_date = date_from_timestamp(from)?;
+    let end_date = date_from_timestamp(to - 1)?;
+    let day_count = end_date.signed_duration_since(start_date).num_days().max(0) as u64;
+    let mut fixed = Vec::new();
+
+    for offset in 0..=day_count {
+        let date = start_date
+            .checked_add_days(Days::new(offset))
+            .ok_or_else(|| "date range overflow while generating fixed intervals".to_string())?;
+        let day_template = find_day_template(template, weekday_from_chrono(date.weekday()));
+        if let Some(day_template) = day_template {
+            fixed.extend(build_fixed_intervals_for_day(
+                date,
+                day_template,
+                &template.fixed_blocks,
+            )?);
+        }
+    }
+
+    Ok(fixed
+        .into_iter()
+        .filter(|interval| interval.start_time < to && interval.end_time > from)
+        .filter(|interval| {
+            !preserved_manual.iter().any(|manual| {
+                manual.source == BlockSource::Manual
+                    && intervals_overlap(
+                        interval.start_time,
+                        interval.end_time,
+                        manual.start_time,
+                        manual.end_time,
+                    )
+            })
+        })
+        .collect())
+}
+
+fn build_section_endpoints(from: i64, pseudo_deadline: i64, tasks: &[PlannerTask]) -> Vec<i64> {
+    let mut endpoints: Vec<i64> = tasks
+        .iter()
+        .filter_map(|task| task.deadline)
+        .map(|deadline| max(deadline, from + 60 * 1_000))
+        .collect();
+    endpoints.sort_unstable();
+    endpoints.dedup();
+    if endpoints.last().copied() != Some(pseudo_deadline) {
+        endpoints.push(pseudo_deadline);
+    }
+    endpoints
+}
+
+fn build_sections_from_windows(
+    windows: &[TimeWindow],
+    section_endpoints: &[i64],
+    from: i64,
+    preferences: &UserPreferences,
+    template: &WeeklyTemplate,
+) -> Vec<ScheduleSection> {
+    let mut sections = Vec::new();
+    let mut prev = None;
+    for &end in section_endpoints {
+        let start = prev.unwrap_or(from);
+        let mut section_windows = Vec::new();
+        for window in windows {
+            let slice_start = max(window.start_time, start);
+            let slice_end = min(window.end_time, end);
+            if slice_start < slice_end {
+                section_windows.push(TimeWindow {
+                    start_time: slice_start,
+                    end_time: slice_end,
+                });
+            }
+        }
+        let scoring_work_capacity_minutes = section_windows
+            .iter()
+            .map(|window| {
+                ideal_work_capacity_minutes(window.duration_minutes(), preferences, template)
+            })
+            .sum();
+        sections.push(ScheduleSection {
+            end_time: end,
+            windows: section_windows,
+            scoring_work_capacity_minutes,
+        });
+        prev = Some(end);
+    }
+    sections
+}
+
+fn detect_theoretical_overflow(
+    sections: &[ScheduleSection],
+    tasks: &[PlannerTask],
+    section_endpoints: &[i64],
+    from: i64,
+) -> Vec<ScheduleWarning> {
+    let mut warnings = Vec::new();
+    let mut earlier_minutes = 0_i64;
+
+    for (idx, endpoint) in section_endpoints.iter().enumerate() {
+        let cohort_total: i64 = tasks
+            .iter()
+            .filter(|task| {
+                task.deadline
+                    .map(|deadline| max(deadline, from + 60 * 1_000))
+                    == Some(*endpoint)
+            })
+            .map(|task| task.estimated_minutes)
+            .sum();
+        let cumulative_capacity: i64 = sections
+            .iter()
+            .take(idx + 1)
+            .map(|section| section.scoring_work_capacity_minutes)
+            .sum();
+        let eligible_capacity = cumulative_capacity - earlier_minutes;
+
+        if cohort_total > eligible_capacity {
+            warnings.push(ScheduleWarning {
+                kind: "theoretical_overflow".to_string(),
+                message: format!(
+                    "Tasks due by {} need about {} minutes, but only {} work minutes are eligible before that deadline.",
+                    endpoint,
+                    cohort_total,
+                    eligible_capacity.max(0)
+                ),
+            });
+        }
+
+        earlier_minutes += cohort_total;
+    }
+
+    warnings
+}
+
+fn allocate_tasks_to_sections(
+    sections: &[ScheduleSection],
+    pseudo_section_index: usize,
+    mut tasks: Vec<PlannerTask>,
+    section_endpoints: &[i64],
+    from: i64,
+    warnings: &mut Vec<ScheduleWarning>,
+) -> Vec<PlannerTask> {
+    let mut cumulative_capacities = Vec::with_capacity(sections.len());
+    let mut running = 0_i64;
+    for section in sections {
+        running += section.scoring_work_capacity_minutes;
+        cumulative_capacities.push(running);
+    }
+
+    let mut earlier_deadline_total = 0_i64;
+    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (task_idx, task) in tasks.iter().enumerate() {
+        let section_index = task
+            .deadline
+            .and_then(|deadline| {
+                section_endpoints
+                    .iter()
+                    .position(|endpoint| *endpoint == max(deadline, from + 60 * 1_000))
+            })
+            .unwrap_or(pseudo_section_index);
+        if let Some((_, indices)) = groups.iter_mut().find(|(idx, _)| *idx == section_index) {
+            indices.push(task_idx);
+        } else {
+            groups.push((section_index, vec![task_idx]));
+        }
+    }
+    groups.sort_by_key(|(idx, _)| *idx);
+
+    let mut remaining_capacity_by_section: Vec<i64> = sections
+        .iter()
+        .map(|section| section.scoring_work_capacity_minutes)
+        .collect();
+
+    for (section_index, task_indices) in groups {
+        let eligible_capacity = cumulative_capacities[section_index] - earlier_deadline_total;
+        for &task_idx in &task_indices {
+            tasks[task_idx].required_share =
+                tasks[task_idx].estimated_minutes as f64 / eligible_capacity.max(1) as f64;
+            tasks[task_idx].section_allocations = vec![0; sections.len()];
+        }
+
+        let mut ordered_indices = task_indices.clone();
+        ordered_indices.sort_by(|left, right| {
+            tasks[*right]
+                .priority
+                .cmp(&tasks[*left].priority)
+                .then_with(|| {
+                    tasks[*right]
+                        .required_share
+                        .partial_cmp(&tasks[*left].required_share)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| tasks[*left].title.cmp(&tasks[*right].title))
+        });
+
+        for task_idx in ordered_indices {
+            let mut remaining = tasks[task_idx].estimated_minutes;
+            for target_section in (0..=section_index).rev() {
+                if remaining <= 0 {
+                    break;
+                }
+                let assignable = min(
+                    remaining,
+                    remaining_capacity_by_section[target_section].max(0),
+                );
+                tasks[task_idx].section_allocations[target_section] += assignable;
+                remaining_capacity_by_section[target_section] -= assignable;
+                remaining -= assignable;
+            }
+
+            if remaining > 0 {
+                warnings.push(ScheduleWarning {
+                    kind: "unscheduled_overflow".to_string(),
+                    message: format!(
+                        "Task '{}' still has {} unallocated minutes before its deadline window.",
+                        tasks[task_idx].title, remaining
+                    ),
+                });
+            }
+        }
+
+        earlier_deadline_total += task_indices
+            .iter()
+            .map(|idx| tasks[*idx].estimated_minutes)
+            .sum::<i64>();
+    }
+
+    tasks
+}
+
+fn materialize_sections(
+    sections: &[ScheduleSection],
+    tasks: &mut [PlannerTask],
+    preferences: &UserPreferences,
+    warnings: &mut Vec<ScheduleWarning>,
+) -> Result<Vec<TemplateInterval>, String> {
+    let mut generated = Vec::new();
+    let max_chunk_minutes = i64::from(preferences.work_duration_minutes.max(1));
+    let min_break_minutes = i64::from((preferences.break_duration_minutes / 6).max(1));
+    let ratio_work = i64::from(preferences.work_duration_minutes.max(1));
+    let ratio_break = i64::from(preferences.break_duration_minutes);
+
+    for (section_index, section) in sections.iter().enumerate() {
+        let mut remaining_chunks: Vec<(usize, Vec<i64>)> = tasks
+            .iter()
+            .enumerate()
+            .filter_map(|(task_idx, task)| {
+                let allocated = task
+                    .section_allocations
+                    .get(section_index)
+                    .copied()
+                    .unwrap_or(0);
+                (allocated > 0).then_some((
+                    task_idx,
+                    split_into_equal_chunks(allocated, max_chunk_minutes),
+                ))
+            })
+            .collect();
+
+        if remaining_chunks.is_empty() {
+            continue;
+        }
+
+        let mut preferred_rest_needed = 0_i64;
+        for (_, chunks) in &remaining_chunks {
+            preferred_rest_needed += chunks
+                .iter()
+                .map(|chunk| preferred_break_minutes(*chunk, ratio_work, ratio_break))
+                .sum::<i64>();
+        }
+
+        let mut total_break_built = 0_i64;
+        for window in &section.windows {
+            let mut cursor = window.start_time;
+
+            while cursor < window.end_time {
+                let next = find_next_main_candidate(tasks, &remaining_chunks);
+                let gap_minutes = (window.end_time - cursor) / 60_000;
+                if gap_minutes <= 0 {
+                    break;
+                }
+
+                let candidate = match next {
+                    Some(candidate) if candidate.duration_minutes <= gap_minutes => candidate,
+                    _ => match find_fit_candidate(tasks, &remaining_chunks, gap_minutes) {
+                        Some(candidate) => candidate,
+                        None => break,
+                    },
+                };
+
+                let duration_ms = candidate.duration_minutes * 60 * 1_000;
+                generated.push(TemplateInterval {
+                    title: candidate.title.clone(),
+                    block_type: BlockType::Work,
+                    start_time: cursor,
+                    end_time: cursor + duration_ms,
+                    task_id: Some(candidate.task_id),
+                    intensity: intensity_for_priority(candidate.priority),
+                    source: BlockSource::Planner,
+                });
+                consume_candidate_chunk(&mut remaining_chunks, candidate.task_index);
+                cursor += duration_ms;
+
+                let has_more_chunks = remaining_chunks
+                    .iter()
+                    .any(|(_, chunks)| !chunks.is_empty());
+                if has_more_chunks && cursor + min_break_minutes * 60 * 1_000 <= window.end_time {
+                    generated.push(TemplateInterval {
+                        title: BlockType::Break.default_title().to_string(),
+                        block_type: BlockType::Break,
+                        start_time: cursor,
+                        end_time: cursor + min_break_minutes * 60 * 1_000,
+                        task_id: None,
+                        intensity: 1,
+                        source: BlockSource::Planner,
+                    });
+                    cursor += min_break_minutes * 60 * 1_000;
+                    total_break_built += min_break_minutes;
+                }
+            }
+
+            if cursor < window.end_time {
+                generated.push(TemplateInterval {
+                    title: BlockType::Break.default_title().to_string(),
+                    block_type: BlockType::Break,
+                    start_time: cursor,
+                    end_time: window.end_time,
+                    task_id: None,
+                    intensity: 1,
+                    source: BlockSource::Planner,
+                });
+                total_break_built += (window.end_time - cursor) / 60_000;
+            }
+        }
+
+        if remaining_chunks
+            .iter()
+            .any(|(_, chunks)| !chunks.is_empty())
+        {
+            warnings.push(ScheduleWarning {
+                kind: "packing_overflow".to_string(),
+                message: format!(
+                    "Section ending at {} could not fit all allocated work once chunks, boundaries, and minimum rest were applied.",
+                    section.end_time
+                ),
+            });
+        } else if total_break_built < preferred_rest_needed {
+            warnings.push(ScheduleWarning {
+                kind: "compressed_ratio_rest".to_string(),
+                message: format!(
+                    "Section ending at {} compressed ratio-based rest from {} minutes to {} minutes.",
+                    section.end_time, preferred_rest_needed, total_break_built
+                ),
+            });
+        }
+    }
+
+    Ok(generated)
+}
+
+fn find_next_main_candidate(
+    tasks: &[PlannerTask],
+    remaining_chunks: &[(usize, Vec<i64>)],
+) -> Option<ChunkCandidate> {
+    let mut indices: Vec<usize> = remaining_chunks
+        .iter()
+        .filter(|(_, chunks)| !chunks.is_empty())
+        .map(|(task_idx, _)| *task_idx)
+        .collect();
+
+    indices.sort_by(|left, right| {
+        tasks[*right]
+            .priority
+            .cmp(&tasks[*left].priority)
+            .then_with(|| {
+                tasks[*right]
+                    .required_share
+                    .partial_cmp(&tasks[*left].required_share)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| tasks[*left].title.cmp(&tasks[*right].title))
+    });
+
+    indices.into_iter().find_map(|task_idx| {
+        remaining_chunks
+            .iter()
+            .find(|(idx, chunks)| *idx == task_idx && !chunks.is_empty())
+            .and_then(|(_, chunks)| {
+                chunks
+                    .first()
+                    .copied()
+                    .map(|duration_minutes| ChunkCandidate {
+                        task_index: task_idx,
+                        task_id: tasks[task_idx].task_id,
+                        title: tasks[task_idx].title.clone(),
+                        priority: tasks[task_idx].priority,
+                        duration_minutes,
+                    })
+            })
+    })
+}
+
+fn find_fit_candidate(
+    tasks: &[PlannerTask],
+    remaining_chunks: &[(usize, Vec<i64>)],
+    gap_minutes: i64,
+) -> Option<ChunkCandidate> {
+    let mut candidates = Vec::new();
+    for (task_idx, chunks) in remaining_chunks {
+        if let Some(&duration_minutes) = chunks.first() {
+            if duration_minutes <= gap_minutes {
+                candidates.push(ChunkCandidate {
+                    task_index: *task_idx,
+                    task_id: tasks[*task_idx].task_id,
+                    title: tasks[*task_idx].title.clone(),
+                    priority: tasks[*task_idx].priority,
+                    duration_minutes,
+                });
+            }
+        }
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| right.duration_minutes.cmp(&left.duration_minutes))
+            .then_with(|| left.title.cmp(&right.title))
+    });
+
+    candidates.into_iter().next()
+}
+
+fn consume_candidate_chunk(remaining_chunks: &mut [(usize, Vec<i64>)], task_index: usize) {
+    if let Some((_, chunks)) = remaining_chunks
+        .iter_mut()
+        .find(|(idx, chunks)| *idx == task_index && !chunks.is_empty())
+    {
+        chunks.remove(0);
+    }
+}
+
+fn clear_generated_future_blocks(connection: &Connection, from: i64) -> Result<(), String> {
+    connection
+        .execute(
+            r#"
+            DELETE FROM time_blocks
+            WHERE start_time >= ?1
+              AND status = 'scheduled'
+              AND source IN ('template', 'planner')
+            "#,
+            params![from],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn persist_generated_blocks(
+    connection: &Connection,
+    blocks: &[TemplateInterval],
+) -> Result<(), String> {
+    for block in blocks {
+        add_time_block(
+            connection,
+            NewTimeBlock {
+                title: block.title.clone(),
+                block_type: block.block_type,
+                start_time: block.start_time,
+                end_time: block.end_time,
+                task_id: block.task_id,
+                intensity: block.intensity,
+                source: Some(block.source),
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn invert_intervals_to_windows(
+    intervals: &[TemplateInterval],
+    from: i64,
+    to: i64,
+) -> Vec<TimeWindow> {
+    let mut windows = Vec::new();
+    let mut cursor = from;
+
+    for interval in intervals {
+        if cursor < interval.start_time {
+            windows.push(TimeWindow {
+                start_time: cursor,
+                end_time: interval.start_time,
+            });
+        }
+        cursor = max(cursor, interval.end_time);
+    }
+
+    if cursor < to {
+        windows.push(TimeWindow {
+            start_time: cursor,
+            end_time: to,
+        });
+    }
+
+    windows
+}
+
+fn split_into_equal_chunks(total_minutes: i64, max_chunk_minutes: i64) -> Vec<i64> {
+    if total_minutes <= 0 {
+        return vec![];
+    }
+    let chunk_count = ((total_minutes as f64) / max_chunk_minutes as f64).ceil() as i64;
+    let base = total_minutes / chunk_count;
+    let remainder = total_minutes % chunk_count;
+    (0..chunk_count)
+        .map(|idx| base + if idx < remainder { 1 } else { 0 })
+        .collect()
+}
+
+fn preferred_break_minutes(chunk_minutes: i64, ratio_work: i64, ratio_break: i64) -> i64 {
+    if ratio_break == 0 {
+        return 0;
+    }
+    ((chunk_minutes as f64) * (ratio_break as f64 / ratio_work as f64)).ceil() as i64
+}
+
+fn resolve_work_minutes(preferences: &UserPreferences, template: &WeeklyTemplate) -> u32 {
+    if preferences.work_duration_minutes == 0 {
+        u32::from(template.default_work_minutes.max(1))
+    } else {
+        preferences.work_duration_minutes
+    }
+}
+
+fn resolve_break_minutes(preferences: &UserPreferences, template: &WeeklyTemplate) -> u32 {
+    if preferences.break_duration_minutes == 0 {
+        u32::from(template.default_break_minutes)
+    } else {
+        preferences.break_duration_minutes
+    }
+}
+
+fn ideal_work_capacity_minutes(
+    window_minutes: i64,
+    preferences: &UserPreferences,
+    template: &WeeklyTemplate,
+) -> i64 {
+    let work = i64::from(resolve_work_minutes(preferences, template));
+    let break_minutes = i64::from(resolve_break_minutes(preferences, template));
+    if break_minutes == 0 {
+        window_minutes
+    } else {
+        ((window_minutes as f64) * (work as f64 / (work + break_minutes) as f64)).floor() as i64
+    }
+}
+
+fn intensity_for_priority(priority: i64) -> u8 {
+    priority.clamp(1, 5) as u8
+}
+
+fn intervals_overlap(start_a: i64, end_a: i64, start_b: i64, end_b: i64) -> bool {
+    start_a < end_b && start_b < end_a
 }
 
 fn validate_time_block_input(
@@ -956,11 +1715,15 @@ fn seconds_remaining(end_time: i64, now: i64) -> i64 {
     ((end_time - now).max(0) + 999) / 1_000
 }
 
-fn timestamp_ms() -> i64 {
+pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
         .as_millis() as i64
+}
+
+fn timestamp_ms() -> i64 {
+    now_ms()
 }
 
 fn map_time_block(row: &Row<'_>) -> rusqlite::Result<TimeBlock> {
@@ -1043,6 +1806,7 @@ fn block_source_to_str(source: BlockSource) -> &'static str {
     match source {
         BlockSource::Manual => "manual",
         BlockSource::Template => "template",
+        BlockSource::Planner => "planner",
     }
 }
 
@@ -1050,6 +1814,7 @@ fn block_source_from_str(value: &str) -> Result<BlockSource, String> {
     match value {
         "manual" => Ok(BlockSource::Manual),
         "template" => Ok(BlockSource::Template),
+        "planner" => Ok(BlockSource::Planner),
         _ => Err(format!("unknown block source: {value}")),
     }
 }
