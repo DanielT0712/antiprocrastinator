@@ -17,8 +17,9 @@ use crate::{
 
 use super::models::{
     BlockDecisionPrompt, BlockSource, BlockStatus, BlockType, DayTemplate, EmergencyBlockRequest,
-    FixedTemplateBlock, NewTimeBlock, ScheduleActionResult, ScheduleRebuildResult, ScheduleWarning,
-    TimeBlock, TimeBlockUpdate, TimerTickPayload, Weekday, WeeklyTemplate,
+    FixedTemplateBlock, NewTimeBlock, ScheduleActionResult, ScheduleMutation,
+    ScheduleMutationResult, ScheduleRebuildResult, ScheduleWarning, TimeBlock, TimeBlockUpdate,
+    TimerTickPayload, Weekday, WeeklyTemplate,
 };
 
 pub struct ScheduleState {
@@ -66,6 +67,7 @@ struct TemplateInterval {
     task_id: Option<i64>,
     intensity: u8,
     source: BlockSource,
+    is_protected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +77,10 @@ struct PlannerTask {
     priority: i64,
     deadline: Option<i64>,
     estimated_minutes: i64,
+    max_chunk_minutes: Option<i64>,
+    work_ratio: Option<i64>,
+    rest_ratio: Option<i64>,
+    protect_generated_blocks: bool,
     required_share: f64,
     section_allocations: Vec<i64>,
 }
@@ -181,7 +187,7 @@ pub fn get_next_block(
         .query_row(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, created_at, updated_at
+                   status, intensity, source, is_protected, created_at, updated_at
             FROM time_blocks
             WHERE start_time > ?1 AND status IN ('scheduled', 'active', 'paused')
             ORDER BY start_time ASC
@@ -225,7 +231,7 @@ pub fn get_schedule_range(
         .prepare(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, created_at, updated_at
+                   status, intensity, source, is_protected, created_at, updated_at
             FROM time_blocks
             WHERE start_time < ?2 AND end_time > ?1
             ORDER BY start_time ASC, id ASC
@@ -263,8 +269,8 @@ pub fn add_time_block(connection: &Connection, block: NewTimeBlock) -> Result<Ti
             r#"
             INSERT INTO time_blocks (
                 title, block_type, start_time, end_time, task_id,
-                status, intensity, source, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                status, intensity, source, is_protected, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             "#,
             params![
                 block.title.trim(),
@@ -275,6 +281,7 @@ pub fn add_time_block(connection: &Connection, block: NewTimeBlock) -> Result<Ti
                 block_status_to_str(status),
                 i64::from(block.intensity),
                 block_source_to_str(source),
+                block.is_protected.unwrap_or(false),
                 now,
                 now
             ],
@@ -301,6 +308,7 @@ pub fn update_time_block(
     let status = updates.status.unwrap_or(existing.status);
     let intensity = updates.intensity.unwrap_or(existing.intensity);
     let source = updates.source.unwrap_or(existing.source);
+    let is_protected = updates.is_protected.unwrap_or(existing.is_protected);
 
     validate_time_block_input(&title, start_time, end_time, intensity)?;
 
@@ -316,8 +324,9 @@ pub fn update_time_block(
                 status = ?6,
                 intensity = ?7,
                 source = ?8,
-                updated_at = ?9
-            WHERE id = ?10
+                is_protected = ?9,
+                updated_at = ?10
+            WHERE id = ?11
             "#,
             params![
                 title.trim(),
@@ -328,6 +337,7 @@ pub fn update_time_block(
                 block_status_to_str(status),
                 i64::from(intensity),
                 block_source_to_str(source),
+                is_protected,
                 timestamp_ms(),
                 id
             ],
@@ -347,6 +357,62 @@ pub fn delete_time_block(connection: &Connection, id: i64) -> Result<(), String>
     }
 
     Ok(())
+}
+
+pub fn add_time_block_with_mutation(
+    connection: &Connection,
+    block: NewTimeBlock,
+) -> Result<ScheduleMutationResult, String> {
+    let before = load_schedule_snapshot(connection, block.start_time, None)?;
+    let created = add_time_block(connection, block)?;
+    build_schedule_mutation_result(
+        connection,
+        created.start_time,
+        None,
+        before,
+        vec![],
+        None,
+        Some(created),
+    )
+}
+
+pub fn update_time_block_with_mutation(
+    connection: &Connection,
+    id: i64,
+    updates: TimeBlockUpdate,
+) -> Result<ScheduleMutationResult, String> {
+    let existing = get_block_by_id(connection, id)?
+        .ok_or_else(|| format!("time block {id} does not exist"))?;
+    let before = load_schedule_snapshot(connection, existing.start_time, None)?;
+    let updated = update_time_block(connection, id, updates)?;
+    build_schedule_mutation_result(
+        connection,
+        existing.start_time.min(updated.start_time),
+        None,
+        before,
+        vec![],
+        None,
+        Some(updated),
+    )
+}
+
+pub fn delete_time_block_with_mutation(
+    connection: &Connection,
+    id: i64,
+) -> Result<ScheduleMutationResult, String> {
+    let existing = get_block_by_id(connection, id)?
+        .ok_or_else(|| format!("time block {id} does not exist"))?;
+    let before = load_schedule_snapshot(connection, existing.start_time, None)?;
+    delete_time_block(connection, id)?;
+    build_schedule_mutation_result(
+        connection,
+        existing.start_time,
+        None,
+        before,
+        vec![],
+        None,
+        refresh_schedule_status(connection)?,
+    )
 }
 
 pub fn get_weekly_template(connection: &Connection) -> Result<Option<WeeklyTemplate>, String> {
@@ -423,6 +489,7 @@ pub fn apply_weekly_template(
                 task_id: interval.task_id,
                 intensity: interval.intensity,
                 source: Some(interval.source),
+                is_protected: Some(interval.is_protected),
             },
         )?;
         created.push(created_block);
@@ -431,11 +498,31 @@ pub fn apply_weekly_template(
     Ok(created)
 }
 
+pub fn apply_weekly_template_with_mutation(
+    connection: &Connection,
+    template: WeeklyTemplate,
+    from: i64,
+    to: i64,
+) -> Result<ScheduleMutationResult, String> {
+    let before = load_schedule_snapshot(connection, from, Some(to))?;
+    let _ = apply_weekly_template(connection, template, from, to)?;
+    build_schedule_mutation_result(
+        connection,
+        from,
+        Some(to),
+        before,
+        vec![],
+        Some(to),
+        refresh_schedule_status(connection)?,
+    )
+}
+
 pub fn rebuild_schedule(
     connection: &Connection,
     from: i64,
     preferences: &UserPreferences,
 ) -> Result<ScheduleRebuildResult, String> {
+    let before = load_schedule_snapshot(connection, from, None)?;
     let template = get_weekly_template(connection)?.unwrap_or_default();
     let tasks = load_plannable_tasks(connection, from)?;
 
@@ -448,11 +535,16 @@ pub fn rebuild_schedule(
             end_of_day(date_from_timestamp(from)?)?,
         )?;
         persist_generated_blocks(connection, &fixed_blocks)?;
-        return Ok(ScheduleRebuildResult {
-            blocks: get_schedule_range(connection, from, from + 7 * 24 * 60 * 60 * 1_000)?,
-            warnings: vec![],
-            pseudo_deadline: from,
-        });
+        let pseudo_deadline = end_of_day(date_from_timestamp(from)?)?;
+        return build_schedule_mutation_result(
+            connection,
+            from,
+            Some(pseudo_deadline),
+            before,
+            vec![],
+            Some(pseudo_deadline),
+            refresh_schedule_status(connection)?,
+        );
     }
 
     let pseudo_deadline =
@@ -488,11 +580,15 @@ pub fn rebuild_schedule(
     clear_generated_future_blocks(connection, from)?;
     persist_generated_blocks(connection, &generated_blocks)?;
 
-    Ok(ScheduleRebuildResult {
-        blocks: get_schedule_range(connection, from, pseudo_deadline)?,
+    build_schedule_mutation_result(
+        connection,
+        from,
+        Some(pseudo_deadline),
+        before,
         warnings,
-        pseudo_deadline,
-    })
+        Some(pseudo_deadline),
+        refresh_schedule_status(connection)?,
+    )
 }
 
 pub fn complete_current_block(
@@ -506,8 +602,20 @@ pub fn complete_current_block(
 pub fn skip_current_block(
     connection: &Connection,
     schedule: &ScheduleState,
-) -> Result<Option<TimeBlock>, String> {
-    finish_current_block(connection, schedule, BlockStatus::Skipped)
+) -> Result<ScheduleActionResult, String> {
+    let block = current_or_overdue_work_block(connection, schedule)?
+        .ok_or_else(|| "no current block to update".to_string())?;
+    let before = load_schedule_snapshot(connection, block.start_time, None)?;
+    let current_block = finish_current_block(connection, schedule, BlockStatus::Skipped)?;
+    build_schedule_mutation_result(
+        connection,
+        block.start_time,
+        None,
+        before,
+        vec![],
+        None,
+        current_block,
+    )
 }
 
 pub fn extend_current_block(
@@ -523,6 +631,7 @@ pub fn extend_current_block(
     let now = timestamp_ms();
     let block = current_or_overdue_work_block(connection, schedule)?
         .ok_or_else(|| "no active block to extend".to_string())?;
+    let before = load_schedule_snapshot(connection, block.start_time, None)?;
     let old_end = block.end_time;
     let delta = minutes * 60 * 1_000 + now.saturating_sub(block.end_time);
     let mut warnings = Vec::new();
@@ -575,10 +684,15 @@ pub fn extend_current_block(
         }
     }
 
-    Ok(ScheduleActionResult {
-        current_block: get_block_by_id(connection, block.id)?,
+    build_schedule_mutation_result(
+        connection,
+        block.start_time,
+        None,
+        before,
         warnings,
-    })
+        None,
+        get_block_by_id(connection, block.id)?,
+    )
 }
 
 pub fn pause_current_block(
@@ -589,6 +703,7 @@ pub fn pause_current_block(
     let now = timestamp_ms();
     let block = refresh_schedule_status(connection)?
         .ok_or_else(|| "no active block to pause".to_string())?;
+    let before = load_schedule_snapshot(connection, block.start_time, None)?;
 
     if block.status != BlockStatus::Active {
         return Err("only an active block can be paused".to_string());
@@ -602,13 +717,18 @@ pub fn pause_current_block(
         ShrinkStrategy::ImmediateThenProportional,
     )?
     else {
-        return Ok(ScheduleActionResult {
-            current_block: Some(block),
-            warnings: vec![ScheduleWarning {
+        return build_schedule_mutation_result(
+            connection,
+            block.start_time,
+            None,
+            before,
+            vec![ScheduleWarning {
                 kind: "pause_denied".to_string(),
                 message: "There is no rest buffer left before the next fixed boundary, so this block has to continue.".to_string(),
             }],
-        });
+            None,
+            Some(block),
+        );
     };
 
     let available_pause_ms = plan
@@ -617,13 +737,18 @@ pub fn pause_current_block(
         .map(|adjustment| -adjustment.delta_ms)
         .sum();
     if available_pause_ms <= 0 {
-        return Ok(ScheduleActionResult {
-            current_block: Some(block),
-            warnings: vec![ScheduleWarning {
+        return build_schedule_mutation_result(
+            connection,
+            block.start_time,
+            None,
+            before,
+            vec![ScheduleWarning {
                 kind: "pause_denied".to_string(),
                 message: "There is no rest buffer left before the next fixed boundary, so this block has to continue.".to_string(),
             }],
-        });
+            None,
+            Some(block),
+        );
     }
 
     let remaining_secs = seconds_remaining(block.end_time, now);
@@ -652,10 +777,15 @@ pub fn pause_current_block(
         }),
     );
 
-    Ok(ScheduleActionResult {
-        current_block: get_block_by_id(connection, block.id)?,
-        warnings: vec![],
-    })
+    build_schedule_mutation_result(
+        connection,
+        block.start_time,
+        None,
+        before,
+        vec![],
+        None,
+        get_block_by_id(connection, block.id)?,
+    )
 }
 
 pub fn resume_current_block(
@@ -670,6 +800,7 @@ pub fn resume_current_block(
     }
     .ok_or_else(|| "no paused block to resume".to_string())?;
     let block_id = paused.block_id;
+    let before = load_schedule_snapshot(connection, timestamp_ms(), None)?;
     let delta = now
         .saturating_sub(paused.paused_at)
         .min(paused.available_pause_ms);
@@ -686,10 +817,15 @@ pub fn resume_current_block(
         );
     }
 
-    Ok(ScheduleActionResult {
-        current_block: get_block_by_id(connection, block_id)?,
+    build_schedule_mutation_result(
+        connection,
+        now,
+        None,
+        before,
         warnings,
-    })
+        None,
+        get_block_by_id(connection, block_id)?,
+    )
 }
 
 pub fn continue_current_block(
@@ -700,6 +836,7 @@ pub fn continue_current_block(
     let now = timestamp_ms();
     let block = current_or_overdue_work_block(connection, schedule)?
         .ok_or_else(|| "no current work block to continue".to_string())?;
+    let before = load_schedule_snapshot(connection, block.start_time, None)?;
 
     if block.block_type != BlockType::Work {
         return Err("only work blocks can be continued".to_string());
@@ -724,10 +861,15 @@ pub fn continue_current_block(
         );
     }
 
-    Ok(ScheduleActionResult {
-        current_block: get_block_by_id(connection, block.id)?,
+    build_schedule_mutation_result(
+        connection,
+        block.start_time,
+        None,
+        before,
         warnings,
-    })
+        None,
+        get_block_by_id(connection, block.id)?,
+    )
 }
 
 pub fn start_emergency_block(
@@ -753,6 +895,7 @@ pub fn start_emergency_block(
         .unwrap_or("Emergency")
         .to_string();
     let mut warnings = Vec::new();
+    let before = load_schedule_snapshot(connection, now, None)?;
 
     if let Some(current) = current_or_paused_block(connection, schedule)? {
         connection
@@ -795,6 +938,7 @@ pub fn start_emergency_block(
             task_id: None,
             intensity: 5,
             source: Some(BlockSource::Emergency),
+            is_protected: Some(true),
         },
     )?;
 
@@ -820,10 +964,15 @@ pub fn start_emergency_block(
         }),
     );
 
-    Ok(ScheduleActionResult {
-        current_block: get_block_by_id(connection, emergency.id)?,
+    build_schedule_mutation_result(
+        connection,
+        now,
+        None,
+        before,
         warnings,
-    })
+        None,
+        get_block_by_id(connection, emergency.id)?,
+    )
 }
 
 fn finish_current_block(
@@ -879,6 +1028,7 @@ fn finish_current_block_with_rest(
     let now = timestamp_ms();
     let block = current_or_paused_block(connection, schedule)?
         .ok_or_else(|| "no current block to update".to_string())?;
+    let before = load_schedule_snapshot(connection, block.start_time, None)?;
     let old_end = block.end_time;
     let new_end = min(now, old_end);
     let reclaimed_ms = old_end.saturating_sub(new_end);
@@ -938,10 +1088,15 @@ fn finish_current_block_with_rest(
     runtime.last_emitted_block_id = None;
     drop(runtime);
 
-    Ok(ScheduleActionResult {
-        current_block: refresh_schedule_status(connection)?,
+    build_schedule_mutation_result(
+        connection,
+        block.start_time,
+        None,
+        before,
         warnings,
-    })
+        None,
+        refresh_schedule_status(connection)?,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1240,7 +1395,7 @@ fn load_adjustable_horizon_blocks(
         .prepare(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, created_at, updated_at
+                   status, intensity, source, is_protected, created_at, updated_at
             FROM time_blocks
             WHERE start_time >= ?1
               AND start_time < ?2
@@ -1263,7 +1418,7 @@ fn find_local_horizon_end(connection: &Connection, from_time: i64) -> Result<i64
         .prepare(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, created_at, updated_at
+                   status, intensity, source, is_protected, created_at, updated_at
             FROM time_blocks
             WHERE start_time >= ?1
               AND status IN ('scheduled', 'active', 'paused')
@@ -1291,7 +1446,8 @@ fn find_local_horizon_end(connection: &Connection, from_time: i64) -> Result<i64
 }
 
 fn is_immutable_boundary(block: &TimeBlock) -> bool {
-    matches!(block.source, BlockSource::Manual | BlockSource::Emergency)
+    block.is_protected
+        || matches!(block.source, BlockSource::Manual | BlockSource::Emergency)
         || matches!(block.block_type, BlockType::Sleep | BlockType::Meal)
 }
 
@@ -1320,7 +1476,7 @@ fn current_or_overdue_work_block(
         .query_row(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, created_at, updated_at
+                   status, intensity, source, is_protected, created_at, updated_at
             FROM time_blocks
             WHERE status = 'active'
               AND block_type = 'work'
@@ -1461,7 +1617,7 @@ fn current_overdue_prompt(
         .query_row(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, created_at, updated_at
+                   status, intensity, source, is_protected, created_at, updated_at
             FROM time_blocks
             WHERE status = 'active'
               AND block_type = 'work'
@@ -1684,7 +1840,7 @@ fn refresh_schedule_status(connection: &Connection) -> Result<Option<TimeBlock>,
         .query_row(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, created_at, updated_at
+                   status, intensity, source, is_protected, created_at, updated_at
             FROM time_blocks
             WHERE start_time <= ?1
               AND end_time > ?1
@@ -1717,7 +1873,7 @@ fn refresh_schedule_status(connection: &Connection) -> Result<Option<TimeBlock>,
         .query_row(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, created_at, updated_at
+                   status, intensity, source, is_protected, created_at, updated_at
             FROM time_blocks
             WHERE status = 'active'
               AND block_type = 'work'
@@ -1749,7 +1905,7 @@ fn get_block_by_id(connection: &Connection, id: i64) -> Result<Option<TimeBlock>
         .query_row(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, created_at, updated_at
+                   status, intensity, source, is_protected, created_at, updated_at
             FROM time_blocks
             WHERE id = ?1
             "#,
@@ -1758,6 +1914,136 @@ fn get_block_by_id(connection: &Connection, id: i64) -> Result<Option<TimeBlock>
         )
         .optional()
         .map_err(|error| error.to_string())
+}
+
+fn load_schedule_snapshot(
+    connection: &Connection,
+    from: i64,
+    to: Option<i64>,
+) -> Result<Vec<TimeBlock>, String> {
+    let mut query = String::from(
+        r#"
+        SELECT id, title, block_type, start_time, end_time, task_id,
+               status, intensity, source, is_protected, created_at, updated_at
+        FROM time_blocks
+        WHERE end_time > ?1
+        "#,
+    );
+    if to.is_some() {
+        query.push_str(" AND start_time < ?2");
+    }
+    query.push_str(" ORDER BY start_time ASC, id ASC");
+
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|error| error.to_string())?;
+    let rows = match to {
+        Some(to) => statement.query_map(params![from, to], map_time_block),
+        None => statement.query_map(params![from], map_time_block),
+    }
+    .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn build_schedule_mutation_result(
+    connection: &Connection,
+    from: i64,
+    to: Option<i64>,
+    before: Vec<TimeBlock>,
+    warnings: Vec<ScheduleWarning>,
+    pseudo_deadline: Option<i64>,
+    current_block: Option<TimeBlock>,
+) -> Result<ScheduleMutationResult, String> {
+    let blocks = load_schedule_snapshot(connection, from, to)?;
+    let mutations = diff_schedule_blocks(&before, &blocks);
+    Ok(ScheduleMutationResult {
+        current_block,
+        blocks,
+        warnings,
+        pseudo_deadline,
+        mutations,
+    })
+}
+
+fn diff_schedule_blocks(before: &[TimeBlock], after: &[TimeBlock]) -> Vec<ScheduleMutation> {
+    let before_map = before
+        .iter()
+        .cloned()
+        .map(|block| (block.id, block))
+        .collect::<std::collections::HashMap<_, _>>();
+    let after_map = after
+        .iter()
+        .cloned()
+        .map(|block| (block.id, block))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut ids = before_map
+        .keys()
+        .chain(after_map.keys())
+        .copied()
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+
+    let mut mutations = Vec::new();
+    for id in ids {
+        match (before_map.get(&id), after_map.get(&id)) {
+            (None, Some(after_block)) => mutations.push(ScheduleMutation {
+                kind: "block_inserted".to_string(),
+                block_id: Some(id),
+                task_id: after_block.task_id,
+                before: None,
+                after: Some(after_block.clone()),
+            }),
+            (Some(before_block), None) => mutations.push(ScheduleMutation {
+                kind: "block_deleted".to_string(),
+                block_id: Some(id),
+                task_id: before_block.task_id,
+                before: Some(before_block.clone()),
+                after: None,
+            }),
+            (Some(before_block), Some(after_block)) => {
+                if before_block.start_time != after_block.start_time
+                    || before_block.end_time != after_block.end_time
+                {
+                    mutations.push(ScheduleMutation {
+                        kind: "block_timing_changed".to_string(),
+                        block_id: Some(id),
+                        task_id: after_block.task_id.or(before_block.task_id),
+                        before: Some(before_block.clone()),
+                        after: Some(after_block.clone()),
+                    });
+                }
+                if before_block.status != after_block.status {
+                    mutations.push(ScheduleMutation {
+                        kind: "block_status_changed".to_string(),
+                        block_id: Some(id),
+                        task_id: after_block.task_id.or(before_block.task_id),
+                        before: Some(before_block.clone()),
+                        after: Some(after_block.clone()),
+                    });
+                }
+                if before_block.title != after_block.title
+                    || before_block.block_type != after_block.block_type
+                    || before_block.task_id != after_block.task_id
+                    || before_block.source != after_block.source
+                    || before_block.is_protected != after_block.is_protected
+                {
+                    mutations.push(ScheduleMutation {
+                        kind: "block_metadata_changed".to_string(),
+                        block_id: Some(id),
+                        task_id: after_block.task_id.or(before_block.task_id),
+                        before: Some(before_block.clone()),
+                        after: Some(after_block.clone()),
+                    });
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    mutations
 }
 
 fn shift_future_blocks(connection: &Connection, threshold: i64, delta: i64) -> Result<(), String> {
@@ -1791,7 +2077,11 @@ fn load_preserved_intervals(
     Ok(existing
         .into_iter()
         .filter(|block| {
-            !(block.source == BlockSource::Template && block.status == BlockStatus::Scheduled)
+            !matches!(
+                (block.source, block.status, block.is_protected),
+                (BlockSource::Template, BlockStatus::Scheduled, _)
+                    | (BlockSource::Planner, BlockStatus::Scheduled, false)
+            )
         })
         .map(|block| TemplateInterval {
             title: block.title,
@@ -1801,6 +2091,7 @@ fn load_preserved_intervals(
             task_id: block.task_id,
             intensity: block.intensity,
             source: block.source,
+            is_protected: block.is_protected,
         })
         .collect())
 }
@@ -1890,6 +2181,7 @@ fn generate_gap_blocks(
             task_id: None,
             intensity: if next_type == BlockType::Work { 4 } else { 2 },
             source: BlockSource::Template,
+            is_protected: false,
         });
 
         cursor = end_time;
@@ -1970,6 +2262,7 @@ fn build_interval(
         task_id: None,
         intensity,
         source: BlockSource::Template,
+        is_protected: matches!(block_type, BlockType::Sleep | BlockType::Meal),
     }])
 }
 
@@ -2003,7 +2296,8 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
     let mut statement = connection
         .prepare(
             r#"
-            SELECT id, name, priority, estimated_minutes, deadline
+            SELECT id, name, priority, estimated_minutes, deadline,
+                   max_chunk_minutes, work_ratio, rest_ratio, protect_generated_blocks
             FROM tasks
             WHERE estimated_minutes IS NOT NULL
               AND estimated_minutes > 0
@@ -2021,6 +2315,10 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
                 priority: row.get(2)?,
                 deadline: row.get(4)?,
                 estimated_minutes: row.get(3)?,
+                max_chunk_minutes: row.get(5)?,
+                work_ratio: row.get(6)?,
+                rest_ratio: row.get(7)?,
+                protect_generated_blocks: row.get(8)?,
                 required_share: 0.0,
                 section_allocations: vec![],
             })
@@ -2324,10 +2622,10 @@ fn materialize_sections(
     warnings: &mut Vec<ScheduleWarning>,
 ) -> Result<Vec<TemplateInterval>, String> {
     let mut generated = Vec::new();
-    let max_chunk_minutes = i64::from(preferences.work_duration_minutes.max(1));
     let min_break_minutes = i64::from((preferences.break_duration_minutes / 6).max(1));
-    let ratio_work = i64::from(preferences.work_duration_minutes.max(1));
-    let ratio_break = i64::from(preferences.break_duration_minutes);
+    let default_max_chunk_minutes = i64::from(preferences.work_duration_minutes.max(1));
+    let default_ratio_work = i64::from(preferences.work_duration_minutes.max(1));
+    let default_ratio_break = i64::from(preferences.break_duration_minutes);
 
     for (section_index, section) in sections.iter().enumerate() {
         let mut remaining_chunks: Vec<(usize, Vec<i64>)> = tasks
@@ -2341,7 +2639,12 @@ fn materialize_sections(
                     .unwrap_or(0);
                 (allocated > 0).then_some((
                     task_idx,
-                    split_into_equal_chunks(allocated, max_chunk_minutes),
+                    split_into_equal_chunks(
+                        allocated,
+                        task.max_chunk_minutes
+                            .unwrap_or(default_max_chunk_minutes)
+                            .max(1),
+                    ),
                 ))
             })
             .collect();
@@ -2351,7 +2654,15 @@ fn materialize_sections(
         }
 
         let mut preferred_rest_needed = 0_i64;
-        for (_, chunks) in &remaining_chunks {
+        for (task_idx, chunks) in &remaining_chunks {
+            let ratio_work = tasks[*task_idx]
+                .work_ratio
+                .unwrap_or(default_ratio_work)
+                .max(1);
+            let ratio_break = tasks[*task_idx]
+                .rest_ratio
+                .unwrap_or(default_ratio_break)
+                .max(0);
             preferred_rest_needed += chunks
                 .iter()
                 .map(|chunk| preferred_break_minutes(*chunk, ratio_work, ratio_break))
@@ -2386,6 +2697,7 @@ fn materialize_sections(
                     task_id: Some(candidate.task_id),
                     intensity: intensity_for_priority(candidate.priority),
                     source: BlockSource::Planner,
+                    is_protected: tasks[candidate.task_index].protect_generated_blocks,
                 });
                 consume_candidate_chunk(&mut remaining_chunks, candidate.task_index);
                 cursor += duration_ms;
@@ -2402,6 +2714,7 @@ fn materialize_sections(
                         task_id: None,
                         intensity: 1,
                         source: BlockSource::Planner,
+                        is_protected: false,
                     });
                     cursor += min_break_minutes * 60 * 1_000;
                     total_break_built += min_break_minutes;
@@ -2417,6 +2730,7 @@ fn materialize_sections(
                     task_id: None,
                     intensity: 1,
                     source: BlockSource::Planner,
+                    is_protected: false,
                 });
                 total_break_built += (window.end_time - cursor) / 60_000;
             }
@@ -2537,6 +2851,7 @@ fn clear_generated_future_blocks(connection: &Connection, from: i64) -> Result<(
             WHERE start_time >= ?1
               AND status = 'scheduled'
               AND source IN ('template', 'planner')
+              AND is_protected = 0
             "#,
             params![from],
         )
@@ -2559,6 +2874,7 @@ fn persist_generated_blocks(
                 task_id: block.task_id,
                 intensity: block.intensity,
                 source: Some(block.source),
+                is_protected: Some(block.is_protected),
             },
         )?;
     }
@@ -2803,8 +3119,9 @@ fn map_time_block(row: &Row<'_>) -> rusqlite::Result<TimeBlock> {
                 Box::new(std::io::Error::other(error)),
             )
         })?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        is_protected: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
     })
 }
 
@@ -2924,6 +3241,7 @@ mod tests {
                 task_id: None,
                 intensity: 4,
                 source: None,
+                is_protected: None,
             },
         )
         .expect("current block should create");
@@ -2938,6 +3256,7 @@ mod tests {
                 task_id: None,
                 intensity: 2,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("next block should create");
@@ -2952,6 +3271,7 @@ mod tests {
                 task_id: None,
                 intensity: 4,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("follow-up block should create");
@@ -2990,6 +3310,7 @@ mod tests {
                 task_id: None,
                 intensity: 4,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("current block should create");
@@ -3004,6 +3325,7 @@ mod tests {
                 task_id: None,
                 intensity: 1,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("break block should create");
@@ -3018,6 +3340,7 @@ mod tests {
                 task_id: None,
                 intensity: 4,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("next work should create");
@@ -3057,6 +3380,7 @@ mod tests {
                 task_id: None,
                 intensity: 4,
                 source: None,
+                is_protected: None,
             },
         )
         .expect("current block should create");
@@ -3071,6 +3395,7 @@ mod tests {
                 task_id: None,
                 intensity: 1,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("break should create");
@@ -3106,6 +3431,7 @@ mod tests {
                 task_id: None,
                 intensity: 4,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("work block should create");
@@ -3126,6 +3452,7 @@ mod tests {
                 task_id: None,
                 intensity: 1,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("break block should create");
@@ -3154,6 +3481,7 @@ mod tests {
                 task_id: None,
                 intensity: 4,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("current block should create");
@@ -3174,6 +3502,7 @@ mod tests {
                 task_id: None,
                 intensity: 1,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("break should create");
@@ -3188,6 +3517,7 @@ mod tests {
                 task_id: None,
                 intensity: 4,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("next work should create");
@@ -3223,6 +3553,7 @@ mod tests {
                 task_id: None,
                 intensity: 4,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("block should create");
@@ -3242,6 +3573,7 @@ mod tests {
                 task_id: None,
                 intensity: 1,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("break should exist");
@@ -3286,6 +3618,7 @@ mod tests {
                 task_id: None,
                 intensity: 4,
                 source: Some(BlockSource::Planner),
+                is_protected: None,
             },
         )
         .expect("current block should create");

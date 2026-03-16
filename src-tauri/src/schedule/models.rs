@@ -53,6 +53,7 @@ pub struct TimeBlock {
     pub status: BlockStatus,
     pub intensity: u8,
     pub source: BlockSource,
+    pub is_protected: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -66,18 +67,31 @@ pub struct ScheduleWarning {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ScheduleRebuildResult {
-    pub blocks: Vec<TimeBlock>,
-    pub warnings: Vec<ScheduleWarning>,
-    pub pseudo_deadline: i64,
+pub struct ScheduleMutation {
+    pub kind: String,
+    pub block_id: Option<i64>,
+    pub task_id: Option<i64>,
+    #[serde(default)]
+    pub before: Option<TimeBlock>,
+    #[serde(default)]
+    pub after: Option<TimeBlock>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ScheduleActionResult {
+pub struct ScheduleMutationResult {
     pub current_block: Option<TimeBlock>,
+    #[serde(default)]
+    pub blocks: Vec<TimeBlock>,
     pub warnings: Vec<ScheduleWarning>,
+    #[serde(default)]
+    pub pseudo_deadline: Option<i64>,
+    #[serde(default)]
+    pub mutations: Vec<ScheduleMutation>,
 }
+
+pub type ScheduleActionResult = ScheduleMutationResult;
+pub type ScheduleRebuildResult = ScheduleMutationResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +120,8 @@ pub struct NewTimeBlock {
     pub intensity: u8,
     #[serde(default)]
     pub source: Option<BlockSource>,
+    #[serde(default)]
+    pub is_protected: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -119,6 +135,7 @@ pub struct TimeBlockUpdate {
     pub status: Option<BlockStatus>,
     pub intensity: Option<u8>,
     pub source: Option<BlockSource>,
+    pub is_protected: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

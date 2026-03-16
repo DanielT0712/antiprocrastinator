@@ -66,6 +66,45 @@ pub fn run_migrations(connection: &Connection) -> Result<(), rusqlite::Error> {
         }
     }
 
+    if current_version < 5 {
+        for (table, column, sql) in [
+            (
+                "tasks",
+                "max_chunk_minutes",
+                "ALTER TABLE tasks ADD COLUMN max_chunk_minutes INTEGER",
+            ),
+            (
+                "tasks",
+                "work_ratio",
+                "ALTER TABLE tasks ADD COLUMN work_ratio INTEGER",
+            ),
+            (
+                "tasks",
+                "rest_ratio",
+                "ALTER TABLE tasks ADD COLUMN rest_ratio INTEGER",
+            ),
+            (
+                "tasks",
+                "protect_generated_blocks",
+                "ALTER TABLE tasks ADD COLUMN protect_generated_blocks INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "time_blocks",
+                "is_protected",
+                "ALTER TABLE time_blocks ADD COLUMN is_protected INTEGER NOT NULL DEFAULT 0",
+            ),
+        ] {
+            let pragma_query =
+                format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
+            let has_column: i32 =
+                connection.query_row(&pragma_query, [column], |row| row.get(0))?;
+
+            if has_column == 0 {
+                connection.execute(sql, [])?;
+            }
+        }
+    }
+
     if current_version != CURRENT_SCHEMA_VERSION {
         connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     }

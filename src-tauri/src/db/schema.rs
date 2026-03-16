@@ -1,4 +1,4 @@
-pub const CURRENT_SCHEMA_VERSION: i32 = 4;
+pub const CURRENT_SCHEMA_VERSION: i32 = 5;
 
 pub const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS task_groups (
@@ -15,6 +15,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority INTEGER NOT NULL DEFAULT 3 CHECK (priority BETWEEN 1 AND 5),
     estimated_minutes INTEGER,
     deadline INTEGER,
+    max_chunk_minutes INTEGER,
+    work_ratio INTEGER,
+    rest_ratio INTEGER,
+    protect_generated_blocks INTEGER NOT NULL DEFAULT 0,
     average_priority REAL NOT NULL DEFAULT 3.0,
     average_actual_minutes REAL,
     completion_count INTEGER NOT NULL DEFAULT 0,
@@ -33,6 +37,7 @@ CREATE TABLE IF NOT EXISTS time_blocks (
     status TEXT NOT NULL DEFAULT 'scheduled',
     intensity INTEGER NOT NULL DEFAULT 3 CHECK (intensity BETWEEN 1 AND 5),
     source TEXT NOT NULL DEFAULT 'manual',
+    is_protected INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL

@@ -15,9 +15,11 @@
 - [x] Added focused-window detection and browser-specific enforcement that targets the active browser tab/window title before killing the whole browser
 - [x] Added browser title allow/block keyword preferences with cleaned focused-title matching so browser enforcement can key off words like `github` or `youtube`
 - [x] Added known-app confirmation/edit APIs with category overrides and optional syncing into default process rules
+- [x] Added minimal per-task planning metadata for max chunk length, per-task work/rest ratios, and protected planner-generated blocks
+- [x] Unified schedule-changing command results around a shared mutation/diff payload with block-level semantic changes
 
 # Next Backend Tasks
 
-- [ ] Add explicit task planning metadata such as per-task max block length, work/rest ratio, and protected/manual pin state
-- [ ] Finish moving all runtime schedule mutations onto the same planner diff model, including richer warnings/events and per-task overrides
-- [ ] Hook schedule/process actions into analytics event recording
+- [ ] Expand per-task planning metadata beyond the current stub so chunking/grouping policies can influence ordering and local-improvement passes
+- [ ] Enrich the unified mutation model with reason codes, persisted schedule-mutation history, and tighter analytics queries on planner/runtime changes
+- [ ] Add explicit block-level pin/edit workflows on top of the new protection flag so manual and planner-generated pins can be managed separately

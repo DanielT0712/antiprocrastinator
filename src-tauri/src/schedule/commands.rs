@@ -42,9 +42,9 @@ pub fn get_schedule_range(
 pub fn add_time_block(
     block: NewTimeBlock,
     database: State<'_, DatabaseState>,
-) -> Result<TimeBlock, String> {
+) -> Result<ScheduleActionResult, String> {
     let connection = database.connection()?;
-    engine::add_time_block(&connection, block)
+    engine::add_time_block_with_mutation(&connection, block)
 }
 
 #[tauri::command]
@@ -52,15 +52,18 @@ pub fn update_time_block(
     id: i64,
     updates: TimeBlockUpdate,
     database: State<'_, DatabaseState>,
-) -> Result<TimeBlock, String> {
+) -> Result<ScheduleActionResult, String> {
     let connection = database.connection()?;
-    engine::update_time_block(&connection, id, updates)
+    engine::update_time_block_with_mutation(&connection, id, updates)
 }
 
 #[tauri::command]
-pub fn delete_time_block(id: i64, database: State<'_, DatabaseState>) -> Result<(), String> {
+pub fn delete_time_block(
+    id: i64,
+    database: State<'_, DatabaseState>,
+) -> Result<ScheduleActionResult, String> {
     let connection = database.connection()?;
-    engine::delete_time_block(&connection, id)
+    engine::delete_time_block_with_mutation(&connection, id)
 }
 
 #[tauri::command]
@@ -69,9 +72,9 @@ pub fn apply_weekly_template(
     from: i64,
     to: i64,
     database: State<'_, DatabaseState>,
-) -> Result<Vec<TimeBlock>, String> {
+) -> Result<ScheduleActionResult, String> {
     let connection = database.connection()?;
-    engine::apply_weekly_template(&connection, template, from, to)
+    engine::apply_weekly_template_with_mutation(&connection, template, from, to)
 }
 
 #[tauri::command]
@@ -106,7 +109,7 @@ pub fn complete_current_block(
 pub fn skip_current_block(
     database: State<'_, DatabaseState>,
     schedule: State<'_, engine::ScheduleState>,
-) -> Result<Option<TimeBlock>, String> {
+) -> Result<ScheduleActionResult, String> {
     let connection = database.connection()?;
     engine::skip_current_block(&connection, &schedule)
 }
