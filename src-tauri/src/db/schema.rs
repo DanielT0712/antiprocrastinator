@@ -1,4 +1,4 @@
-pub const CURRENT_SCHEMA_VERSION: i32 = 5;
+pub const CURRENT_SCHEMA_VERSION: i32 = 6;
 
 pub const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS task_groups (
@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     estimated_minutes INTEGER,
     deadline INTEGER,
     max_chunk_minutes INTEGER,
+    min_chunk_minutes INTEGER,
+    minimum_rest_minutes INTEGER,
     work_ratio INTEGER,
     rest_ratio INTEGER,
     protect_generated_blocks INTEGER NOT NULL DEFAULT 0,

@@ -17,9 +17,10 @@
 - [x] Added known-app confirmation/edit APIs with category overrides and optional syncing into default process rules
 - [x] Added minimal per-task planning metadata for max chunk length, per-task work/rest ratios, and protected planner-generated blocks
 - [x] Unified schedule-changing command results around a shared mutation/diff payload with block-level semantic changes
+- [x] Added section-level clustering preferences for task grouping/separation, chunk grouping/separation, optional priority inversions, and optional dead-gap filling
 
 # Next Backend Tasks
 
-- [ ] Expand per-task planning metadata beyond the current stub so chunking/grouping policies can influence ordering and local-improvement passes
+- [ ] Expand per-task planning metadata and chunking behavior beyond the current section-clustering pass with learned or task-specific refinement
 - [ ] Enrich the unified mutation model with reason codes, persisted schedule-mutation history, and tighter analytics queries on planner/runtime changes
 - [ ] Add explicit block-level pin/edit workflows on top of the new protection flag so manual and planner-generated pins can be managed separately

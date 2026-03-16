@@ -11,7 +11,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
     analytics::{models::AnalyticsEvent, tracker},
-    config::models::UserPreferences,
+    config::models::{TaskChunkClusteringMode, TaskGroupClusteringMode, UserPreferences},
     db::DatabaseState,
 };
 
@@ -74,10 +74,13 @@ struct TemplateInterval {
 struct PlannerTask {
     task_id: i64,
     title: String,
+    group_id: Option<i64>,
     priority: i64,
     deadline: Option<i64>,
     estimated_minutes: i64,
     max_chunk_minutes: Option<i64>,
+    min_chunk_minutes: Option<i64>,
+    minimum_rest_minutes: Option<i64>,
     work_ratio: Option<i64>,
     rest_ratio: Option<i64>,
     protect_generated_blocks: bool,
@@ -2296,8 +2299,9 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
     let mut statement = connection
         .prepare(
             r#"
-            SELECT id, name, priority, estimated_minutes, deadline,
-                   max_chunk_minutes, work_ratio, rest_ratio, protect_generated_blocks
+            SELECT id, name, group_id, priority, estimated_minutes, deadline,
+                   max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                   work_ratio, rest_ratio, protect_generated_blocks
             FROM tasks
             WHERE estimated_minutes IS NOT NULL
               AND estimated_minutes > 0
@@ -2312,13 +2316,16 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
             Ok(PlannerTask {
                 task_id: row.get(0)?,
                 title: row.get(1)?,
-                priority: row.get(2)?,
-                deadline: row.get(4)?,
-                estimated_minutes: row.get(3)?,
-                max_chunk_minutes: row.get(5)?,
-                work_ratio: row.get(6)?,
-                rest_ratio: row.get(7)?,
-                protect_generated_blocks: row.get(8)?,
+                group_id: row.get(2)?,
+                priority: row.get(3)?,
+                estimated_minutes: row.get(4)?,
+                deadline: row.get(5)?,
+                max_chunk_minutes: row.get(6)?,
+                min_chunk_minutes: row.get(7)?,
+                minimum_rest_minutes: row.get(8)?,
+                work_ratio: row.get(9)?,
+                rest_ratio: row.get(10)?,
+                protect_generated_blocks: row.get(11)?,
                 required_share: 0.0,
                 section_allocations: vec![],
             })
@@ -2622,7 +2629,7 @@ fn materialize_sections(
     warnings: &mut Vec<ScheduleWarning>,
 ) -> Result<Vec<TemplateInterval>, String> {
     let mut generated = Vec::new();
-    let min_break_minutes = i64::from((preferences.break_duration_minutes / 6).max(1));
+    let global_min_break_minutes = i64::from(preferences.minimum_rest_minutes.max(1));
     let default_max_chunk_minutes = i64::from(preferences.work_duration_minutes.max(1));
     let default_ratio_work = i64::from(preferences.work_duration_minutes.max(1));
     let default_ratio_break = i64::from(preferences.break_duration_minutes);
@@ -2639,11 +2646,12 @@ fn materialize_sections(
                     .unwrap_or(0);
                 (allocated > 0).then_some((
                     task_idx,
-                    split_into_equal_chunks(
+                    split_into_preferred_chunks(
                         allocated,
                         task.max_chunk_minutes
                             .unwrap_or(default_max_chunk_minutes)
                             .max(1),
+                        task.min_chunk_minutes.unwrap_or(1).max(1),
                     ),
                 ))
             })
@@ -2651,6 +2659,19 @@ fn materialize_sections(
 
         if remaining_chunks.is_empty() {
             continue;
+        }
+
+        if remaining_chunks.iter().any(|(task_idx, chunks)| {
+            let min_chunk_minutes = tasks[*task_idx].min_chunk_minutes.unwrap_or(1).max(1);
+            chunks.iter().any(|chunk| *chunk < min_chunk_minutes)
+        }) {
+            warnings.push(ScheduleWarning {
+                kind: "relaxed_min_chunk".to_string(),
+                message: format!(
+                    "Section ending at {} could not satisfy every task's minimum chunk size while still respecting max chunk limits.",
+                    section.end_time
+                ),
+            });
         }
 
         let mut preferred_rest_needed = 0_i64;
@@ -2669,23 +2690,39 @@ fn materialize_sections(
                 .sum::<i64>();
         }
 
+        let ordered_task_indices =
+            build_section_task_order(tasks, &remaining_chunks, section_index, preferences);
+        let chunk_queue = build_chunk_queue(
+            &remaining_chunks,
+            &ordered_task_indices,
+            preferences.task_chunk_clustering,
+        );
+        let mut chunk_cursor = 0_usize;
         let mut total_break_built = 0_i64;
         for window in &section.windows {
             let mut cursor = window.start_time;
 
             while cursor < window.end_time {
-                let next = find_next_main_candidate(tasks, &remaining_chunks);
                 let gap_minutes = (window.end_time - cursor) / 60_000;
                 if gap_minutes <= 0 {
                     break;
                 }
 
+                let next = find_next_planned_candidate(
+                    tasks,
+                    &remaining_chunks,
+                    &chunk_queue,
+                    &mut chunk_cursor,
+                );
                 let candidate = match next {
                     Some(candidate) if candidate.duration_minutes <= gap_minutes => candidate,
-                    _ => match find_fit_candidate(tasks, &remaining_chunks, gap_minutes) {
-                        Some(candidate) => candidate,
-                        None => break,
-                    },
+                    _ if preferences.fill_dead_gaps => {
+                        match find_fit_candidate(tasks, &remaining_chunks, gap_minutes) {
+                            Some(candidate) => candidate,
+                            None => break,
+                        }
+                    }
+                    _ => break,
                 };
 
                 let duration_ms = candidate.duration_minutes * 60 * 1_000;
@@ -2705,6 +2742,10 @@ fn materialize_sections(
                 let has_more_chunks = remaining_chunks
                     .iter()
                     .any(|(_, chunks)| !chunks.is_empty());
+                let min_break_minutes = tasks[candidate.task_index]
+                    .minimum_rest_minutes
+                    .unwrap_or(global_min_break_minutes)
+                    .max(global_min_break_minutes);
                 if has_more_chunks && cursor + min_break_minutes * 60 * 1_000 <= window.end_time {
                     generated.push(TemplateInterval {
                         title: BlockType::Break.default_title().to_string(),
@@ -2761,17 +2802,19 @@ fn materialize_sections(
     Ok(generated)
 }
 
-fn find_next_main_candidate(
+fn build_section_task_order(
     tasks: &[PlannerTask],
     remaining_chunks: &[(usize, Vec<i64>)],
-) -> Option<ChunkCandidate> {
-    let mut indices: Vec<usize> = remaining_chunks
+    section_index: usize,
+    preferences: &UserPreferences,
+) -> Vec<usize> {
+    let mut base_order: Vec<usize> = remaining_chunks
         .iter()
         .filter(|(_, chunks)| !chunks.is_empty())
         .map(|(task_idx, _)| *task_idx)
         .collect();
 
-    indices.sort_by(|left, right| {
+    base_order.sort_by(|left, right| {
         tasks[*right]
             .priority
             .cmp(&tasks[*left].priority)
@@ -2784,23 +2827,221 @@ fn find_next_main_candidate(
             .then_with(|| tasks[*left].title.cmp(&tasks[*right].title))
     });
 
-    indices.into_iter().find_map(|task_idx| {
-        remaining_chunks
+    match preferences.task_group_clustering {
+        TaskGroupClusteringMode::Priority => base_order,
+        TaskGroupClusteringMode::GroupSameGroupTasks => {
+            group_same_group_tasks(tasks, remaining_chunks, section_index, &base_order)
+        }
+        TaskGroupClusteringMode::SeparateSameGroupTasks => separate_same_group_tasks(
+            tasks,
+            &base_order,
+            preferences.clustering_allows_priority_inversions,
+        ),
+    }
+}
+
+fn group_same_group_tasks(
+    tasks: &[PlannerTask],
+    _remaining_chunks: &[(usize, Vec<i64>)],
+    section_index: usize,
+    base_order: &[usize],
+) -> Vec<usize> {
+    #[derive(Clone)]
+    struct TaskCluster {
+        task_indices: Vec<usize>,
+        weighted_priority: f64,
+        first_position: usize,
+    }
+
+    let mut clusters: Vec<TaskCluster> = Vec::new();
+    for (position, &task_idx) in base_order.iter().enumerate() {
+        let Some(group_id) = tasks[task_idx].group_id else {
+            let allocated_minutes = tasks[task_idx]
+                .section_allocations
+                .get(section_index)
+                .copied()
+                .unwrap_or(0)
+                .max(1);
+            clusters.push(TaskCluster {
+                task_indices: vec![task_idx],
+                weighted_priority: tasks[task_idx].priority as f64 * allocated_minutes as f64,
+                first_position: position,
+            });
+            continue;
+        };
+
+        let allocated_minutes = tasks[task_idx]
+            .section_allocations
+            .get(section_index)
+            .copied()
+            .unwrap_or(0)
+            .max(1);
+        if let Some(cluster) = clusters.iter_mut().find(|cluster| {
+            cluster
+                .task_indices
+                .first()
+                .and_then(|first| tasks[*first].group_id)
+                == Some(group_id)
+        }) {
+            cluster.task_indices.push(task_idx);
+            cluster.weighted_priority += tasks[task_idx].priority as f64 * allocated_minutes as f64;
+        } else {
+            clusters.push(TaskCluster {
+                task_indices: vec![task_idx],
+                weighted_priority: tasks[task_idx].priority as f64 * allocated_minutes as f64,
+                first_position: position,
+            });
+        }
+    }
+
+    clusters.sort_by(|left, right| {
+        let left_duration = left
+            .task_indices
             .iter()
-            .find(|(idx, chunks)| *idx == task_idx && !chunks.is_empty())
-            .and_then(|(_, chunks)| {
-                chunks
-                    .first()
+            .map(|task_idx| {
+                tasks[*task_idx]
+                    .section_allocations
+                    .get(section_index)
                     .copied()
-                    .map(|duration_minutes| ChunkCandidate {
-                        task_index: task_idx,
-                        task_id: tasks[task_idx].task_id,
-                        title: tasks[task_idx].title.clone(),
-                        priority: tasks[task_idx].priority,
-                        duration_minutes,
-                    })
+                    .unwrap_or(0)
+                    .max(1)
             })
-    })
+            .sum::<i64>() as f64;
+        let right_duration = right
+            .task_indices
+            .iter()
+            .map(|task_idx| {
+                tasks[*task_idx]
+                    .section_allocations
+                    .get(section_index)
+                    .copied()
+                    .unwrap_or(0)
+                    .max(1)
+            })
+            .sum::<i64>() as f64;
+        (right.weighted_priority / right_duration)
+            .partial_cmp(&(left.weighted_priority / left_duration))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.first_position.cmp(&right.first_position))
+    });
+
+    clusters
+        .into_iter()
+        .flat_map(|cluster| cluster.task_indices)
+        .collect()
+}
+
+fn separate_same_group_tasks(
+    tasks: &[PlannerTask],
+    base_order: &[usize],
+    allow_priority_inversions: bool,
+) -> Vec<usize> {
+    let mut remaining = base_order.to_vec();
+    let mut ordered = Vec::with_capacity(base_order.len());
+
+    while !remaining.is_empty() {
+        let next = remaining.remove(0);
+        let Some(previous) = ordered.last().copied() else {
+            ordered.push(next);
+            continue;
+        };
+
+        if !shares_group(tasks, previous, next) {
+            ordered.push(next);
+            continue;
+        }
+
+        let replacement = remaining.iter().position(|candidate| {
+            !shares_group(tasks, previous, *candidate)
+                && (allow_priority_inversions || tasks[*candidate].priority == tasks[next].priority)
+        });
+
+        if let Some(replacement) = replacement {
+            let selected = remaining.remove(replacement);
+            ordered.push(selected);
+            remaining.insert(0, next);
+        } else {
+            ordered.push(next);
+        }
+    }
+
+    ordered
+}
+
+fn shares_group(tasks: &[PlannerTask], left: usize, right: usize) -> bool {
+    tasks[left].group_id.is_some() && tasks[left].group_id == tasks[right].group_id
+}
+
+fn build_chunk_queue(
+    remaining_chunks: &[(usize, Vec<i64>)],
+    ordered_task_indices: &[usize],
+    chunk_mode: TaskChunkClusteringMode,
+) -> Vec<usize> {
+    match chunk_mode {
+        TaskChunkClusteringMode::GroupSameTaskChunks => ordered_task_indices
+            .iter()
+            .flat_map(|task_idx| {
+                let count = remaining_chunks
+                    .iter()
+                    .find(|(idx, _)| idx == task_idx)
+                    .map(|(_, chunks)| chunks.len())
+                    .unwrap_or(0);
+                std::iter::repeat_n(*task_idx, count)
+            })
+            .collect(),
+        TaskChunkClusteringMode::SeparateSameTaskChunks => {
+            let chunk_counts = ordered_task_indices
+                .iter()
+                .map(|task_idx| {
+                    remaining_chunks
+                        .iter()
+                        .find(|(idx, _)| idx == task_idx)
+                        .map(|(_, chunks)| chunks.len())
+                        .unwrap_or(0)
+                })
+                .collect::<Vec<_>>();
+            let max_rounds = chunk_counts.iter().copied().max().unwrap_or(0);
+            let mut queue = Vec::new();
+            for round in 0..max_rounds {
+                for (position, task_idx) in ordered_task_indices.iter().enumerate() {
+                    if chunk_counts[position] > round {
+                        queue.push(*task_idx);
+                    }
+                }
+            }
+            queue
+        }
+    }
+}
+
+fn find_next_planned_candidate(
+    tasks: &[PlannerTask],
+    remaining_chunks: &[(usize, Vec<i64>)],
+    chunk_queue: &[usize],
+    chunk_cursor: &mut usize,
+) -> Option<ChunkCandidate> {
+    while *chunk_cursor < chunk_queue.len() {
+        let task_idx = chunk_queue[*chunk_cursor];
+        *chunk_cursor += 1;
+        if let Some(duration_minutes) = next_chunk_duration(remaining_chunks, task_idx) {
+            return Some(ChunkCandidate {
+                task_index: task_idx,
+                task_id: tasks[task_idx].task_id,
+                title: tasks[task_idx].title.clone(),
+                priority: tasks[task_idx].priority,
+                duration_minutes,
+            });
+        }
+    }
+
+    None
+}
+
+fn next_chunk_duration(remaining_chunks: &[(usize, Vec<i64>)], task_index: usize) -> Option<i64> {
+    remaining_chunks
+        .iter()
+        .find(|(idx, chunks)| *idx == task_index && !chunks.is_empty())
+        .and_then(|(_, chunks)| chunks.first().copied())
 }
 
 fn find_fit_candidate(
@@ -2909,16 +3150,26 @@ fn invert_intervals_to_windows(
     windows
 }
 
-fn split_into_equal_chunks(total_minutes: i64, max_chunk_minutes: i64) -> Vec<i64> {
+fn split_into_preferred_chunks(
+    total_minutes: i64,
+    max_chunk_minutes: i64,
+    min_chunk_minutes: i64,
+) -> Vec<i64> {
     if total_minutes <= 0 {
         return vec![];
     }
     let chunk_count = ((total_minutes as f64) / max_chunk_minutes as f64).ceil() as i64;
     let base = total_minutes / chunk_count;
     let remainder = total_minutes % chunk_count;
-    (0..chunk_count)
+    let chunks = (0..chunk_count)
         .map(|idx| base + if idx < remainder { 1 } else { 0 })
-        .collect()
+        .collect::<Vec<_>>();
+
+    if chunks.iter().all(|chunk| *chunk >= min_chunk_minutes) {
+        chunks
+    } else {
+        chunks
+    }
 }
 
 fn preferred_break_minutes(chunk_minutes: i64, ratio_work: i64, ratio_break: i64) -> i64 {

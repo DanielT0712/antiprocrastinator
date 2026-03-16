@@ -105,6 +105,26 @@ pub fn run_migrations(connection: &Connection) -> Result<(), rusqlite::Error> {
         }
     }
 
+    if current_version < 6 {
+        for (column, sql) in [
+            (
+                "min_chunk_minutes",
+                "ALTER TABLE tasks ADD COLUMN min_chunk_minutes INTEGER",
+            ),
+            (
+                "minimum_rest_minutes",
+                "ALTER TABLE tasks ADD COLUMN minimum_rest_minutes INTEGER",
+            ),
+        ] {
+            let pragma_query = "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = ?1";
+            let has_column: i32 = connection.query_row(pragma_query, [column], |row| row.get(0))?;
+
+            if has_column == 0 {
+                connection.execute(sql, [])?;
+            }
+        }
+    }
+
     if current_version != CURRENT_SCHEMA_VERSION {
         connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     }

@@ -1,5 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskGroupClusteringMode {
+    Priority,
+    GroupSameGroupTasks,
+    SeparateSameGroupTasks,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskChunkClusteringMode {
+    GroupSameTaskChunks,
+    SeparateSameTaskChunks,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UserPreferences {
@@ -19,6 +34,10 @@ pub struct UserPreferences {
     pub emergency_allowed_apps: Vec<String>,
     pub browser_title_allow_keywords: Vec<String>,
     pub browser_title_block_keywords: Vec<String>,
+    pub task_group_clustering: TaskGroupClusteringMode,
+    pub task_chunk_clustering: TaskChunkClusteringMode,
+    pub clustering_allows_priority_inversions: bool,
+    pub fill_dead_gaps: bool,
 }
 
 impl Default for UserPreferences {
@@ -40,6 +59,10 @@ impl Default for UserPreferences {
             emergency_allowed_apps: vec![],
             browser_title_allow_keywords: vec![],
             browser_title_block_keywords: vec![],
+            task_group_clustering: TaskGroupClusteringMode::Priority,
+            task_chunk_clustering: TaskChunkClusteringMode::GroupSameTaskChunks,
+            clustering_allows_priority_inversions: true,
+            fill_dead_gaps: true,
         }
     }
 }

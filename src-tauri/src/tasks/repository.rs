@@ -13,7 +13,8 @@ pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<
             .prepare(
                 r#"
                 SELECT id, name, group_id, priority, estimated_minutes, deadline,
-                       max_chunk_minutes, work_ratio, rest_ratio, protect_generated_blocks,
+                       max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                       work_ratio, rest_ratio, protect_generated_blocks,
                        average_priority, average_actual_minutes, completion_count,
                        created_at, updated_at
                 FROM tasks
@@ -26,7 +27,8 @@ pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<
             .prepare(
                 r#"
                 SELECT id, name, group_id, priority, estimated_minutes, deadline,
-                       max_chunk_minutes, work_ratio, rest_ratio, protect_generated_blocks,
+                       max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                       work_ratio, rest_ratio, protect_generated_blocks,
                        average_priority, average_actual_minutes, completion_count,
                        created_at, updated_at
                 FROM tasks
@@ -39,7 +41,8 @@ pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<
             .prepare(
                 r#"
                 SELECT id, name, group_id, priority, estimated_minutes, deadline,
-                       max_chunk_minutes, work_ratio, rest_ratio, protect_generated_blocks,
+                       max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                       work_ratio, rest_ratio, protect_generated_blocks,
                        average_priority, average_actual_minutes, completion_count,
                        created_at, updated_at
                 FROM tasks
@@ -52,7 +55,8 @@ pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<
             .prepare(
                 r#"
                 SELECT id, name, group_id, priority, estimated_minutes, deadline,
-                       max_chunk_minutes, work_ratio, rest_ratio, protect_generated_blocks,
+                       max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                       work_ratio, rest_ratio, protect_generated_blocks,
                        average_priority, average_actual_minutes, completion_count,
                        created_at, updated_at
                 FROM tasks
@@ -81,7 +85,8 @@ pub fn search_tasks(connection: &Connection, query: &str) -> Result<Vec<Task>, S
         .prepare(
             r#"
             SELECT id, name, group_id, priority, estimated_minutes, deadline,
-                   max_chunk_minutes, work_ratio, rest_ratio, protect_generated_blocks,
+                   max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                   work_ratio, rest_ratio, protect_generated_blocks,
                    average_priority, average_actual_minutes, completion_count,
                    created_at, updated_at
             FROM tasks
@@ -106,6 +111,9 @@ pub fn create_task(connection: &Connection, new_task: NewTask) -> Result<Task, S
     let priority = validate_priority(new_task.priority.unwrap_or(3))?;
     validate_minutes(new_task.estimated_minutes)?;
     validate_chunk_minutes(new_task.max_chunk_minutes)?;
+    validate_chunk_minutes(new_task.min_chunk_minutes)?;
+    validate_min_chunk_pair(new_task.min_chunk_minutes, new_task.max_chunk_minutes)?;
+    validate_minimum_rest_minutes(new_task.minimum_rest_minutes)?;
     validate_ratio_pair(new_task.work_ratio, new_task.rest_ratio)?;
 
     let now = timestamp_ms();
@@ -114,10 +122,11 @@ pub fn create_task(connection: &Connection, new_task: NewTask) -> Result<Task, S
             r#"
             INSERT INTO tasks (
                 name, group_id, priority, estimated_minutes, deadline,
-                max_chunk_minutes, work_ratio, rest_ratio, protect_generated_blocks,
+                max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                work_ratio, rest_ratio, protect_generated_blocks,
                 average_priority, average_actual_minutes, completion_count,
                 created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             "#,
             params![
                 name,
@@ -126,6 +135,8 @@ pub fn create_task(connection: &Connection, new_task: NewTask) -> Result<Task, S
                 new_task.estimated_minutes,
                 new_task.deadline,
                 new_task.max_chunk_minutes,
+                new_task.min_chunk_minutes,
+                new_task.minimum_rest_minutes,
                 new_task.work_ratio,
                 new_task.rest_ratio,
                 new_task.protect_generated_blocks.unwrap_or(false),
@@ -156,6 +167,12 @@ pub fn update_task(connection: &Connection, id: i64, updates: TaskUpdate) -> Res
     let max_chunk_minutes = updates
         .max_chunk_minutes
         .unwrap_or(existing.max_chunk_minutes);
+    let min_chunk_minutes = updates
+        .min_chunk_minutes
+        .unwrap_or(existing.min_chunk_minutes);
+    let minimum_rest_minutes = updates
+        .minimum_rest_minutes
+        .unwrap_or(existing.minimum_rest_minutes);
     let work_ratio = updates.work_ratio.unwrap_or(existing.work_ratio);
     let rest_ratio = updates.rest_ratio.unwrap_or(existing.rest_ratio);
     let protect_generated_blocks = updates
@@ -179,6 +196,9 @@ pub fn update_task(connection: &Connection, id: i64, updates: TaskUpdate) -> Res
 
     validate_minutes(estimated_minutes)?;
     validate_chunk_minutes(max_chunk_minutes)?;
+    validate_chunk_minutes(min_chunk_minutes)?;
+    validate_min_chunk_pair(min_chunk_minutes, max_chunk_minutes)?;
+    validate_minimum_rest_minutes(minimum_rest_minutes)?;
     validate_ratio_pair(work_ratio, rest_ratio)?;
 
     connection
@@ -191,14 +211,16 @@ pub fn update_task(connection: &Connection, id: i64, updates: TaskUpdate) -> Res
                 estimated_minutes = ?4,
                 deadline = ?5,
                 max_chunk_minutes = ?6,
-                work_ratio = ?7,
-                rest_ratio = ?8,
-                protect_generated_blocks = ?9,
-                average_priority = ?10,
-                average_actual_minutes = ?11,
-                completion_count = ?12,
-                updated_at = ?13
-            WHERE id = ?14
+                min_chunk_minutes = ?7,
+                minimum_rest_minutes = ?8,
+                work_ratio = ?9,
+                rest_ratio = ?10,
+                protect_generated_blocks = ?11,
+                average_priority = ?12,
+                average_actual_minutes = ?13,
+                completion_count = ?14,
+                updated_at = ?15
+            WHERE id = ?16
             "#,
             params![
                 name,
@@ -207,6 +229,8 @@ pub fn update_task(connection: &Connection, id: i64, updates: TaskUpdate) -> Res
                 estimated_minutes,
                 deadline,
                 max_chunk_minutes,
+                min_chunk_minutes,
+                minimum_rest_minutes,
                 work_ratio,
                 rest_ratio,
                 protect_generated_blocks,
@@ -287,7 +311,8 @@ fn get_task_by_id(connection: &Connection, id: i64) -> Result<Task, String> {
         .query_row(
             r#"
             SELECT id, name, group_id, priority, estimated_minutes, deadline,
-                   max_chunk_minutes, work_ratio, rest_ratio, protect_generated_blocks,
+                   max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                   work_ratio, rest_ratio, protect_generated_blocks,
                    average_priority, average_actual_minutes, completion_count,
                    created_at, updated_at
             FROM tasks
@@ -318,14 +343,16 @@ fn map_task(row: &Row<'_>) -> rusqlite::Result<Task> {
         estimated_minutes: row.get(4)?,
         deadline: row.get(5)?,
         max_chunk_minutes: row.get(6)?,
-        work_ratio: row.get(7)?,
-        rest_ratio: row.get(8)?,
-        protect_generated_blocks: row.get(9)?,
-        average_priority: row.get(10)?,
-        average_actual_minutes: row.get(11)?,
-        completion_count: row.get(12)?,
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
+        min_chunk_minutes: row.get(7)?,
+        minimum_rest_minutes: row.get(8)?,
+        work_ratio: row.get(9)?,
+        rest_ratio: row.get(10)?,
+        protect_generated_blocks: row.get(11)?,
+        average_priority: row.get(12)?,
+        average_actual_minutes: row.get(13)?,
+        completion_count: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
     })
 }
 
@@ -384,6 +411,16 @@ fn validate_chunk_minutes(value: Option<i64>) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_minimum_rest_minutes(value: Option<i64>) -> Result<(), String> {
+    if let Some(minutes) = value {
+        if minutes <= 0 {
+            return Err("minimumRestMinutes must be greater than 0".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_ratio_pair(work_ratio: Option<i64>, rest_ratio: Option<i64>) -> Result<(), String> {
     if let Some(work_ratio) = work_ratio {
         if work_ratio <= 0 {
@@ -393,6 +430,21 @@ fn validate_ratio_pair(work_ratio: Option<i64>, rest_ratio: Option<i64>) -> Resu
     if let Some(rest_ratio) = rest_ratio {
         if rest_ratio < 0 {
             return Err("restRatio cannot be negative".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_min_chunk_pair(
+    min_chunk_minutes: Option<i64>,
+    max_chunk_minutes: Option<i64>,
+) -> Result<(), String> {
+    if let (Some(min_chunk_minutes), Some(max_chunk_minutes)) =
+        (min_chunk_minutes, max_chunk_minutes)
+    {
+        if min_chunk_minutes > max_chunk_minutes {
+            return Err("minChunkMinutes cannot be greater than maxChunkMinutes".to_string());
         }
     }
 
@@ -465,6 +517,8 @@ mod tests {
                 estimated_minutes: Some(45),
                 deadline: None,
                 max_chunk_minutes: None,
+                min_chunk_minutes: None,
+                minimum_rest_minutes: None,
                 work_ratio: None,
                 rest_ratio: None,
                 protect_generated_blocks: None,
@@ -504,6 +558,8 @@ mod tests {
                 estimated_minutes: None,
                 deadline: None,
                 max_chunk_minutes: None,
+                min_chunk_minutes: None,
+                minimum_rest_minutes: None,
                 work_ratio: None,
                 rest_ratio: None,
                 protect_generated_blocks: None,

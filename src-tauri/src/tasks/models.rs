@@ -19,6 +19,8 @@ pub struct Task {
     pub estimated_minutes: Option<i64>,
     pub deadline: Option<i64>,
     pub max_chunk_minutes: Option<i64>,
+    pub min_chunk_minutes: Option<i64>,
+    pub minimum_rest_minutes: Option<i64>,
     pub work_ratio: Option<i64>,
     pub rest_ratio: Option<i64>,
     pub protect_generated_blocks: bool,
@@ -51,6 +53,10 @@ pub struct NewTask {
     #[serde(default)]
     pub max_chunk_minutes: Option<i64>,
     #[serde(default)]
+    pub min_chunk_minutes: Option<i64>,
+    #[serde(default)]
+    pub minimum_rest_minutes: Option<i64>,
+    #[serde(default)]
     pub work_ratio: Option<i64>,
     #[serde(default)]
     pub rest_ratio: Option<i64>,
@@ -67,6 +73,8 @@ pub struct TaskUpdate {
     pub estimated_minutes: Option<Option<i64>>,
     pub deadline: Option<Option<i64>>,
     pub max_chunk_minutes: Option<Option<i64>>,
+    pub min_chunk_minutes: Option<Option<i64>>,
+    pub minimum_rest_minutes: Option<Option<i64>>,
     pub work_ratio: Option<Option<i64>>,
     pub rest_ratio: Option<Option<i64>>,
     pub protect_generated_blocks: Option<bool>,
