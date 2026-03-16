@@ -42,6 +42,14 @@ pub struct ProcessInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FocusedWindowInfo {
+    pub process_name: Option<String>,
+    pub pid: Option<u32>,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KnownApp {
     pub app_key: String,
     pub display_name: String,
@@ -63,6 +71,8 @@ pub struct KnownApp {
 pub struct ProcessWarning {
     pub process_name: String,
     pub seconds_until_kill: u32,
+    #[serde(default)]
+    pub window_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +91,7 @@ pub struct BlockedProcessLogEntry {
 pub struct EnforcementStatus {
     pub last_scan_at: Option<i64>,
     pub active_block_type: Option<BlockType>,
+    pub focused_window: Option<FocusedWindowInfo>,
     pub warnings: Vec<ProcessWarning>,
     pub last_killed_processes: Vec<String>,
 }
@@ -90,6 +101,7 @@ impl Default for EnforcementStatus {
         Self {
             last_scan_at: None,
             active_block_type: None,
+            focused_window: None,
             warnings: vec![],
             last_killed_processes: vec![],
         }

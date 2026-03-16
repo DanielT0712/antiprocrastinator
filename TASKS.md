@@ -12,6 +12,7 @@
 - [x] Added overdue work-block prompting plus explicit continue mode that consumes rest buffers until the user marks done or the next work block takes over
 - [x] Routed passive overdue blocks through rest permissions and recorded schedule prompt/continue/handoff actions in analytics events
 - [x] Added a persistent known-app inventory with installed-app scans, live running-process discovery, and unclassified-app detection events
+- [x] Added focused-window detection and browser-specific enforcement that targets the active browser tab/window title before killing the whole browser
 
 # Next Backend Tasks
 

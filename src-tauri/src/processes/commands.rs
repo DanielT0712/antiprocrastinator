@@ -5,8 +5,8 @@ use crate::db::DatabaseState;
 use super::{
     categories,
     models::{
-        BlockedProcessLogEntry, EnforcementStatus, KnownApp, ProcessCategory, ProcessInfo,
-        ProcessRule,
+        BlockedProcessLogEntry, EnforcementStatus, FocusedWindowInfo, KnownApp, ProcessCategory,
+        ProcessInfo, ProcessRule,
     },
     monitor::{self, ProcessMonitorState},
 };
@@ -14,6 +14,11 @@ use super::{
 #[tauri::command]
 pub fn get_running_processes() -> Result<Vec<ProcessInfo>, String> {
     Ok(monitor::scan_processes())
+}
+
+#[tauri::command]
+pub fn get_focused_window() -> Result<Option<FocusedWindowInfo>, String> {
+    monitor::get_focused_window()
 }
 
 #[tauri::command]

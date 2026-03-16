@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -22,8 +23,8 @@ use crate::{
 use super::{
     categories,
     models::{
-        BlockedProcessLogEntry, EnforcementStatus, KnownApp, ProcessAction, ProcessInfo,
-        ProcessRule, ProcessWarning,
+        BlockedProcessLogEntry, EnforcementStatus, FocusedWindowInfo, KnownApp, ProcessAction,
+        ProcessInfo, ProcessRule, ProcessWarning,
     },
 };
 
@@ -42,6 +43,9 @@ struct WarningState {
     kill_at: i64,
     block_id: Option<i64>,
     task_id: Option<i64>,
+    pid: Option<u32>,
+    process_name: String,
+    window_title: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +59,15 @@ struct DiscoveredApp {
     source: String,
     category_guess: Option<String>,
     confidence: f64,
+}
+
+#[derive(Debug, Clone)]
+struct EnforcementCandidate {
+    key: String,
+    process_name: String,
+    window_title: Option<String>,
+    pid: u32,
+    action: ProcessAction,
 }
 
 pub fn new_state() -> ProcessMonitorState {
@@ -93,6 +106,10 @@ pub fn scan_processes() -> Vec<ProcessInfo> {
             memory_bytes: process.memory(),
         })
         .collect()
+}
+
+pub fn get_focused_window() -> Result<Option<FocusedWindowInfo>, String> {
+    focused_window_for_platform()
 }
 
 pub fn get_known_apps(connection: &Connection) -> Result<Vec<KnownApp>, String> {
@@ -627,6 +644,7 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         let connection = database.connection()?;
         schedule_engine::get_current_block(&connection, &schedule)?
     };
+    let focused_window = get_focused_window()?;
     let preferences = config.get_preferences()?;
     let active_block_type = {
         let connection = database.connection()?;
@@ -643,6 +661,7 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime.status.last_scan_at = Some(now);
     runtime.status.active_block_type = active_block_type;
+    runtime.status.focused_window = focused_window.clone();
     runtime.status.last_killed_processes.clear();
 
     if active_block_type != Some(BlockType::Work) && !emergency_mode {
@@ -651,120 +670,115 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    let blocked_names: Vec<String> = processes
+    let candidates = build_enforcement_candidates(
+        &processes,
+        &rules,
+        emergency_mode,
+        &preferences.emergency_allowed_apps,
+        focused_window.as_ref(),
+    );
+    let active_keys: HashSet<String> = candidates
         .iter()
-        .filter_map(|process| {
-            let action = resolve_process_action(
-                process,
-                &rules,
-                emergency_mode,
-                &preferences.emergency_allowed_apps,
-            );
-            should_block_during_work(action).then_some(process.name.clone())
-        })
+        .map(|candidate| candidate.key.clone())
         .collect();
+    runtime.warnings.retain(|key, _| active_keys.contains(key));
 
-    runtime.warnings.retain(|name, _| {
-        blocked_names
-            .iter()
-            .any(|blocked| blocked.eq_ignore_ascii_case(name))
-    });
+    for candidate in candidates {
+        let normalized_name = normalize_process_name(&candidate.process_name);
+        let warn_seconds = find_warn_seconds(&normalized_name, &rules)
+            .unwrap_or(preferences.process_warning_seconds);
+        let browser_close_mode =
+            candidate.window_title.is_some() && candidate.action == ProcessAction::Warn;
 
-    for process in &processes {
-        let action = resolve_process_action(
-            process,
-            &rules,
-            emergency_mode,
-            &preferences.emergency_allowed_apps,
-        );
-        let normalized_name = normalize_process_name(&process.name);
+        if candidate.action == ProcessAction::Warn && !browser_close_mode {
+            app.emit(
+                "process-warning",
+                ProcessWarning {
+                    process_name: candidate.process_name.clone(),
+                    seconds_until_kill: warn_seconds,
+                    window_title: candidate.window_title.clone(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            continue;
+        }
 
-        match action {
-            ProcessAction::AlwaysAllow => {}
-            ProcessAction::Warn => {
+        let warning = runtime
+            .warnings
+            .entry(candidate.key.clone())
+            .or_insert_with(|| WarningState {
+                kill_at: now + i64::from(warn_seconds) * 1_000,
+                block_id: current_block.as_ref().map(|block| block.id),
+                task_id: current_block.as_ref().and_then(|block| block.task_id),
+                pid: Some(candidate.pid),
+                process_name: candidate.process_name.clone(),
+                window_title: candidate.window_title.clone(),
+            });
+
+        warning.pid = Some(candidate.pid);
+        warning.process_name = candidate.process_name.clone();
+        warning.window_title = candidate.window_title.clone();
+
+        let seconds_until_kill = if warn_seconds == 0 {
+            0
+        } else {
+            ((warning.kill_at - now).max(0) / 1_000) as u32
+        };
+
+        if warn_seconds == 0 || now >= warning.kill_at {
+            if kill_process(candidate.pid) {
+                let connection = database.connection()?;
+                connection
+                    .execute(
+                        r#"
+                        INSERT INTO blocked_processes_log (process_name, rule_action, block_id, task_id, occurred_at)
+                        VALUES (?1, ?2, ?3, ?4, ?5)
+                        "#,
+                        params![
+                            normalized_name,
+                            process_action_to_str(candidate.action),
+                            warning.block_id,
+                            warning.task_id,
+                            now
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+
+                runtime
+                    .status
+                    .last_killed_processes
+                    .push(candidate.process_name.clone());
                 app.emit(
-                    "process-warning",
-                    ProcessWarning {
-                        process_name: process.name.clone(),
-                        seconds_until_kill: preferences.process_warning_seconds,
-                    },
+                    "process-killed",
+                    serde_json::json!({
+                        "processName": candidate.process_name,
+                        "windowTitle": candidate.window_title,
+                        "timestamp": now
+                    }),
                 )
                 .map_err(|error| error.to_string())?;
             }
-            ProcessAction::AlwaysBlock
-            | ProcessAction::BlockDuringWork
-            | ProcessAction::AllowDuringBreak => {
-                let warn_seconds = find_warn_seconds(&normalized_name, &rules)
-                    .unwrap_or(preferences.process_warning_seconds);
-
-                let warning = runtime
-                    .warnings
-                    .entry(normalized_name.clone())
-                    .or_insert_with(|| WarningState {
-                        kill_at: now + i64::from(warn_seconds) * 1_000,
-                        block_id: current_block.as_ref().map(|block| block.id),
-                        task_id: current_block.as_ref().and_then(|block| block.task_id),
-                    });
-
-                let seconds_until_kill = if warn_seconds == 0 {
-                    0
-                } else {
-                    ((warning.kill_at - now).max(0) / 1_000) as u32
-                };
-
-                if warn_seconds == 0 || now >= warning.kill_at {
-                    if kill_process(process.pid) {
-                        let connection = database.connection()?;
-                        connection
-                            .execute(
-                                r#"
-                                INSERT INTO blocked_processes_log (process_name, rule_action, block_id, task_id, occurred_at)
-                                VALUES (?1, ?2, ?3, ?4, ?5)
-                                "#,
-                                params![
-                                    normalized_name,
-                                    process_action_to_str(action),
-                                    warning.block_id,
-                                    warning.task_id,
-                                    now
-                                ],
-                            )
-                            .map_err(|error| error.to_string())?;
-
-                        runtime
-                            .status
-                            .last_killed_processes
-                            .push(process.name.clone());
-                        app.emit(
-                            "process-killed",
-                            serde_json::json!({
-                                "processName": process.name,
-                                "timestamp": now
-                            }),
-                        )
-                        .map_err(|error| error.to_string())?;
-                    }
-                    runtime.warnings.remove(&normalized_name);
-                } else {
-                    app.emit(
-                        "process-warning",
-                        ProcessWarning {
-                            process_name: process.name.clone(),
-                            seconds_until_kill,
-                        },
-                    )
-                    .map_err(|error| error.to_string())?;
-                }
-            }
+            runtime.warnings.remove(&candidate.key);
+        } else {
+            app.emit(
+                "process-warning",
+                ProcessWarning {
+                    process_name: candidate.process_name.clone(),
+                    seconds_until_kill,
+                    window_title: candidate.window_title.clone(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
         }
     }
 
     runtime.status.warnings = runtime
         .warnings
-        .iter()
-        .map(|(process_name, warning)| ProcessWarning {
-            process_name: process_name.clone(),
+        .values()
+        .map(|warning| ProcessWarning {
+            process_name: warning.process_name.clone(),
             seconds_until_kill: ((warning.kill_at - now).max(0) / 1_000) as u32,
+            window_title: warning.window_title.clone(),
         })
         .collect();
 
@@ -807,6 +821,105 @@ fn resolve_process_action(
     ProcessAction::AlwaysAllow
 }
 
+fn build_enforcement_candidates(
+    processes: &[ProcessInfo],
+    rules: &[ProcessRule],
+    emergency_mode: bool,
+    emergency_allowed_apps: &[String],
+    focused_window: Option<&FocusedWindowInfo>,
+) -> Vec<EnforcementCandidate> {
+    let mut candidates = Vec::new();
+    let mut seen_browser = HashSet::new();
+
+    for process in processes {
+        let action = resolve_process_action(process, rules, emergency_mode, emergency_allowed_apps);
+        if action == ProcessAction::AlwaysAllow {
+            continue;
+        }
+
+        let normalized_name = normalize_process_name(&process.name);
+        let browser = is_browser_process_name(&normalized_name);
+        if browser {
+            if !focused_window_matches_process(focused_window, process) {
+                continue;
+            }
+
+            let title = focused_window.and_then(|window| normalized_window_title(window));
+            let key = format!(
+                "browser:{}:{}",
+                normalized_name,
+                title.clone().unwrap_or_default()
+            );
+            if !seen_browser.insert(key.clone()) {
+                continue;
+            }
+            candidates.push(EnforcementCandidate {
+                key,
+                process_name: process.name.clone(),
+                window_title: focused_window.and_then(|window| window.title.clone()),
+                pid: focused_window
+                    .and_then(|window| window.pid)
+                    .unwrap_or(process.pid),
+                action,
+            });
+            continue;
+        }
+
+        if action == ProcessAction::Warn || should_block_during_work(action) {
+            candidates.push(EnforcementCandidate {
+                key: normalized_name,
+                process_name: process.name.clone(),
+                window_title: None,
+                pid: process.pid,
+                action,
+            });
+        }
+    }
+
+    candidates
+}
+
+fn is_browser_process_name(normalized_name: &str) -> bool {
+    categories::built_in_categories()
+        .into_iter()
+        .find(|category| category.name == "Browsers")
+        .map(|category| {
+            category
+                .process_names
+                .iter()
+                .any(|candidate| normalize_process_name(candidate) == normalized_name)
+        })
+        .unwrap_or(false)
+}
+
+fn focused_window_matches_process(
+    focused_window: Option<&FocusedWindowInfo>,
+    process: &ProcessInfo,
+) -> bool {
+    let Some(focused_window) = focused_window else {
+        return false;
+    };
+
+    if let Some(pid) = focused_window.pid {
+        return pid == process.pid;
+    }
+
+    focused_window
+        .process_name
+        .as_deref()
+        .map(normalize_process_name)
+        .map(|name| name == normalize_process_name(&process.name))
+        .unwrap_or(false)
+}
+
+fn normalized_window_title(window: &FocusedWindowInfo) -> Option<String> {
+    window
+        .title
+        .as_deref()
+        .map(normalize_process_name)
+        .filter(|title| !title.is_empty())
+}
+
 fn find_warn_seconds(process_name: &str, rules: &[ProcessRule]) -> Option<u32> {
     rules
         .iter()
@@ -832,6 +945,94 @@ fn kill_process(pid: u32) -> bool {
         .find(|(process_pid, _)| process_pid.as_u32() == pid)
         .map(|(_, process)| process.kill_with(Signal::Kill).unwrap_or(false))
         .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn focused_window_for_platform() -> Result<Option<FocusedWindowInfo>, String> {
+    let script = r#"
+tell application "System Events"
+    set frontProc to first application process whose frontmost is true
+    set appName to name of frontProc
+    set windowTitle to ""
+    try
+        set windowTitle to name of front window of frontProc
+    end try
+    return appName & linefeed & windowTitle
+end tell
+"#;
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let process_name = lines
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let title = lines
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if process_name.is_none() && title.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(FocusedWindowInfo {
+        process_name: process_name.map(ToOwned::to_owned),
+        pid: None,
+        title: title.map(ToOwned::to_owned),
+    }))
+}
+
+#[cfg(target_os = "windows")]
+fn focused_window_for_platform() -> Result<Option<FocusedWindowInfo>, String> {
+    let script = r#"
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class WinApi {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+"@;
+$hwnd = [WinApi]::GetForegroundWindow();
+if ($hwnd -eq [IntPtr]::Zero) { return }
+$builder = New-Object System.Text.StringBuilder 1024
+[void][WinApi]::GetWindowText($hwnd, $builder, $builder.Capacity)
+$pid = 0
+[void][WinApi]::GetWindowThreadProcessId($hwnd, [ref]$pid)
+$process = Get-Process -Id $pid -ErrorAction SilentlyContinue
+[pscustomobject]@{
+  processName = if ($process) { $process.ProcessName } else { $null }
+  pid = if ($pid -gt 0) { $pid } else { $null }
+  title = if ($builder.ToString()) { $builder.ToString() } else { $null }
+} | ConvertTo-Json -Compress
+"#;
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str::<FocusedWindowInfo>(stdout.trim())
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn focused_window_for_platform() -> Result<Option<FocusedWindowInfo>, String> {
+    Ok(None)
 }
 
 fn normalize_process_name(name: &str) -> String {
