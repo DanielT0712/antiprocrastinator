@@ -5,8 +5,8 @@ use crate::db::DatabaseState;
 use super::{
     categories,
     models::{
-        BlockedProcessLogEntry, EnforcementStatus, FocusedWindowInfo, KnownApp, ProcessCategory,
-        ProcessInfo, ProcessRule,
+        BlockedProcessLogEntry, EnforcementStatus, FocusedWindowInfo, KnownApp, KnownAppUpdate,
+        ProcessCategory, ProcessInfo, ProcessRule,
     },
     monitor::{self, ProcessMonitorState},
 };
@@ -34,6 +34,16 @@ pub fn refresh_known_apps_inventory(
     let connection = database.connection()?;
     monitor::refresh_known_apps_inventory(&connection)?;
     monitor::get_known_apps(&connection)
+}
+
+#[tauri::command]
+pub fn update_known_app(
+    app_key: String,
+    updates: KnownAppUpdate,
+    database: State<'_, DatabaseState>,
+) -> Result<KnownApp, String> {
+    let connection = database.connection()?;
+    monitor::update_known_app(&connection, &app_key, updates)
 }
 
 #[tauri::command]

@@ -38,6 +38,7 @@ pub fn run() {
             processes::commands::get_focused_window,
             processes::commands::get_known_apps,
             processes::commands::refresh_known_apps_inventory,
+            processes::commands::update_known_app,
             processes::commands::get_process_rules,
             processes::commands::set_process_rule,
             processes::commands::delete_process_rule,

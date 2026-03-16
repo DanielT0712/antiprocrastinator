@@ -59,11 +59,22 @@ pub struct KnownApp {
     pub platform: String,
     pub source: String,
     pub category_guess: Option<String>,
+    pub category_override: Option<String>,
+    pub effective_category: Option<String>,
     pub confidence: f64,
     pub classification_status: String,
     pub first_seen_at: i64,
     pub last_seen_running_at: Option<i64>,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct KnownAppUpdate {
+    pub display_name: Option<String>,
+    pub category_override: Option<Option<String>>,
+    pub classification_status: Option<String>,
+    pub sync_rule: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

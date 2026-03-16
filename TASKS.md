@@ -14,6 +14,7 @@
 - [x] Added a persistent known-app inventory with installed-app scans, live running-process discovery, and unclassified-app detection events
 - [x] Added focused-window detection and browser-specific enforcement that targets the active browser tab/window title before killing the whole browser
 - [x] Added browser title allow/block keyword preferences with cleaned focused-title matching so browser enforcement can key off words like `github` or `youtube`
+- [x] Added known-app confirmation/edit APIs with category overrides and optional syncing into default process rules
 
 # Next Backend Tasks
 

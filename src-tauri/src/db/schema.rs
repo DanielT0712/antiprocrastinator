@@ -1,4 +1,4 @@
-pub const CURRENT_SCHEMA_VERSION: i32 = 3;
+pub const CURRENT_SCHEMA_VERSION: i32 = 4;
 
 pub const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS task_groups (
@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS known_apps (
     platform TEXT NOT NULL,
     source TEXT NOT NULL,
     category_guess TEXT,
+    category_override TEXT,
     confidence REAL NOT NULL DEFAULT 0.0,
     classification_status TEXT NOT NULL DEFAULT 'unclassified',
     first_seen_at INTEGER NOT NULL,

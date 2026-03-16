@@ -23,8 +23,8 @@ use crate::{
 use super::{
     categories,
     models::{
-        BlockedProcessLogEntry, EnforcementStatus, FocusedWindowInfo, KnownApp, ProcessAction,
-        ProcessInfo, ProcessRule, ProcessWarning,
+        BlockedProcessLogEntry, EnforcementStatus, FocusedWindowInfo, KnownApp, KnownAppUpdate,
+        ProcessAction, ProcessInfo, ProcessRule, ProcessWarning,
     },
 };
 
@@ -132,8 +132,9 @@ pub fn get_known_apps(connection: &Connection) -> Result<Vec<KnownApp>, String> 
         .prepare(
             r#"
             SELECT app_key, display_name, executable_name, executable_path, app_path,
-                   platform, source, category_guess, confidence, classification_status,
-                   first_seen_at, last_seen_running_at, updated_at
+                   platform, source, category_guess, category_override,
+                   COALESCE(category_override, category_guess) AS effective_category,
+                   confidence, classification_status, first_seen_at, last_seen_running_at, updated_at
             FROM known_apps
             ORDER BY classification_status ASC, display_name ASC
             "#,
@@ -151,17 +152,72 @@ pub fn get_known_apps(connection: &Connection) -> Result<Vec<KnownApp>, String> 
                 platform: row.get(5)?,
                 source: row.get(6)?,
                 category_guess: row.get(7)?,
-                confidence: row.get(8)?,
-                classification_status: row.get(9)?,
-                first_seen_at: row.get(10)?,
-                last_seen_running_at: row.get(11)?,
-                updated_at: row.get(12)?,
+                category_override: row.get(8)?,
+                effective_category: row.get(9)?,
+                confidence: row.get(10)?,
+                classification_status: row.get(11)?,
+                first_seen_at: row.get(12)?,
+                last_seen_running_at: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         })
         .map_err(|error| error.to_string())?;
 
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+pub fn update_known_app(
+    connection: &Connection,
+    app_key: &str,
+    updates: KnownAppUpdate,
+) -> Result<KnownApp, String> {
+    let existing = get_known_app_by_key(connection, app_key)?
+        .ok_or_else(|| format!("known app {app_key} does not exist"))?;
+    let display_name = updates
+        .display_name
+        .unwrap_or_else(|| existing.display_name.clone());
+    if display_name.trim().is_empty() {
+        return Err("displayName cannot be empty".to_string());
+    }
+
+    let classification_status = updates
+        .classification_status
+        .unwrap_or_else(|| existing.classification_status.clone());
+    validate_known_app_status(&classification_status)?;
+    let category_override = updates
+        .category_override
+        .unwrap_or(existing.category_override.clone());
+    let now = timestamp_ms();
+
+    connection
+        .execute(
+            r#"
+            UPDATE known_apps
+            SET display_name = ?1,
+                category_override = ?2,
+                classification_status = ?3,
+                updated_at = ?4
+            WHERE app_key = ?5
+            "#,
+            params![
+                display_name.trim(),
+                category_override,
+                classification_status,
+                now,
+                app_key
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    let updated = get_known_app_by_key(connection, app_key)?
+        .ok_or_else(|| format!("known app {app_key} disappeared after update"))?;
+
+    if updates.sync_rule.unwrap_or(true) {
+        sync_known_app_to_rule(connection, &updated)?;
+    }
+
+    Ok(updated)
 }
 
 pub fn refresh_known_apps_inventory(connection: &Connection) -> Result<(), String> {
@@ -275,6 +331,107 @@ pub fn delete_process_rule(connection: &Connection, process_name: &str) -> Resul
     Ok(())
 }
 
+fn get_known_app_by_key(
+    connection: &Connection,
+    app_key: &str,
+) -> Result<Option<KnownApp>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT app_key, display_name, executable_name, executable_path, app_path,
+                   platform, source, category_guess, category_override,
+                   COALESCE(category_override, category_guess) AS effective_category,
+                   confidence, classification_status, first_seen_at, last_seen_running_at, updated_at
+            FROM known_apps
+            WHERE app_key = ?1
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+
+    statement
+        .query_row(params![app_key], |row| {
+            Ok(KnownApp {
+                app_key: row.get(0)?,
+                display_name: row.get(1)?,
+                executable_name: row.get(2)?,
+                executable_path: row.get(3)?,
+                app_path: row.get(4)?,
+                platform: row.get(5)?,
+                source: row.get(6)?,
+                category_guess: row.get(7)?,
+                category_override: row.get(8)?,
+                effective_category: row.get(9)?,
+                confidence: row.get(10)?,
+                classification_status: row.get(11)?,
+                first_seen_at: row.get(12)?,
+                last_seen_running_at: row.get(13)?,
+                updated_at: row.get(14)?,
+            })
+        })
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn validate_known_app_status(status: &str) -> Result<(), String> {
+    match status {
+        "unclassified" | "confirmed" | "ignored" => Ok(()),
+        _ => Err(format!("unknown known app classificationStatus: {status}")),
+    }
+}
+
+fn sync_known_app_to_rule(connection: &Connection, app: &KnownApp) -> Result<(), String> {
+    if app.classification_status == "ignored" {
+        return Ok(());
+    }
+
+    let Some(category) = app.effective_category.as_ref() else {
+        return Ok(());
+    };
+    let Some(default_action) = default_action_for_category(category) else {
+        return Ok(());
+    };
+    let process_name = normalized_name_token(app.app_key.as_str())
+        .or_else(|| {
+            app.executable_name
+                .as_deref()
+                .and_then(normalized_name_token)
+        })
+        .or_else(|| normalized_name_token(app.display_name.as_str()))
+        .filter(|name| !name.is_empty());
+    let Some(process_name) = process_name else {
+        return Ok(());
+    };
+
+    let now = timestamp_ms();
+    connection
+        .execute(
+            r#"
+            INSERT INTO process_rules (process_name, category, action, warn_seconds, created_at, updated_at)
+            VALUES (?1, ?2, ?3, NULL, ?4, ?4)
+            ON CONFLICT(process_name) DO UPDATE SET
+                category = excluded.category,
+                action = excluded.action,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                process_name,
+                category,
+                process_action_to_str(default_action),
+                now
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+fn default_action_for_category(category_name: &str) -> Option<ProcessAction> {
+    categories::built_in_categories()
+        .into_iter()
+        .find(|category| category.name.eq_ignore_ascii_case(category_name))
+        .map(|category| category.default_action)
+}
+
 pub fn get_enforcement_status(state: &ProcessMonitorState) -> Result<EnforcementStatus, String> {
     state
         .runtime
@@ -345,9 +502,9 @@ fn upsert_known_app(
             r#"
             INSERT INTO known_apps (
                 app_key, display_name, executable_name, executable_path, app_path,
-                platform, source, category_guess, confidence, classification_status,
+                platform, source, category_guess, category_override, confidence, classification_status,
                 first_seen_at, last_seen_running_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10, ?11, ?12, ?13)
             ON CONFLICT(app_key) DO UPDATE SET
                 display_name = excluded.display_name,
                 executable_name = COALESCE(excluded.executable_name, known_apps.executable_name),
@@ -644,7 +801,9 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
                         "appKey": candidate.app_key,
                         "displayName": candidate.display_name,
                         "processName": process.name,
-                        "executablePath": process.exe_path
+                        "executablePath": process.exe_path,
+                        "categoryGuess": candidate.category_guess,
+                        "confidence": candidate.confidence
                     }),
                 )
                 .map_err(|error| error.to_string())?;
@@ -1208,10 +1367,10 @@ mod tests {
 
     use super::{
         clean_browser_window_title, get_known_apps, match_browser_title_keywords,
-        running_app_candidate, upsert_known_app, BrowserTitleDecision, FocusedWindowInfo,
-        ProcessInfo,
+        running_app_candidate, update_known_app, upsert_known_app, BrowserTitleDecision,
+        FocusedWindowInfo, ProcessInfo,
     };
-    use crate::db::migrations::run_migrations;
+    use crate::{db::migrations::run_migrations, processes::models::KnownAppUpdate};
 
     #[test]
     fn persists_new_running_processes_into_known_apps() {
@@ -1258,5 +1417,45 @@ mod tests {
             matched.reason.as_deref(),
             Some("matched blocked keyword 'youtube'")
         );
+    }
+
+    #[test]
+    fn updating_known_app_can_confirm_category_and_sync_rule() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        run_migrations(&connection).expect("migrations should run");
+
+        let process = ProcessInfo {
+            pid: 42,
+            name: "discord".to_string(),
+            exe_path: Some("C:/Users/test/AppData/Local/Discord/Discord.exe".to_string()),
+            memory_bytes: 0,
+        };
+        let candidate = running_app_candidate(&process);
+        upsert_known_app(&connection, &candidate, Some(1234)).expect("upsert should work");
+
+        let updated = update_known_app(
+            &connection,
+            &candidate.app_key,
+            KnownAppUpdate {
+                category_override: Some(Some("Social Media".to_string())),
+                classification_status: Some("confirmed".to_string()),
+                sync_rule: Some(true),
+                ..KnownAppUpdate::default()
+            },
+        )
+        .expect("known app should update");
+
+        let rule_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM process_rules WHERE process_name = 'discord'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("process rule count should query");
+
+        assert_eq!(updated.classification_status, "confirmed");
+        assert_eq!(updated.category_override.as_deref(), Some("Social Media"));
+        assert_eq!(updated.effective_category.as_deref(), Some("Social Media"));
+        assert_eq!(rule_count, 1);
     }
 }
