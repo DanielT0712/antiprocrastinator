@@ -25,6 +25,7 @@
 - [x] Set the default app/tab countdown to 30 seconds, added reopen escalation (warn three times, then kill immediately on further reopen attempts within the same block/profile context), and exposed warning counts to the frontend
 - [x] Added manual creation APIs for custom browser keywords/targets and custom known apps so users can add sites like `bilibili` or custom executables before they are auto-discovered
 - [x] Added desktop keep-alive guardrails: close interception, tray restore/quit flow, guarded app-exit interception, and launch-at-login syncing from preferences
+- [x] Added a helper-backed supervisor with persisted guard state, heartbeat/relaunch logic, and timed suspend-to-reopen support
 
 # Next Backend Tasks
 
@@ -32,4 +33,4 @@
 - [ ] Enrich the unified mutation model with tighter reason codes and richer analytics queries on planner/runtime changes
 - [ ] Add explicit block-level pin/edit workflows on top of the new protection flag so manual and planner-generated pins can be managed separately
 - [ ] Build the frontend workflows on top of the new backend primitives: batch classification review, profile/category editors, and schedule mutation history views
-- [ ] Decide whether `strong_guard_enabled` should grow into a true helper/watchdog relaunch mode or stay as an in-process quit barrier
+- [ ] Build the frontend workflows for the helper-backed guard: timed suspend UI, guard status visibility, and clearer quit/relaunch messaging

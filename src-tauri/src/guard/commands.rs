@@ -1,6 +1,8 @@
 use tauri::{AppHandle, State};
 
-use super::watchdog::{GuardState, GuardStatus, QuitChallenge, QUIT_CHALLENGE_PHRASE};
+use super::watchdog::{
+    GuardState, GuardStatus, QuitChallenge, TimedSuspendRequest, QUIT_CHALLENGE_PHRASE,
+};
 
 #[tauri::command]
 pub fn request_quit(guard: State<'_, GuardState>) -> Result<QuitChallenge, String> {
@@ -14,6 +16,7 @@ pub fn confirm_quit(
     guard: State<'_, GuardState>,
 ) -> Result<bool, String> {
     if !guard.is_active()? {
+        super::watchdog::disable_supervisor(&app)?;
         guard.allow_exit_once()?;
         app.exit(0);
         return Ok(true);
@@ -23,15 +26,35 @@ pub fn confirm_quit(
         return Err("quit phrase did not match".to_string());
     }
 
+    super::watchdog::disable_supervisor(&app)?;
     guard.allow_exit_once()?;
     app.exit(0);
     Ok(true)
 }
 
 #[tauri::command]
-pub fn get_guard_status(guard: State<'_, GuardState>) -> Result<GuardStatus, String> {
-    Ok(GuardStatus {
-        active: guard.is_active()?,
-        challenge_phrase: QUIT_CHALLENGE_PHRASE.to_string(),
-    })
+pub fn suspend_guard(
+    duration_minutes: u32,
+    reason: Option<String>,
+    app: AppHandle,
+    guard: State<'_, GuardState>,
+) -> Result<bool, String> {
+    super::watchdog::suspend_supervisor(
+        &app,
+        TimedSuspendRequest {
+            duration_minutes,
+            reason,
+        },
+    )?;
+    guard.allow_exit_once()?;
+    app.exit(0);
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn get_guard_status(
+    app: AppHandle,
+    guard: State<'_, GuardState>,
+) -> Result<GuardStatus, String> {
+    super::watchdog::get_guard_status(&app, &guard)
 }

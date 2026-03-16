@@ -3,7 +3,7 @@ use tauri::{Manager, RunEvent, WindowEvent};
 mod analytics;
 mod config;
 mod db;
-mod guard;
+pub mod guard;
 mod processes;
 mod schedule;
 mod tasks;
@@ -91,6 +91,7 @@ pub fn run() {
             config::manager::update_preferences,
             guard::commands::request_quit,
             guard::commands::confirm_quit,
+            guard::commands::suspend_guard,
             guard::commands::get_guard_status,
         ])
         .setup(|app| {
@@ -118,6 +119,8 @@ pub fn run() {
             app.manage(guard);
 
             guard::watchdog::setup_system_tray(&app.handle()).map_err(std::io::Error::other)?;
+            guard::watchdog::start_supervisor_runtime(&app.handle())
+                .map_err(std::io::Error::other)?;
 
             schedule::engine::start_timer_loop(app.handle().clone());
             processes::monitor::start_monitor_loop(app.handle().clone());
@@ -127,8 +130,8 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| match event {
-            RunEvent::ExitRequested { api, .. } => {
-                handle_exit_request(app, &api);
+            RunEvent::ExitRequested { api, code, .. } => {
+                handle_exit_request(app, &api, code);
             }
             RunEvent::Reopen { .. } => {
                 let _ = guard::watchdog::show_main_window(app);
@@ -172,7 +175,7 @@ fn handle_window_close<R: tauri::Runtime>(window: &tauri::Window<R>, api: &tauri
     }
 }
 
-fn handle_exit_request(app: &tauri::AppHandle, api: &tauri::ExitRequestApi) {
+fn handle_exit_request(app: &tauri::AppHandle, api: &tauri::ExitRequestApi, code: Option<i32>) {
     let guard = app.state::<guard::watchdog::GuardState>();
     match guard.consume_exit_allowance() {
         Ok(true) => return,
@@ -180,6 +183,10 @@ fn handle_exit_request(app: &tauri::AppHandle, api: &tauri::ExitRequestApi) {
         Err(error) => {
             log::warn!("failed to read quit allowance during exit interception: {error}");
         }
+    }
+
+    if code == Some(tauri::RESTART_EXIT_CODE) {
+        return;
     }
 
     let preferences = match app
@@ -196,6 +203,7 @@ fn handle_exit_request(app: &tauri::AppHandle, api: &tauri::ExitRequestApi) {
     let strong_guard_active =
         preferences.strong_guard_enabled && guard.is_active().unwrap_or(false);
     if !strong_guard_active {
+        let _ = guard::watchdog::disable_supervisor(app);
         return;
     }
 
@@ -230,6 +238,7 @@ fn handle_quit_request(app: &tauri::AppHandle, source: &str) {
         return;
     }
 
+    let _ = guard::watchdog::disable_supervisor(app);
     if let Err(error) = guard.allow_exit_once() {
         log::warn!("failed to allow explicit quit: {error}");
         return;
