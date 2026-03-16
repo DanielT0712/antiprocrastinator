@@ -1,4 +1,4 @@
-use tauri::Manager;
+use tauri::{Manager, RunEvent, WindowEvent};
 
 mod analytics;
 mod config;
@@ -12,6 +12,24 @@ mod tasks;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .on_menu_event(|app, event| {
+            if event.id() == guard::watchdog::TRAY_SHOW_ID {
+                let _ = guard::watchdog::show_main_window(app);
+                return;
+            }
+
+            if event.id() == guard::watchdog::TRAY_REQUEST_QUIT_ID {
+                handle_quit_request(app, "tray_menu");
+            }
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                handle_window_close(window, api);
+            }
+        })
+        .on_tray_icon_event(|app, event| {
+            guard::watchdog::handle_tray_event(app, &event);
+        })
         .invoke_handler(tauri::generate_handler![
             schedule::commands::get_current_block,
             schedule::commands::get_next_block,
@@ -98,11 +116,123 @@ pub fn run() {
             app.manage(schedule);
             app.manage(processes);
             app.manage(guard);
+
+            guard::watchdog::setup_system_tray(&app.handle()).map_err(std::io::Error::other)?;
+
             schedule::engine::start_timer_loop(app.handle().clone());
             processes::monitor::start_monitor_loop(app.handle().clone());
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { api, .. } => {
+                handle_exit_request(app, &api);
+            }
+            RunEvent::Reopen { .. } => {
+                let _ = guard::watchdog::show_main_window(app);
+            }
+            _ => {}
+        });
+}
+
+fn handle_window_close<R: tauri::Runtime>(window: &tauri::Window<R>, api: &tauri::CloseRequestApi) {
+    let app = window.app_handle();
+    let preferences = match app
+        .state::<config::manager::ConfigState>()
+        .get_preferences()
+    {
+        Ok(preferences) => preferences,
+        Err(error) => {
+            log::warn!("failed to load preferences during close interception: {error}");
+            return;
+        }
+    };
+
+    let guard = app.state::<guard::watchdog::GuardState>();
+    let strong_guard_active =
+        preferences.strong_guard_enabled && guard.is_active().unwrap_or(false);
+
+    if !strong_guard_active && !preferences.minimize_to_tray {
+        return;
+    }
+
+    api.prevent_close();
+
+    let minimized_to_tray = if preferences.minimize_to_tray {
+        guard::watchdog::hide_main_window(app).is_ok()
+    } else {
+        let _ = guard::watchdog::show_main_window(app);
+        false
+    };
+
+    if strong_guard_active {
+        let _ = guard::watchdog::emit_quit_required(app, "window_close", minimized_to_tray);
+    }
+}
+
+fn handle_exit_request(app: &tauri::AppHandle, api: &tauri::ExitRequestApi) {
+    let guard = app.state::<guard::watchdog::GuardState>();
+    match guard.consume_exit_allowance() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            log::warn!("failed to read quit allowance during exit interception: {error}");
+        }
+    }
+
+    let preferences = match app
+        .state::<config::manager::ConfigState>()
+        .get_preferences()
+    {
+        Ok(preferences) => preferences,
+        Err(error) => {
+            log::warn!("failed to load preferences during exit interception: {error}");
+            return;
+        }
+    };
+
+    let strong_guard_active =
+        preferences.strong_guard_enabled && guard.is_active().unwrap_or(false);
+    if !strong_guard_active {
+        return;
+    }
+
+    api.prevent_exit();
+    let minimized_to_tray = if preferences.minimize_to_tray {
+        guard::watchdog::hide_main_window(app).is_ok()
+    } else {
+        false
+    };
+    let _ = guard::watchdog::emit_quit_required(app, "app_exit", minimized_to_tray);
+}
+
+fn handle_quit_request(app: &tauri::AppHandle, source: &str) {
+    let preferences = match app
+        .state::<config::manager::ConfigState>()
+        .get_preferences()
+    {
+        Ok(preferences) => preferences,
+        Err(error) => {
+            log::warn!("failed to load preferences during quit request: {error}");
+            return;
+        }
+    };
+
+    let guard = app.state::<guard::watchdog::GuardState>();
+    let strong_guard_active =
+        preferences.strong_guard_enabled && guard.is_active().unwrap_or(false);
+
+    if strong_guard_active {
+        let _ = guard::watchdog::show_main_window(app);
+        let _ = guard::watchdog::emit_quit_required(app, source, false);
+        return;
+    }
+
+    if let Err(error) = guard.allow_exit_once() {
+        log::warn!("failed to allow explicit quit: {error}");
+        return;
+    }
+    app.exit(0);
 }

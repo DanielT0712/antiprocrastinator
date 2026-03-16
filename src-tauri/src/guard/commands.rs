@@ -14,6 +14,7 @@ pub fn confirm_quit(
     guard: State<'_, GuardState>,
 ) -> Result<bool, String> {
     if !guard.is_active()? {
+        guard.allow_exit_once()?;
         app.exit(0);
         return Ok(true);
     }
@@ -22,6 +23,7 @@ pub fn confirm_quit(
         return Err("quit phrase did not match".to_string());
     }
 
+    guard.allow_exit_once()?;
     app.exit(0);
     Ok(true)
 }

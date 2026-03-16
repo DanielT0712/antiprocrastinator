@@ -7,6 +7,7 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 
 use super::models::UserPreferences;
+use crate::guard::watchdog;
 
 pub struct ConfigState {
     preferences: Mutex<UserPreferences>,
@@ -23,6 +24,10 @@ impl ConfigState {
 
         let preferences = load_or_create_preferences(&preferences_path)?;
 
+        if let Err(error) = watchdog::sync_launch_at_login(app, preferences.launch_at_login) {
+            log::warn!("failed to sync launch-at-login during startup: {error}");
+        }
+
         Ok(Self {
             preferences: Mutex::new(preferences),
             preferences_path,
@@ -38,8 +43,15 @@ impl ConfigState {
 
     pub fn update_preferences(
         &self,
+        app: &AppHandle,
         preferences: UserPreferences,
     ) -> Result<UserPreferences, String> {
+        let current = self.get_preferences()?;
+
+        if current.launch_at_login != preferences.launch_at_login {
+            watchdog::sync_launch_at_login(app, preferences.launch_at_login)?;
+        }
+
         write_preferences(&self.preferences_path, &preferences)?;
 
         let mut guard = self.preferences.lock().map_err(|error| error.to_string())?;
@@ -57,9 +69,10 @@ pub fn get_preferences(config: State<'_, ConfigState>) -> Result<UserPreferences
 #[tauri::command]
 pub fn update_preferences(
     preferences: UserPreferences,
+    app: AppHandle,
     config: State<'_, ConfigState>,
 ) -> Result<UserPreferences, String> {
-    config.update_preferences(preferences)
+    config.update_preferences(&app, preferences)
 }
 
 fn preferences_path(app: &AppHandle) -> Result<PathBuf, String> {
