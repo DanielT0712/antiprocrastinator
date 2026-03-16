@@ -1,4 +1,4 @@
-pub const CURRENT_SCHEMA_VERSION: i32 = 7;
+pub const CURRENT_SCHEMA_VERSION: i32 = 8;
 
 pub const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS task_groups (
@@ -121,6 +121,15 @@ CREATE TABLE IF NOT EXISTS known_browser_targets (
     FOREIGN KEY (category_name) REFERENCES app_categories(name) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS browser_title_observations (
+    observation_key TEXT PRIMARY KEY,
+    cleaned_title TEXT NOT NULL,
+    raw_title TEXT,
+    first_seen_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS enforcement_profiles (
     name TEXT PRIMARY KEY,
     parent_name TEXT,
@@ -177,6 +186,7 @@ CREATE INDEX IF NOT EXISTS idx_known_apps_updated_at ON known_apps(updated_at);
 CREATE INDEX IF NOT EXISTS idx_known_apps_classification_action ON known_apps(classification_action);
 CREATE INDEX IF NOT EXISTS idx_app_category_memberships_category_name ON app_category_memberships(category_name);
 CREATE INDEX IF NOT EXISTS idx_known_browser_targets_classification_action ON known_browser_targets(classification_action);
+CREATE INDEX IF NOT EXISTS idx_browser_title_observations_last_seen_at ON browser_title_observations(last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_analytics_events_occurred_at ON analytics_events(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_blocked_processes_occurred_at ON blocked_processes_log(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_enforcement_history_occurred_at ON enforcement_history(occurred_at);

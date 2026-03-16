@@ -152,6 +152,25 @@ pub struct KnownAppUpdate {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct KnownAppInput {
+    pub display_name: String,
+    #[serde(default)]
+    pub executable_name: Option<String>,
+    #[serde(default)]
+    pub executable_path: Option<String>,
+    #[serde(default)]
+    pub app_path: Option<String>,
+    #[serde(default)]
+    pub category_names: Vec<String>,
+    #[serde(default)]
+    pub category_override: Option<String>,
+    pub classification_action: ClassificationAction,
+    #[serde(default)]
+    pub sync_rule: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KnownBrowserTarget {
     pub target_key: String,
     pub display_name: String,
@@ -168,8 +187,20 @@ pub struct KnownBrowserTarget {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct KnownBrowserTargetUpdate {
+    pub display_name: Option<String>,
+    pub keyword: Option<String>,
     pub category_name: Option<Option<String>>,
     pub classification_action: Option<ClassificationAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownBrowserTargetInput {
+    pub display_name: String,
+    pub keyword: String,
+    #[serde(default)]
+    pub category_name: Option<String>,
+    pub classification_action: ClassificationAction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +226,8 @@ pub struct HistoryEntry {
 pub struct ProcessWarning {
     pub process_name: String,
     pub seconds_until_kill: u32,
+    #[serde(default)]
+    pub warning_count: u32,
     #[serde(default)]
     pub window_title: Option<String>,
     #[serde(default)]

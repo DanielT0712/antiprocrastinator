@@ -7,9 +7,9 @@ use super::{
     models::{
         AppCategory, AppCategoryInput, BlockedProcessLogEntry, EnforcementProfile,
         EnforcementProfileInput, EnforcementProfileOverride, EnforcementProfileOverrideInput,
-        EnforcementStatus, FocusedWindowInfo, HistoryEntry, KnownApp, KnownAppUpdate,
-        KnownBrowserTarget, KnownBrowserTargetUpdate, PendingClassificationBatch, ProcessCategory,
-        ProcessInfo, ProcessRule,
+        EnforcementStatus, FocusedWindowInfo, HistoryEntry, KnownApp, KnownAppInput,
+        KnownAppUpdate, KnownBrowserTarget, KnownBrowserTargetInput, KnownBrowserTargetUpdate,
+        PendingClassificationBatch, ProcessCategory, ProcessInfo, ProcessRule,
     },
     monitor::{self, ProcessMonitorState},
 };
@@ -50,6 +50,15 @@ pub fn update_known_app(
 }
 
 #[tauri::command]
+pub fn create_known_app(
+    app: KnownAppInput,
+    database: State<'_, DatabaseState>,
+) -> Result<KnownApp, String> {
+    let connection = database.connection()?;
+    monitor::create_known_app(&connection, app)
+}
+
+#[tauri::command]
 pub fn get_known_browser_targets(
     database: State<'_, DatabaseState>,
 ) -> Result<Vec<KnownBrowserTarget>, String> {
@@ -65,6 +74,15 @@ pub fn update_known_browser_target(
 ) -> Result<KnownBrowserTarget, String> {
     let connection = database.connection()?;
     monitor::update_known_browser_target(&connection, &target_key, updates)
+}
+
+#[tauri::command]
+pub fn create_known_browser_target(
+    target: KnownBrowserTargetInput,
+    database: State<'_, DatabaseState>,
+) -> Result<KnownBrowserTarget, String> {
+    let connection = database.connection()?;
+    monitor::create_known_browser_target(&connection, target)
 }
 
 #[tauri::command]

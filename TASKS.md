@@ -22,6 +22,8 @@
 - [x] Added browser-target inventory and classification flow so recognized focused browser tabs can be classified separately from desktop apps
 - [x] Changed unclassified discovery flow to batch-friendly behavior: unclassified apps/targets remain effectively allowed, prompts can be disabled globally, and popup emission is deduplicated instead of repeating every scan
 - [x] Persisted schedule mutation history and enforcement edit history so planner/runtime changes and rule/profile edits can be queried later
+- [x] Set the default app/tab countdown to 30 seconds, added reopen escalation (warn three times, then kill immediately on further reopen attempts within the same block/profile context), and exposed warning counts to the frontend
+- [x] Added manual creation APIs for custom browser keywords/targets and custom known apps so users can add sites like `bilibili` or custom executables before they are auto-discovered
 
 # Next Backend Tasks
 

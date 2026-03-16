@@ -23,9 +23,9 @@ use super::{
         AppCategory, AppCategoryInput, BlockedProcessLogEntry, ClassificationAction,
         EnforcementDecision, EnforcementProfile, EnforcementProfileInput,
         EnforcementProfileOverride, EnforcementProfileOverrideInput, EnforcementStatus,
-        FocusedWindowInfo, HistoryEntry, KnownApp, KnownAppUpdate, KnownBrowserTarget,
-        KnownBrowserTargetUpdate, PendingClassificationBatch, ProcessAction, ProcessInfo,
-        ProcessRule, ProcessWarning,
+        FocusedWindowInfo, HistoryEntry, KnownApp, KnownAppInput, KnownAppUpdate,
+        KnownBrowserTarget, KnownBrowserTargetInput, KnownBrowserTargetUpdate,
+        PendingClassificationBatch, ProcessAction, ProcessInfo, ProcessRule, ProcessWarning,
     },
 };
 
@@ -38,12 +38,15 @@ struct ProcessMonitorRuntime {
     warnings: HashMap<String, WarningState>,
     prompted_app_keys: HashSet<String>,
     prompted_browser_target_keys: HashSet<String>,
+    reopen_counts: HashMap<String, u32>,
+    current_context_key: Option<String>,
     status: EnforcementStatus,
 }
 
 #[derive(Debug, Clone)]
 struct WarningState {
     kill_at: i64,
+    warning_count: u32,
     block_id: Option<i64>,
     task_id: Option<i64>,
     pid: Option<u32>,
@@ -305,6 +308,107 @@ pub fn update_known_app(
     Ok(updated)
 }
 
+pub fn create_known_app(connection: &Connection, app: KnownAppInput) -> Result<KnownApp, String> {
+    ensure_enforcement_defaults(connection)?;
+    let display_name = app.display_name.trim();
+    if display_name.is_empty() {
+        return Err("displayName cannot be empty".to_string());
+    }
+
+    let executable_name = app.executable_name.clone().or_else(|| {
+        app.executable_path
+            .as_deref()
+            .and_then(|path| Path::new(path).file_name())
+            .map(|name| name.to_string_lossy().to_string())
+    });
+    let app_key = app_key_for(
+        display_name,
+        executable_name.as_deref(),
+        app.executable_path.as_deref().or(app.app_path.as_deref()),
+    );
+    let fallback_category = app
+        .category_override
+        .clone()
+        .or_else(|| app.category_names.first().cloned())
+        .or_else(|| {
+            classify_app_candidate(
+                display_name,
+                app.executable_path.as_deref().or(app.app_path.as_deref()),
+            )
+            .0
+        });
+    let now = timestamp_ms();
+    let classification_status = match app.classification_action {
+        ClassificationAction::Unclassified => "unclassified".to_string(),
+        _ => "confirmed".to_string(),
+    };
+
+    connection
+        .execute(
+            r#"
+            INSERT INTO known_apps (
+                app_key, display_name, executable_name, executable_path, app_path,
+                platform, source, category_guess, category_override, classification_action, confidence, classification_status,
+                first_seen_at, last_seen_running_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'user_added', ?7, ?8, ?9, 1.0, ?10, ?11, NULL, ?11)
+            ON CONFLICT(app_key) DO UPDATE SET
+                display_name = excluded.display_name,
+                executable_name = COALESCE(excluded.executable_name, known_apps.executable_name),
+                executable_path = COALESCE(excluded.executable_path, known_apps.executable_path),
+                app_path = COALESCE(excluded.app_path, known_apps.app_path),
+                platform = excluded.platform,
+                source = excluded.source,
+                category_guess = COALESCE(excluded.category_guess, known_apps.category_guess),
+                category_override = COALESCE(excluded.category_override, known_apps.category_override),
+                classification_action = excluded.classification_action,
+                confidence = excluded.confidence,
+                classification_status = excluded.classification_status,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                app_key,
+                display_name,
+                executable_name,
+                app.executable_path,
+                app.app_path,
+                std::env::consts::OS,
+                fallback_category,
+                app.category_override,
+                classification_action_to_str(app.classification_action),
+                classification_status,
+                now
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if app.category_names.is_empty() {
+        if let Some(category_name) = fallback_category.as_deref() {
+            ensure_category_membership(connection, &app_key, category_name)?;
+        }
+    } else {
+        replace_app_categories(connection, &app_key, &app.category_names)?;
+    }
+
+    let created = get_known_app_by_key(connection, &app_key)?
+        .ok_or_else(|| format!("known app {app_key} disappeared after create"))?;
+    record_enforcement_history(
+        connection,
+        "known_app",
+        &app_key,
+        "created",
+        serde_json::json!({
+            "classificationAction": classification_action_to_str(created.classification_action),
+            "classificationStatus": created.classification_status,
+            "categories": created.categories,
+            "categoryOverride": created.category_override
+        }),
+    );
+    if app.sync_rule.unwrap_or(true) {
+        sync_known_app_to_rule(connection, &created)?;
+    }
+    Ok(created)
+}
+
 pub fn refresh_known_apps_inventory(connection: &Connection) -> Result<(), String> {
     ensure_enforcement_defaults(connection)?;
     let discovered = discover_installed_apps();
@@ -359,6 +463,18 @@ pub fn update_known_browser_target(
     ensure_enforcement_defaults(connection)?;
     let existing = get_known_browser_target_by_key(connection, target_key)?
         .ok_or_else(|| format!("browser target {target_key} does not exist"))?;
+    let display_name = updates
+        .display_name
+        .unwrap_or(existing.display_name.clone());
+    if display_name.trim().is_empty() {
+        return Err("displayName cannot be empty".to_string());
+    }
+    let keyword = match updates.keyword.as_deref() {
+        Some(value) => {
+            normalize_keyword(value).ok_or_else(|| "keyword cannot be empty".to_string())?
+        }
+        None => existing.keyword.clone(),
+    };
     let category_name = updates
         .category_name
         .unwrap_or(existing.category_name.clone());
@@ -371,12 +487,16 @@ pub fn update_known_browser_target(
         .execute(
             r#"
             UPDATE known_browser_targets
-            SET category_name = ?1,
-                classification_action = ?2,
-                updated_at = ?3
-            WHERE target_key = ?4
+            SET display_name = ?1,
+                keyword = ?2,
+                category_name = ?3,
+                classification_action = ?4,
+                updated_at = ?5
+            WHERE target_key = ?6
             "#,
             params![
+                display_name.trim(),
+                keyword,
                 category_name,
                 classification_action_to_str(classification_action),
                 now,
@@ -393,11 +513,68 @@ pub fn update_known_browser_target(
         target_key,
         "updated",
         serde_json::json!({
+            "displayName": updated.display_name,
+            "keyword": updated.keyword,
             "classificationAction": classification_action_to_str(updated.classification_action),
             "categoryName": updated.category_name,
         }),
     );
     Ok(updated)
+}
+
+pub fn create_known_browser_target(
+    connection: &Connection,
+    target: KnownBrowserTargetInput,
+) -> Result<KnownBrowserTarget, String> {
+    ensure_enforcement_defaults(connection)?;
+    let display_name = target.display_name.trim();
+    if display_name.is_empty() {
+        return Err("displayName cannot be empty".to_string());
+    }
+    let keyword =
+        normalize_keyword(&target.keyword).ok_or_else(|| "keyword cannot be empty".to_string())?;
+    let target_key = browser_target_key_for(&keyword);
+    let now = timestamp_ms();
+    connection
+        .execute(
+            r#"
+            INSERT INTO known_browser_targets (
+                target_key, display_name, keyword, category_name, confidence,
+                classification_action, builtin, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, 1.0, ?5, 0, ?6)
+            ON CONFLICT(target_key) DO UPDATE SET
+                display_name = excluded.display_name,
+                keyword = excluded.keyword,
+                category_name = excluded.category_name,
+                confidence = excluded.confidence,
+                classification_action = excluded.classification_action,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                target_key,
+                display_name,
+                keyword,
+                target.category_name,
+                classification_action_to_str(target.classification_action),
+                now
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    let created = get_known_browser_target_by_key(connection, &target_key)?
+        .ok_or_else(|| format!("browser target {target_key} disappeared after create"))?;
+    record_enforcement_history(
+        connection,
+        "browser_target",
+        &target_key,
+        "created",
+        serde_json::json!({
+            "displayName": created.display_name,
+            "keyword": created.keyword,
+            "classificationAction": classification_action_to_str(created.classification_action),
+            "categoryName": created.category_name,
+        }),
+    );
+    Ok(created)
 }
 
 pub fn get_pending_classifications(
@@ -1492,6 +1669,21 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         .runtime
         .lock()
         .map_err(|error| error.to_string())?;
+    let context_key = format!(
+        "{}:{}",
+        active_profile,
+        current_block
+            .as_ref()
+            .map(|block| block.id.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
+    if runtime.current_context_key.as_deref() != Some(context_key.as_str()) {
+        runtime.warnings.clear();
+        runtime.prompted_app_keys.clear();
+        runtime.prompted_browser_target_keys.clear();
+        runtime.reopen_counts.clear();
+        runtime.current_context_key = Some(context_key);
+    }
     runtime.status.last_scan_at = Some(now);
     runtime.status.active_block_type = active_block_type;
     runtime.status.active_profile = Some(active_profile.clone());
@@ -1527,14 +1719,37 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
 
     for candidate in candidates {
         let normalized_name = normalize_process_name(&candidate.process_name);
-        let warn_seconds = find_warn_seconds(&normalized_name, &rules)
-            .unwrap_or(preferences.process_warning_seconds);
+        let warning_count = if runtime.warnings.contains_key(&candidate.key) {
+            runtime
+                .reopen_counts
+                .get(&candidate.key)
+                .copied()
+                .unwrap_or(1)
+        } else {
+            let next_count = runtime
+                .reopen_counts
+                .get(&candidate.key)
+                .copied()
+                .unwrap_or(0)
+                + 1;
+            runtime
+                .reopen_counts
+                .insert(candidate.key.clone(), next_count);
+            next_count
+        };
+        let warn_seconds = if warning_count > 3 {
+            0
+        } else {
+            find_warn_seconds(&normalized_name, &rules)
+                .unwrap_or(preferences.process_warning_seconds)
+        };
 
         let warning = runtime
             .warnings
             .entry(candidate.key.clone())
             .or_insert_with(|| WarningState {
                 kill_at: now + i64::from(warn_seconds) * 1_000,
+                warning_count,
                 block_id: current_block.as_ref().map(|block| block.id),
                 task_id: current_block.as_ref().and_then(|block| block.task_id),
                 pid: Some(candidate.pid),
@@ -1547,6 +1762,7 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         warning.process_name = candidate.process_name.clone();
         warning.window_title = candidate.window_title.clone();
         warning.match_reason = candidate.match_reason.clone();
+        warning.warning_count = warning_count;
 
         let seconds_until_kill = if warn_seconds == 0 {
             0
@@ -1594,6 +1810,7 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
                 ProcessWarning {
                     process_name: candidate.process_name.clone(),
                     seconds_until_kill,
+                    warning_count,
                     window_title: candidate.window_title.clone(),
                     match_reason: candidate.match_reason.clone(),
                 },
@@ -1608,6 +1825,7 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         .map(|warning| ProcessWarning {
             process_name: warning.process_name.clone(),
             seconds_until_kill: ((warning.kill_at - now).max(0) / 1_000) as u32,
+            warning_count: warning.warning_count,
             window_title: warning.window_title.clone(),
             match_reason: warning.match_reason.clone(),
         })
@@ -1845,11 +2063,11 @@ fn clean_browser_window_title(window: &FocusedWindowInfo) -> Option<String> {
 
     let cleaned = title
         .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch.is_whitespace() {
-                ch.to_ascii_lowercase()
+        .flat_map(|ch| {
+            if ch.is_alphanumeric() || ch.is_whitespace() {
+                ch.to_lowercase().collect::<Vec<_>>()
             } else {
-                ' '
+                vec![' ']
             }
         })
         .collect::<String>()
@@ -1863,11 +2081,11 @@ fn clean_browser_window_title(window: &FocusedWindowInfo) -> Option<String> {
 fn normalize_keyword(keyword: &str) -> Option<String> {
     let normalized = keyword
         .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch.is_whitespace() {
-                ch.to_ascii_lowercase()
+        .flat_map(|ch| {
+            if ch.is_alphanumeric() || ch.is_whitespace() {
+                ch.to_lowercase().collect::<Vec<_>>()
             } else {
-                ' '
+                vec![' ']
             }
         })
         .collect::<String>()
@@ -1875,6 +2093,10 @@ fn normalize_keyword(keyword: &str) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ");
     (!normalized.is_empty()).then_some(normalized)
+}
+
+fn browser_target_key_for(keyword: &str) -> String {
+    normalize_process_name(keyword).replace(' ', "_")
 }
 
 fn match_browser_target(
@@ -2286,12 +2508,16 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        clean_browser_window_title, get_known_apps, match_browser_target, running_app_candidate,
-        update_known_app, upsert_known_app, FocusedWindowInfo, ProcessInfo,
+        clean_browser_window_title, create_known_app, create_known_browser_target, get_known_apps,
+        match_browser_target, running_app_candidate, update_known_app, upsert_known_app,
+        FocusedWindowInfo, ProcessInfo,
     };
     use crate::{
         db::migrations::run_migrations,
-        processes::models::{ClassificationAction, KnownAppUpdate, KnownBrowserTarget},
+        processes::models::{
+            ClassificationAction, KnownAppInput, KnownAppUpdate, KnownBrowserTarget,
+            KnownBrowserTargetInput,
+        },
     };
 
     #[test]
@@ -2400,6 +2626,62 @@ mod tests {
         assert_eq!(updated.classification_status, "confirmed");
         assert_eq!(updated.category_override.as_deref(), Some("Social Media"));
         assert_eq!(updated.effective_category.as_deref(), Some("Social Media"));
+        assert_eq!(rule_count, 1);
+    }
+
+    #[test]
+    fn can_create_custom_browser_target_with_unicode_keyword() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        run_migrations(&connection).expect("migrations should run");
+
+        let created = create_known_browser_target(
+            &connection,
+            KnownBrowserTargetInput {
+                display_name: "Bilibili".to_string(),
+                keyword: "哔哩哔哩".to_string(),
+                category_name: Some("Entertainment".to_string()),
+                classification_action: ClassificationAction::BanDuringWork,
+            },
+        )
+        .expect("browser target should create");
+
+        let matched = match_browser_target("新视频 哔哩哔哩", &[created.clone()])
+            .expect("unicode keyword should match");
+
+        assert_eq!(created.keyword, "哔哩哔哩");
+        assert_eq!(matched.target_key, created.target_key);
+    }
+
+    #[test]
+    fn can_create_custom_known_app_and_sync_rule() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        run_migrations(&connection).expect("migrations should run");
+
+        let created = create_known_app(
+            &connection,
+            KnownAppInput {
+                display_name: "Beeper".to_string(),
+                executable_name: Some("beeper".to_string()),
+                executable_path: Some("/Applications/Beeper.app/Contents/MacOS/Beeper".to_string()),
+                app_path: Some("/Applications/Beeper.app".to_string()),
+                category_names: vec!["Communication".to_string()],
+                category_override: Some("Communication".to_string()),
+                classification_action: ClassificationAction::BanDuringWork,
+                sync_rule: Some(true),
+            },
+        )
+        .expect("known app should create");
+
+        let rule_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM process_rules WHERE process_name = 'beeper'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("process rule count should query");
+
+        assert_eq!(created.classification_status, "confirmed");
+        assert_eq!(created.effective_category.as_deref(), Some("Communication"));
         assert_eq!(rule_count, 1);
     }
 }

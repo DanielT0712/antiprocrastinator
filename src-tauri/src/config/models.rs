@@ -49,7 +49,7 @@ impl Default for UserPreferences {
             break_duration_minutes: 30,
             minimum_rest_minutes: 5,
             maximum_rest_multiplier: 1.5,
-            process_warning_seconds: 120,
+            process_warning_seconds: 30,
             process_countdown_seconds: 30,
             process_scan_interval_seconds: 5,
             notifications_enabled: true,
