@@ -17,6 +17,8 @@ pub struct UserPreferences {
     pub strong_guard_enabled: bool,
     pub emergency_block_max_minutes: u32,
     pub emergency_allowed_apps: Vec<String>,
+    pub browser_title_allow_keywords: Vec<String>,
+    pub browser_title_block_keywords: Vec<String>,
 }
 
 impl Default for UserPreferences {
@@ -36,6 +38,8 @@ impl Default for UserPreferences {
             strong_guard_enabled: true,
             emergency_block_max_minutes: 120,
             emergency_allowed_apps: vec![],
+            browser_title_allow_keywords: vec![],
+            browser_title_block_keywords: vec![],
         }
     }
 }

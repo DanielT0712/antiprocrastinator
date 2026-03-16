@@ -73,6 +73,8 @@ pub struct ProcessWarning {
     pub seconds_until_kill: u32,
     #[serde(default)]
     pub window_title: Option<String>,
+    #[serde(default)]
+    pub match_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

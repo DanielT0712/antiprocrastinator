@@ -46,6 +46,7 @@ struct WarningState {
     pid: Option<u32>,
     process_name: String,
     window_title: Option<String>,
+    match_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,8 +67,22 @@ struct EnforcementCandidate {
     key: String,
     process_name: String,
     window_title: Option<String>,
+    match_reason: Option<String>,
     pid: u32,
     action: ProcessAction,
+}
+
+#[derive(Debug, Clone)]
+struct BrowserTitleMatch {
+    decision: BrowserTitleDecision,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserTitleDecision {
+    NoMatch,
+    Allow,
+    Block,
 }
 
 pub fn new_state() -> ProcessMonitorState {
@@ -675,6 +690,8 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         &rules,
         emergency_mode,
         &preferences.emergency_allowed_apps,
+        &preferences.browser_title_allow_keywords,
+        &preferences.browser_title_block_keywords,
         focused_window.as_ref(),
     );
     let active_keys: HashSet<String> = candidates
@@ -697,6 +714,7 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
                     process_name: candidate.process_name.clone(),
                     seconds_until_kill: warn_seconds,
                     window_title: candidate.window_title.clone(),
+                    match_reason: candidate.match_reason.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -713,11 +731,13 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
                 pid: Some(candidate.pid),
                 process_name: candidate.process_name.clone(),
                 window_title: candidate.window_title.clone(),
+                match_reason: candidate.match_reason.clone(),
             });
 
         warning.pid = Some(candidate.pid);
         warning.process_name = candidate.process_name.clone();
         warning.window_title = candidate.window_title.clone();
+        warning.match_reason = candidate.match_reason.clone();
 
         let seconds_until_kill = if warn_seconds == 0 {
             0
@@ -766,6 +786,7 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
                     process_name: candidate.process_name.clone(),
                     seconds_until_kill,
                     window_title: candidate.window_title.clone(),
+                    match_reason: candidate.match_reason.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -779,6 +800,7 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
             process_name: warning.process_name.clone(),
             seconds_until_kill: ((warning.kill_at - now).max(0) / 1_000) as u32,
             window_title: warning.window_title.clone(),
+            match_reason: warning.match_reason.clone(),
         })
         .collect();
 
@@ -826,6 +848,8 @@ fn build_enforcement_candidates(
     rules: &[ProcessRule],
     emergency_mode: bool,
     emergency_allowed_apps: &[String],
+    browser_title_allow_keywords: &[String],
+    browser_title_block_keywords: &[String],
     focused_window: Option<&FocusedWindowInfo>,
 ) -> Vec<EnforcementCandidate> {
     let mut candidates = Vec::new();
@@ -844,7 +868,15 @@ fn build_enforcement_candidates(
                 continue;
             }
 
-            let title = focused_window.and_then(|window| normalized_window_title(window));
+            let title = focused_window.and_then(clean_browser_window_title);
+            let browser_match = match_browser_title_keywords(
+                title.as_deref(),
+                browser_title_allow_keywords,
+                browser_title_block_keywords,
+            );
+            if matches!(browser_match.decision, BrowserTitleDecision::Allow) {
+                continue;
+            }
             let key = format!(
                 "browser:{}:{}",
                 normalized_name,
@@ -856,11 +888,17 @@ fn build_enforcement_candidates(
             candidates.push(EnforcementCandidate {
                 key,
                 process_name: process.name.clone(),
-                window_title: focused_window.and_then(|window| window.title.clone()),
+                window_title: title
+                    .or_else(|| focused_window.and_then(|window| window.title.clone())),
+                match_reason: browser_match.reason,
                 pid: focused_window
                     .and_then(|window| window.pid)
                     .unwrap_or(process.pid),
-                action,
+                action: if matches!(browser_match.decision, BrowserTitleDecision::Block) {
+                    ProcessAction::Warn
+                } else {
+                    action
+                },
             });
             continue;
         }
@@ -870,6 +908,7 @@ fn build_enforcement_candidates(
                 key: normalized_name,
                 process_name: process.name.clone(),
                 window_title: None,
+                match_reason: None,
                 pid: process.pid,
                 action,
             });
@@ -912,12 +951,100 @@ fn focused_window_matches_process(
         .unwrap_or(false)
 }
 
-fn normalized_window_title(window: &FocusedWindowInfo) -> Option<String> {
-    window
-        .title
-        .as_deref()
-        .map(normalize_process_name)
-        .filter(|title| !title.is_empty())
+fn clean_browser_window_title(window: &FocusedWindowInfo) -> Option<String> {
+    let mut title = window.title.as_deref()?.trim().to_string();
+    for suffix in [
+        " - google chrome",
+        " - chrome",
+        " - arc",
+        " - mozilla firefox",
+        " - firefox",
+        " - safari",
+        " - microsoft edge",
+        " - edge",
+        " - brave",
+        " - brave browser",
+    ] {
+        let normalized = title.to_lowercase();
+        if normalized.ends_with(suffix) {
+            let new_len = title.len().saturating_sub(suffix.len());
+            title.truncate(new_len);
+            title = title.trim().trim_matches('-').trim().to_string();
+        }
+    }
+
+    let cleaned = title
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch.is_whitespace() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+fn match_browser_title_keywords(
+    cleaned_title: Option<&str>,
+    allow_keywords: &[String],
+    block_keywords: &[String],
+) -> BrowserTitleMatch {
+    let Some(cleaned_title) = cleaned_title else {
+        return BrowserTitleMatch {
+            decision: BrowserTitleDecision::NoMatch,
+            reason: None,
+        };
+    };
+
+    if let Some(keyword) = block_keywords
+        .iter()
+        .filter_map(|keyword| normalize_keyword(keyword))
+        .find(|keyword| cleaned_title.contains(keyword))
+    {
+        return BrowserTitleMatch {
+            decision: BrowserTitleDecision::Block,
+            reason: Some(format!("matched blocked keyword '{}'", keyword)),
+        };
+    }
+
+    if let Some(keyword) = allow_keywords
+        .iter()
+        .filter_map(|keyword| normalize_keyword(keyword))
+        .find(|keyword| cleaned_title.contains(keyword))
+    {
+        return BrowserTitleMatch {
+            decision: BrowserTitleDecision::Allow,
+            reason: Some(format!("matched allowed keyword '{}'", keyword)),
+        };
+    }
+
+    BrowserTitleMatch {
+        decision: BrowserTitleDecision::NoMatch,
+        reason: None,
+    }
+}
+
+fn normalize_keyword(keyword: &str) -> Option<String> {
+    let normalized = keyword
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch.is_whitespace() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 fn find_warn_seconds(process_name: &str, rules: &[ProcessRule]) -> Option<u32> {
@@ -1079,7 +1206,11 @@ fn to_from_sql_error(error: String) -> rusqlite::Error {
 mod tests {
     use rusqlite::Connection;
 
-    use super::{get_known_apps, running_app_candidate, upsert_known_app, ProcessInfo};
+    use super::{
+        clean_browser_window_title, get_known_apps, match_browser_title_keywords,
+        running_app_candidate, upsert_known_app, BrowserTitleDecision, FocusedWindowInfo,
+        ProcessInfo,
+    };
     use crate::db::migrations::run_migrations;
 
     #[test]
@@ -1100,5 +1231,32 @@ mod tests {
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].display_name, "ObscureApp");
         assert_eq!(apps[0].classification_status, "unclassified");
+    }
+
+    #[test]
+    fn cleans_browser_title_before_matching_keywords() {
+        let cleaned = clean_browser_window_title(&FocusedWindowInfo {
+            process_name: Some("Google Chrome".to_string()),
+            pid: Some(1),
+            title: Some("GitHub Pull Request - Google Chrome".to_string()),
+        })
+        .expect("title should clean");
+
+        assert_eq!(cleaned, "github pull request");
+    }
+
+    #[test]
+    fn browser_keyword_block_takes_priority_over_allow() {
+        let matched = match_browser_title_keywords(
+            Some("github youtube video"),
+            &[String::from("github")],
+            &[String::from("youtube")],
+        );
+
+        assert_eq!(matched.decision, BrowserTitleDecision::Block);
+        assert_eq!(
+            matched.reason.as_deref(),
+            Some("matched blocked keyword 'youtube'")
+        );
     }
 }
