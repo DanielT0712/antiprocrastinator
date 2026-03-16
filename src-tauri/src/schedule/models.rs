@@ -38,6 +38,7 @@ pub enum BlockSource {
     Manual,
     Template,
     Planner,
+    Emergency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +70,13 @@ pub struct ScheduleRebuildResult {
     pub blocks: Vec<TimeBlock>,
     pub warnings: Vec<ScheduleWarning>,
     pub pseudo_deadline: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleActionResult {
+    pub current_block: Option<TimeBlock>,
+    pub warnings: Vec<ScheduleWarning>,
 }
 
 impl TimeBlock {
@@ -110,6 +118,14 @@ pub struct TimeBlockUpdate {
 pub struct TimerTickPayload {
     pub remaining_secs: i64,
     pub total_secs: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmergencyBlockRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+    pub duration_minutes: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

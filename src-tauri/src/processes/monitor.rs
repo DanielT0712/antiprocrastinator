@@ -11,7 +11,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::{
     config::manager::ConfigState,
     db::DatabaseState,
-    schedule::{engine as schedule_engine, models::BlockType},
+    schedule::{
+        engine as schedule_engine,
+        models::{BlockSource, BlockType},
+    },
 };
 
 use super::{
@@ -230,6 +233,10 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     };
     let preferences = config.get_preferences()?;
     let active_block_type = current_block.as_ref().map(|block| block.block_type);
+    let emergency_mode = current_block
+        .as_ref()
+        .map(|block| block.source == BlockSource::Emergency)
+        .unwrap_or(false);
     let now = timestamp_ms();
     let mut runtime = process_state
         .runtime
@@ -239,7 +246,7 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     runtime.status.active_block_type = active_block_type;
     runtime.status.last_killed_processes.clear();
 
-    if active_block_type != Some(BlockType::Work) {
+    if active_block_type != Some(BlockType::Work) && !emergency_mode {
         runtime.warnings.clear();
         runtime.status.warnings.clear();
         return Ok(());
@@ -248,7 +255,12 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     let blocked_names: Vec<String> = processes
         .iter()
         .filter_map(|process| {
-            let action = resolve_process_action(process, &rules);
+            let action = resolve_process_action(
+                process,
+                &rules,
+                emergency_mode,
+                &preferences.emergency_allowed_apps,
+            );
             should_block_during_work(action).then_some(process.name.clone())
         })
         .collect();
@@ -260,7 +272,12 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     });
 
     for process in &processes {
-        let action = resolve_process_action(process, &rules);
+        let action = resolve_process_action(
+            process,
+            &rules,
+            emergency_mode,
+            &preferences.emergency_allowed_apps,
+        );
         let normalized_name = normalize_process_name(&process.name);
 
         match action {
@@ -355,8 +372,21 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_process_action(process: &ProcessInfo, rules: &[ProcessRule]) -> ProcessAction {
+fn resolve_process_action(
+    process: &ProcessInfo,
+    rules: &[ProcessRule],
+    emergency_mode: bool,
+    emergency_allowed_apps: &[String],
+) -> ProcessAction {
     let normalized_name = normalize_process_name(&process.name);
+
+    if emergency_mode
+        && emergency_allowed_apps
+            .iter()
+            .any(|candidate| normalize_process_name(candidate) == normalized_name)
+    {
+        return ProcessAction::AlwaysAllow;
+    }
 
     if let Some(rule) = rules
         .iter()

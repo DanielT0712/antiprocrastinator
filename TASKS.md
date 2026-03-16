@@ -8,9 +8,10 @@
 - [x] Implemented built-in process categories, rule CRUD, live process snapshots, and background enforcement scaffolding
 - [x] Added a first pass of the section-based scheduler/rescheduler with deadline scoring, integrated packing, and fit mode
 - [x] Documented the current planner algorithm in `PLANNER.md`
+- [x] Replaced simple shift-based completion/extend/pause behavior with local rest-buffer adjustment plus planner fallback, and added emergency blocks with enforcement allowlists
 
 # Next Backend Tasks
 
-- [ ] Replace the current simple future-shift logic in block completion/extend/pause flows with planner-driven rebuilds
 - [ ] Add explicit task planning metadata such as per-task max block length, work/rest ratio, and protected/manual pin state
+- [ ] Finish moving all runtime schedule mutations onto the same planner diff model, including richer warnings/events and per-task overrides
 - [ ] Hook schedule/process actions into analytics event recording

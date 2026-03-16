@@ -4,7 +4,10 @@ use crate::{config::manager::ConfigState, db::DatabaseState};
 
 use super::{
     engine,
-    models::{NewTimeBlock, ScheduleRebuildResult, TimeBlock, TimeBlockUpdate, WeeklyTemplate},
+    models::{
+        EmergencyBlockRequest, NewTimeBlock, ScheduleActionResult, ScheduleRebuildResult,
+        TimeBlock, TimeBlockUpdate, WeeklyTemplate,
+    },
 };
 
 #[tauri::command]
@@ -92,9 +95,11 @@ pub fn save_weekly_template(
 pub fn complete_current_block(
     database: State<'_, DatabaseState>,
     schedule: State<'_, engine::ScheduleState>,
-) -> Result<Option<TimeBlock>, String> {
+    config: State<'_, ConfigState>,
+) -> Result<ScheduleActionResult, String> {
     let connection = database.connection()?;
-    engine::complete_current_block(&connection, &schedule)
+    let preferences = config.get_preferences()?;
+    engine::complete_current_block(&connection, &schedule, &preferences)
 }
 
 #[tauri::command]
@@ -111,27 +116,45 @@ pub fn extend_current_block(
     minutes: i64,
     database: State<'_, DatabaseState>,
     schedule: State<'_, engine::ScheduleState>,
-) -> Result<Option<TimeBlock>, String> {
+    config: State<'_, ConfigState>,
+) -> Result<ScheduleActionResult, String> {
     let connection = database.connection()?;
-    engine::extend_current_block(&connection, &schedule, minutes)
+    let preferences = config.get_preferences()?;
+    engine::extend_current_block(&connection, &schedule, &preferences, minutes)
 }
 
 #[tauri::command]
 pub fn pause_current_block(
     database: State<'_, DatabaseState>,
     schedule: State<'_, engine::ScheduleState>,
-) -> Result<Option<TimeBlock>, String> {
+    config: State<'_, ConfigState>,
+) -> Result<ScheduleActionResult, String> {
     let connection = database.connection()?;
-    engine::pause_current_block(&connection, &schedule)
+    let preferences = config.get_preferences()?;
+    engine::pause_current_block(&connection, &schedule, &preferences)
 }
 
 #[tauri::command]
 pub fn resume_current_block(
     database: State<'_, DatabaseState>,
     schedule: State<'_, engine::ScheduleState>,
-) -> Result<Option<TimeBlock>, String> {
+    config: State<'_, ConfigState>,
+) -> Result<ScheduleActionResult, String> {
     let connection = database.connection()?;
-    engine::resume_current_block(&connection, &schedule)
+    let preferences = config.get_preferences()?;
+    engine::resume_current_block(&connection, &schedule, &preferences)
+}
+
+#[tauri::command]
+pub fn start_emergency_block(
+    request: EmergencyBlockRequest,
+    database: State<'_, DatabaseState>,
+    schedule: State<'_, engine::ScheduleState>,
+    config: State<'_, ConfigState>,
+) -> Result<ScheduleActionResult, String> {
+    let connection = database.connection()?;
+    let preferences = config.get_preferences()?;
+    engine::start_emergency_block(&connection, &schedule, &preferences, request)
 }
 
 #[tauri::command]

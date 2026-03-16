@@ -11,9 +11,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::{config::models::UserPreferences, db::DatabaseState};
 
 use super::models::{
-    BlockSource, BlockStatus, BlockType, DayTemplate, FixedTemplateBlock, NewTimeBlock,
-    ScheduleRebuildResult, ScheduleWarning, TimeBlock, TimeBlockUpdate, TimerTickPayload, Weekday,
-    WeeklyTemplate,
+    BlockSource, BlockStatus, BlockType, DayTemplate, EmergencyBlockRequest, FixedTemplateBlock,
+    NewTimeBlock, ScheduleActionResult, ScheduleRebuildResult, ScheduleWarning, TimeBlock,
+    TimeBlockUpdate, TimerTickPayload, Weekday, WeeklyTemplate,
 };
 
 pub struct ScheduleState {
@@ -32,6 +32,22 @@ struct PausedBlock {
     remaining_secs: i64,
     paused_at: i64,
     original_end_time: i64,
+    available_pause_ms: i64,
+    horizon_end: i64,
+}
+
+#[derive(Debug, Clone)]
+struct RestAdjustmentPlan {
+    from_time: i64,
+    horizon_end: i64,
+    shift_ms: i64,
+    adjustments: Vec<RestBlockAdjustment>,
+}
+
+#[derive(Debug, Clone)]
+struct RestBlockAdjustment {
+    block_id: i64,
+    delta_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -433,8 +449,9 @@ pub fn rebuild_schedule(
 pub fn complete_current_block(
     connection: &Connection,
     schedule: &ScheduleState,
-) -> Result<Option<TimeBlock>, String> {
-    finish_current_block(connection, schedule, BlockStatus::Completed)
+    preferences: &UserPreferences,
+) -> Result<ScheduleActionResult, String> {
+    finish_current_block_with_rest(connection, schedule, preferences, BlockStatus::Completed)
 }
 
 pub fn skip_current_block(
@@ -447,8 +464,9 @@ pub fn skip_current_block(
 pub fn extend_current_block(
     connection: &Connection,
     schedule: &ScheduleState,
+    preferences: &UserPreferences,
     minutes: i64,
-) -> Result<Option<TimeBlock>, String> {
+) -> Result<ScheduleActionResult, String> {
     if minutes <= 0 {
         return Err("minutes must be greater than 0".to_string());
     }
@@ -458,6 +476,14 @@ pub fn extend_current_block(
         .ok_or_else(|| "no active block to extend".to_string())?;
     let old_end = block.end_time;
     let delta = minutes * 60 * 1_000;
+    let mut warnings = Vec::new();
+    let plan = build_rest_shrink_plan(
+        connection,
+        old_end,
+        preferences,
+        delta,
+        ShrinkStrategy::Sequential,
+    )?;
 
     connection
         .execute(
@@ -466,7 +492,15 @@ pub fn extend_current_block(
         )
         .map_err(|error| error.to_string())?;
 
-    shift_future_blocks(connection, old_end, delta)?;
+    if let Some(plan) = plan.filter(|plan| plan.shift_ms >= delta) {
+        apply_rest_adjustment_plan(connection, &plan)?;
+    } else {
+        warnings.push(ScheduleWarning {
+            kind: "rescheduled_after_extend".to_string(),
+            message: "Not enough rest remained before the next fixed boundary, so the future schedule was rebuilt around the longer current block.".to_string(),
+        });
+        rebuild_schedule(connection, old_end, preferences)?;
+    }
 
     if let Some(paused) = &mut schedule
         .runtime
@@ -480,19 +514,55 @@ pub fn extend_current_block(
         }
     }
 
-    get_block_by_id(connection, block.id)
+    Ok(ScheduleActionResult {
+        current_block: get_block_by_id(connection, block.id)?,
+        warnings,
+    })
 }
 
 pub fn pause_current_block(
     connection: &Connection,
     schedule: &ScheduleState,
-) -> Result<Option<TimeBlock>, String> {
+    preferences: &UserPreferences,
+) -> Result<ScheduleActionResult, String> {
     let now = timestamp_ms();
     let block = refresh_schedule_status(connection)?
         .ok_or_else(|| "no active block to pause".to_string())?;
 
     if block.status != BlockStatus::Active {
         return Err("only an active block can be paused".to_string());
+    }
+
+    let Some(plan) = build_rest_shrink_plan(
+        connection,
+        block.end_time,
+        preferences,
+        i64::MAX / 4,
+        ShrinkStrategy::ImmediateThenProportional,
+    )?
+    else {
+        return Ok(ScheduleActionResult {
+            current_block: Some(block),
+            warnings: vec![ScheduleWarning {
+                kind: "pause_denied".to_string(),
+                message: "There is no rest buffer left before the next fixed boundary, so this block has to continue.".to_string(),
+            }],
+        });
+    };
+
+    let available_pause_ms = plan
+        .adjustments
+        .iter()
+        .map(|adjustment| -adjustment.delta_ms)
+        .sum();
+    if available_pause_ms <= 0 {
+        return Ok(ScheduleActionResult {
+            current_block: Some(block),
+            warnings: vec![ScheduleWarning {
+                kind: "pause_denied".to_string(),
+                message: "There is no rest buffer left before the next fixed boundary, so this block has to continue.".to_string(),
+            }],
+        });
     }
 
     let remaining_secs = seconds_remaining(block.end_time, now);
@@ -509,32 +579,117 @@ pub fn pause_current_block(
         remaining_secs,
         paused_at: now,
         original_end_time: block.end_time,
+        available_pause_ms,
+        horizon_end: plan.horizon_end,
     });
 
-    get_block_by_id(connection, block.id)
+    Ok(ScheduleActionResult {
+        current_block: get_block_by_id(connection, block.id)?,
+        warnings: vec![],
+    })
 }
 
 pub fn resume_current_block(
     connection: &Connection,
     schedule: &ScheduleState,
-) -> Result<Option<TimeBlock>, String> {
+    preferences: &UserPreferences,
+) -> Result<ScheduleActionResult, String> {
     let now = timestamp_ms();
     let paused = {
         let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
         runtime.paused.take()
     }
     .ok_or_else(|| "no paused block to resume".to_string())?;
+    let block_id = paused.block_id;
+    let delta = now
+        .saturating_sub(paused.paused_at)
+        .min(paused.available_pause_ms);
+    let warnings = apply_pause_resume(connection, paused, preferences, delta, false)?;
 
-    let delta = now.saturating_sub(paused.paused_at);
-    connection
-        .execute(
-            "UPDATE time_blocks SET status = 'active', end_time = end_time + ?1, updated_at = ?2 WHERE id = ?3",
-            params![delta, now, paused.block_id],
-        )
-        .map_err(|error| error.to_string())?;
+    Ok(ScheduleActionResult {
+        current_block: get_block_by_id(connection, block_id)?,
+        warnings,
+    })
+}
 
-    shift_future_blocks(connection, paused.original_end_time, delta)?;
-    get_block_by_id(connection, paused.block_id)
+pub fn start_emergency_block(
+    connection: &Connection,
+    schedule: &ScheduleState,
+    preferences: &UserPreferences,
+    request: EmergencyBlockRequest,
+) -> Result<ScheduleActionResult, String> {
+    if request.duration_minutes <= 0 {
+        return Err("durationMinutes must be greater than 0".to_string());
+    }
+
+    let now = timestamp_ms();
+    let capped_minutes = request
+        .duration_minutes
+        .min(i64::from(preferences.emergency_block_max_minutes.max(1)));
+    let end_time = now + capped_minutes * 60 * 1_000;
+    let title = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Emergency")
+        .to_string();
+    let mut warnings = Vec::new();
+
+    if let Some(current) = current_or_paused_block(connection, schedule)? {
+        connection
+            .execute(
+                "UPDATE time_blocks SET end_time = ?1, status = ?2, updated_at = ?3 WHERE id = ?4",
+                params![
+                    now,
+                    block_status_to_str(BlockStatus::Skipped),
+                    now,
+                    current.id
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+        if runtime
+            .paused
+            .as_ref()
+            .map(|paused| paused.block_id == current.id)
+            .unwrap_or(false)
+        {
+            runtime.paused = None;
+        }
+        runtime.last_emitted_block_id = None;
+    }
+
+    let emergency = add_time_block(
+        connection,
+        NewTimeBlock {
+            title,
+            block_type: BlockType::Custom,
+            start_time: now,
+            end_time,
+            task_id: None,
+            intensity: 5,
+            source: Some(BlockSource::Emergency),
+        },
+    )?;
+
+    if capped_minutes < request.duration_minutes {
+        warnings.push(ScheduleWarning {
+            kind: "emergency_capped".to_string(),
+            message: format!(
+                "Emergency blocks are capped at {} minutes, so the request was shortened.",
+                preferences.emergency_block_max_minutes.max(1)
+            ),
+        });
+    }
+
+    rebuild_schedule(connection, now, preferences)?;
+
+    Ok(ScheduleActionResult {
+        current_block: get_block_by_id(connection, emergency.id)?,
+        warnings,
+    })
 }
 
 fn finish_current_block(
@@ -575,6 +730,409 @@ fn finish_current_block(
     refresh_schedule_status(connection)
 }
 
+fn finish_current_block_with_rest(
+    connection: &Connection,
+    schedule: &ScheduleState,
+    preferences: &UserPreferences,
+    final_status: BlockStatus,
+) -> Result<ScheduleActionResult, String> {
+    let now = timestamp_ms();
+    let block = current_or_paused_block(connection, schedule)?
+        .ok_or_else(|| "no current block to update".to_string())?;
+    let old_end = block.end_time;
+    let new_end = min(now, old_end);
+    let reclaimed_ms = old_end.saturating_sub(new_end);
+    let mut warnings = Vec::new();
+
+    connection
+        .execute(
+            "UPDATE time_blocks SET status = ?1, end_time = ?2, updated_at = ?3 WHERE id = ?4",
+            params![block_status_to_str(final_status), new_end, now, block.id],
+        )
+        .map_err(|error| error.to_string())?;
+
+    if reclaimed_ms > 0 {
+        if let Some(plan) = build_rest_growth_plan(connection, new_end, preferences, reclaimed_ms)?
+        {
+            apply_rest_adjustment_plan(connection, &plan)?;
+        } else {
+            warnings.push(ScheduleWarning {
+                kind: "rescheduled_after_early_completion".to_string(),
+                message: "Early completion produced more free time than nearby rest could absorb, so the future schedule was rebuilt.".to_string(),
+            });
+            rebuild_schedule(connection, new_end, preferences)?;
+        }
+    }
+
+    let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+    if runtime
+        .paused
+        .as_ref()
+        .map(|paused| paused.block_id == block.id)
+        .unwrap_or(false)
+    {
+        runtime.paused = None;
+    }
+    runtime.last_emitted_block_id = None;
+    drop(runtime);
+
+    Ok(ScheduleActionResult {
+        current_block: refresh_schedule_status(connection)?,
+        warnings,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ShrinkStrategy {
+    Sequential,
+    ImmediateThenProportional,
+}
+
+fn apply_pause_resume(
+    connection: &Connection,
+    paused: PausedBlock,
+    preferences: &UserPreferences,
+    delta: i64,
+    forced_resume: bool,
+) -> Result<Vec<ScheduleWarning>, String> {
+    let now = timestamp_ms();
+    let mut warnings = Vec::new();
+
+    if delta > 0 {
+        let plan = build_rest_shrink_plan_until(
+            connection,
+            paused.original_end_time,
+            paused.horizon_end,
+            preferences,
+            delta,
+            ShrinkStrategy::ImmediateThenProportional,
+        )?
+        .ok_or_else(|| "pause buffer disappeared before resume".to_string())?;
+        apply_rest_adjustment_plan(connection, &plan)?;
+        connection
+            .execute(
+                "UPDATE time_blocks SET status = 'active', end_time = end_time + ?1, updated_at = ?2 WHERE id = ?3",
+                params![delta, now, paused.block_id],
+            )
+            .map_err(|error| error.to_string())?;
+    } else {
+        connection
+            .execute(
+                "UPDATE time_blocks SET status = 'active', updated_at = ?1 WHERE id = ?2",
+                params![now, paused.block_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    if forced_resume {
+        warnings.push(ScheduleWarning {
+            kind: "pause_buffer_exhausted".to_string(),
+            message: "The pause used all available rest before the next fixed boundary, so the current block was forced to continue.".to_string(),
+        });
+    }
+
+    Ok(warnings)
+}
+
+fn build_rest_shrink_plan(
+    connection: &Connection,
+    from_time: i64,
+    preferences: &UserPreferences,
+    requested_ms: i64,
+    strategy: ShrinkStrategy,
+) -> Result<Option<RestAdjustmentPlan>, String> {
+    let horizon_end = find_local_horizon_end(connection, from_time)?;
+    build_rest_shrink_plan_until(
+        connection,
+        from_time,
+        horizon_end,
+        preferences,
+        requested_ms,
+        strategy,
+    )
+}
+
+fn build_rest_shrink_plan_until(
+    connection: &Connection,
+    from_time: i64,
+    horizon_end: i64,
+    preferences: &UserPreferences,
+    requested_ms: i64,
+    strategy: ShrinkStrategy,
+) -> Result<Option<RestAdjustmentPlan>, String> {
+    let blocks = load_adjustable_horizon_blocks(connection, from_time, horizon_end)?;
+    let min_rest_ms = i64::from(preferences.minimum_rest_minutes.max(1)) * 60 * 1_000;
+    let mut break_capacity: Vec<(i64, i64)> = blocks
+        .iter()
+        .filter(|block| block.block_type == BlockType::Break)
+        .filter_map(|block| {
+            let duration = block.end_time - block.start_time;
+            let capacity = duration.saturating_sub(min_rest_ms);
+            (capacity > 0).then_some((block.id, capacity))
+        })
+        .collect();
+
+    if break_capacity.is_empty() {
+        return Ok(None);
+    }
+
+    let total_available = break_capacity
+        .iter()
+        .map(|(_, capacity)| *capacity)
+        .sum::<i64>();
+    let target = requested_ms.min(total_available);
+    if target <= 0 {
+        return Ok(None);
+    }
+
+    let mut reductions = Vec::new();
+    match strategy {
+        ShrinkStrategy::Sequential => {
+            let mut remaining = target;
+            for (block_id, capacity) in break_capacity {
+                if remaining <= 0 {
+                    break;
+                }
+                let applied = remaining.min(capacity);
+                if applied > 0 {
+                    reductions.push(RestBlockAdjustment {
+                        block_id,
+                        delta_ms: -applied,
+                    });
+                    remaining -= applied;
+                }
+            }
+        }
+        ShrinkStrategy::ImmediateThenProportional => {
+            let mut remaining = target;
+            if let Some((block_id, capacity)) = break_capacity.first().copied() {
+                let applied = remaining.min(capacity);
+                if applied > 0 {
+                    reductions.push(RestBlockAdjustment {
+                        block_id,
+                        delta_ms: -applied,
+                    });
+                    remaining -= applied;
+                }
+                break_capacity[0].1 -= applied;
+            }
+
+            if remaining > 0 {
+                let proportional: Vec<(i64, i64)> = break_capacity
+                    .iter()
+                    .copied()
+                    .skip(1)
+                    .filter(|(_, capacity)| *capacity > 0)
+                    .collect();
+                let total_remaining = proportional
+                    .iter()
+                    .map(|(_, capacity)| *capacity)
+                    .sum::<i64>();
+                if total_remaining > 0 {
+                    let mut applied_total = 0_i64;
+                    for (block_id, capacity) in &proportional {
+                        let share = ((remaining as f64)
+                            * (*capacity as f64 / total_remaining as f64))
+                            .floor() as i64;
+                        let applied = share.min(*capacity);
+                        if applied > 0 {
+                            reductions.push(RestBlockAdjustment {
+                                block_id: *block_id,
+                                delta_ms: -applied,
+                            });
+                            applied_total += applied;
+                        }
+                    }
+
+                    let mut leftover = remaining - applied_total;
+                    if leftover > 0 {
+                        for (block_id, capacity) in proportional {
+                            if leftover <= 0 {
+                                break;
+                            }
+                            let already_applied = reductions
+                                .iter()
+                                .filter(|adjustment| adjustment.block_id == block_id)
+                                .map(|adjustment| -adjustment.delta_ms)
+                                .sum::<i64>();
+                            let available = capacity.saturating_sub(already_applied);
+                            if available <= 0 {
+                                continue;
+                            }
+                            let applied = leftover.min(available);
+                            reductions.push(RestBlockAdjustment {
+                                block_id,
+                                delta_ms: -applied,
+                            });
+                            leftover -= applied;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Some(RestAdjustmentPlan {
+        from_time,
+        horizon_end,
+        shift_ms: target,
+        adjustments: merge_rest_adjustments(reductions),
+    }))
+}
+
+fn build_rest_growth_plan(
+    connection: &Connection,
+    from_time: i64,
+    preferences: &UserPreferences,
+    requested_ms: i64,
+) -> Result<Option<RestAdjustmentPlan>, String> {
+    let horizon_end = find_local_horizon_end(connection, from_time)?;
+    let blocks = load_adjustable_horizon_blocks(connection, from_time, horizon_end)?;
+    let max_multiplier = preferences.maximum_rest_multiplier.max(1.0);
+    let mut remaining = requested_ms;
+    let mut adjustments = Vec::new();
+
+    for block in blocks
+        .iter()
+        .filter(|block| block.block_type == BlockType::Break)
+    {
+        if remaining <= 0 {
+            break;
+        }
+        let current_duration = block.end_time - block.start_time;
+        let max_duration = ((current_duration as f64) * f64::from(max_multiplier)).ceil() as i64;
+        let capacity = max_duration.saturating_sub(current_duration);
+        if capacity <= 0 {
+            continue;
+        }
+        let applied = remaining.min(capacity);
+        adjustments.push(RestBlockAdjustment {
+            block_id: block.id,
+            delta_ms: applied,
+        });
+        remaining -= applied;
+    }
+
+    if remaining > 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(RestAdjustmentPlan {
+        from_time,
+        horizon_end,
+        shift_ms: -requested_ms,
+        adjustments,
+    }))
+}
+
+fn apply_rest_adjustment_plan(
+    connection: &Connection,
+    plan: &RestAdjustmentPlan,
+) -> Result<(), String> {
+    let blocks = load_adjustable_horizon_blocks(connection, plan.from_time, plan.horizon_end)?;
+    let adjustment_map = plan
+        .adjustments
+        .iter()
+        .map(|adjustment| (adjustment.block_id, adjustment.delta_ms))
+        .collect::<std::collections::HashMap<_, _>>();
+    let now = timestamp_ms();
+    let mut offset = plan.shift_ms;
+
+    for block in blocks {
+        let delta_ms = adjustment_map.get(&block.id).copied().unwrap_or(0);
+        let start_time = block.start_time + offset;
+        let end_time = block.end_time + offset + delta_ms;
+        connection
+            .execute(
+                "UPDATE time_blocks SET start_time = ?1, end_time = ?2, updated_at = ?3 WHERE id = ?4",
+                params![start_time, end_time, now, block.id],
+            )
+            .map_err(|error| error.to_string())?;
+        offset += delta_ms;
+    }
+
+    Ok(())
+}
+
+fn merge_rest_adjustments(adjustments: Vec<RestBlockAdjustment>) -> Vec<RestBlockAdjustment> {
+    let mut merged: Vec<RestBlockAdjustment> = Vec::new();
+    for adjustment in adjustments {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| existing.block_id == adjustment.block_id)
+        {
+            existing.delta_ms += adjustment.delta_ms;
+        } else {
+            merged.push(adjustment);
+        }
+    }
+    merged
+}
+
+fn load_adjustable_horizon_blocks(
+    connection: &Connection,
+    from_time: i64,
+    horizon_end: i64,
+) -> Result<Vec<TimeBlock>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT id, title, block_type, start_time, end_time, task_id,
+                   status, intensity, source, created_at, updated_at
+            FROM time_blocks
+            WHERE start_time >= ?1
+              AND start_time < ?2
+              AND status = 'scheduled'
+            ORDER BY start_time ASC, id ASC
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map(params![from_time, horizon_end], map_time_block)
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn find_local_horizon_end(connection: &Connection, from_time: i64) -> Result<i64, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT id, title, block_type, start_time, end_time, task_id,
+                   status, intensity, source, created_at, updated_at
+            FROM time_blocks
+            WHERE start_time >= ?1
+              AND status IN ('scheduled', 'active', 'paused')
+            ORDER BY start_time ASC, id ASC
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let blocks = statement
+        .query_map(params![from_time], map_time_block)
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    for block in &blocks {
+        if is_immutable_boundary(block) {
+            return Ok(block.start_time);
+        }
+    }
+
+    Ok(blocks
+        .iter()
+        .map(|block| block.end_time)
+        .max()
+        .unwrap_or(from_time))
+}
+
+fn is_immutable_boundary(block: &TimeBlock) -> bool {
+    matches!(block.source, BlockSource::Manual | BlockSource::Emergency)
+        || matches!(block.block_type, BlockType::Sleep | BlockType::Meal)
+}
+
 fn current_or_paused_block(
     connection: &Connection,
     schedule: &ScheduleState,
@@ -588,10 +1146,35 @@ fn current_or_paused_block(
 
 fn tick_schedule(app: &AppHandle) -> Result<(), String> {
     let database = app.state::<DatabaseState>();
+    let config = app.state::<crate::config::manager::ConfigState>();
     let schedule = app.state::<ScheduleState>();
     let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
 
     if let Some(paused) = runtime.paused.clone() {
+        if timestamp_ms().saturating_sub(paused.paused_at) >= paused.available_pause_ms {
+            runtime.paused = None;
+            drop(runtime);
+
+            let connection = database.connection()?;
+            let preferences = config.get_preferences()?;
+            let warnings = apply_pause_resume(
+                &connection,
+                paused.clone(),
+                &preferences,
+                paused.available_pause_ms,
+                true,
+            )?;
+            if !warnings.is_empty() {
+                app.emit("schedule-warning", &warnings)
+                    .map_err(|error| error.to_string())?;
+            }
+            if let Some(block) = get_block_by_id(&connection, paused.block_id)? {
+                app.emit("block-changed", &block)
+                    .map_err(|error| error.to_string())?;
+            }
+            return Ok(());
+        }
+
         let connection = database.connection()?;
         if let Some(block) = get_block_by_id(&connection, paused.block_id)? {
             if runtime.last_emitted_block_id != Some(block.id) {
@@ -1807,6 +2390,7 @@ fn block_source_to_str(source: BlockSource) -> &'static str {
         BlockSource::Manual => "manual",
         BlockSource::Template => "template",
         BlockSource::Planner => "planner",
+        BlockSource::Emergency => "emergency",
     }
 }
 
@@ -1815,6 +2399,7 @@ fn block_source_from_str(value: &str) -> Result<BlockSource, String> {
         "manual" => Ok(BlockSource::Manual),
         "template" => Ok(BlockSource::Template),
         "planner" => Ok(BlockSource::Planner),
+        "emergency" => Ok(BlockSource::Emergency),
         _ => Err(format!("unknown block source: {value}")),
     }
 }
@@ -1825,13 +2410,16 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        add_time_block, apply_weekly_template, complete_current_block, get_schedule_range,
-        pause_current_block, resume_current_block, save_weekly_template, ScheduleState,
+        add_time_block, apply_weekly_template, complete_current_block, extend_current_block,
+        get_schedule_range, pause_current_block, resume_current_block, save_weekly_template,
+        start_emergency_block, ScheduleState,
     };
     use crate::{
+        config::models::UserPreferences,
         db::migrations::run_migrations,
         schedule::models::{
-            BlockType, FixedTemplateBlock, NewTimeBlock, TimeBlock, Weekday, WeeklyTemplate,
+            BlockSource, BlockType, EmergencyBlockRequest, FixedTemplateBlock, NewTimeBlock,
+            TimeBlock, Weekday, WeeklyTemplate,
         },
     };
 
@@ -1850,10 +2438,15 @@ mod tests {
             .expect("schedule range should load")
     }
 
+    fn preferences() -> UserPreferences {
+        UserPreferences::default()
+    }
+
     #[test]
-    fn completes_current_block_and_shifts_next_block_earlier() {
+    fn completes_current_block_by_donating_time_to_rest() {
         let (connection, schedule) = setup();
         let now = now_ms();
+        let preferences = preferences();
 
         let current = add_time_block(
             &connection,
@@ -1861,7 +2454,7 @@ mod tests {
                 title: "Current".to_string(),
                 block_type: BlockType::Work,
                 start_time: now - 10 * 60 * 1_000,
-                end_time: now + 20 * 60 * 1_000,
+                end_time: now + 10 * 60 * 1_000,
                 task_id: None,
                 intensity: 4,
                 source: None,
@@ -1872,30 +2465,120 @@ mod tests {
         let next = add_time_block(
             &connection,
             NewTimeBlock {
-                title: "Next".to_string(),
+                title: "Break".to_string(),
                 block_type: BlockType::Break,
                 start_time: current.end_time,
                 end_time: current.end_time + 30 * 60 * 1_000,
                 task_id: None,
                 intensity: 2,
-                source: None,
+                source: Some(BlockSource::Planner),
             },
         )
         .expect("next block should create");
 
-        let returned = complete_current_block(&connection, &schedule)
-            .expect("completion should work")
-            .expect("a next block should become current");
-        let updated_blocks = load_blocks(&connection);
+        let after_break = add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Follow-up".to_string(),
+                block_type: BlockType::Work,
+                start_time: next.end_time,
+                end_time: next.end_time + 30 * 60 * 1_000,
+                task_id: None,
+                intensity: 4,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("follow-up block should create");
 
-        assert_eq!(returned.id, next.id);
-        assert!(updated_blocks[1].start_time < next.start_time);
+        let result = complete_current_block(&connection, &schedule, &preferences)
+            .expect("completion should work");
+        let updated_blocks = load_blocks(&connection);
+        let updated_break = updated_blocks
+            .iter()
+            .find(|block| block.id == next.id)
+            .expect("break should still exist");
+        let updated_follow_up = updated_blocks
+            .iter()
+            .find(|block| block.id == after_break.id)
+            .expect("follow-up should still exist");
+
+        assert!(result.warnings.is_empty());
+        assert!(updated_break.start_time < next.start_time);
+        assert_eq!(updated_break.end_time, next.end_time);
+        assert_eq!(updated_follow_up.start_time, after_break.start_time);
+    }
+
+    #[test]
+    fn extending_current_block_consumes_following_rest_before_replanning() {
+        let (connection, schedule) = setup();
+        let now = now_ms();
+        let preferences = preferences();
+
+        let current = add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Current".to_string(),
+                block_type: BlockType::Work,
+                start_time: now - 5 * 60 * 1_000,
+                end_time: now + 5 * 60 * 1_000,
+                task_id: None,
+                intensity: 4,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("current block should create");
+
+        let break_block = add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Break".to_string(),
+                block_type: BlockType::Break,
+                start_time: current.end_time,
+                end_time: current.end_time + 30 * 60 * 1_000,
+                task_id: None,
+                intensity: 1,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("break block should create");
+
+        let next_work = add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Next".to_string(),
+                block_type: BlockType::Work,
+                start_time: break_block.end_time,
+                end_time: break_block.end_time + 30 * 60 * 1_000,
+                task_id: None,
+                intensity: 4,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("next work should create");
+
+        let result = extend_current_block(&connection, &schedule, &preferences, 10)
+            .expect("extension should work");
+        let updated_blocks = load_blocks(&connection);
+        let updated_break = updated_blocks
+            .iter()
+            .find(|block| block.id == break_block.id)
+            .expect("break should still exist");
+        let updated_next = updated_blocks
+            .iter()
+            .find(|block| block.id == next_work.id)
+            .expect("next work should still exist");
+
+        assert!(result.warnings.is_empty());
+        assert_eq!(updated_break.end_time, break_block.end_time);
+        assert_eq!(updated_break.duration_secs() / 60, 20);
+        assert_eq!(updated_next.start_time, next_work.start_time);
     }
 
     #[test]
     fn pause_and_resume_extend_current_block() {
         let (connection, schedule) = setup();
         let now = now_ms();
+        let preferences = preferences();
 
         let original = add_time_block(
             &connection,
@@ -1911,13 +2594,73 @@ mod tests {
         )
         .expect("current block should create");
 
-        pause_current_block(&connection, &schedule).expect("pause should work");
+        let next_break = add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Break".to_string(),
+                block_type: BlockType::Break,
+                start_time: original.end_time,
+                end_time: original.end_time + 30 * 60 * 1_000,
+                task_id: None,
+                intensity: 1,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("break should create");
+
+        pause_current_block(&connection, &schedule, &preferences).expect("pause should work");
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let resumed = resume_current_block(&connection, &schedule)
+        let resumed = resume_current_block(&connection, &schedule, &preferences)
             .expect("resume should work")
+            .current_block
             .expect("resumed block should load");
+        let updated_break = load_blocks(&connection)
+            .into_iter()
+            .find(|block| block.id == next_break.id)
+            .expect("break should still exist");
 
         assert!(resumed.end_time >= original.end_time);
+        assert!(updated_break.duration_secs() / 60 <= 30);
+    }
+
+    #[test]
+    fn emergency_blocks_are_capped_and_marked_explicitly() {
+        let (connection, schedule) = setup();
+        let now = now_ms();
+        let preferences = preferences();
+
+        add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Current".to_string(),
+                block_type: BlockType::Work,
+                start_time: now - 5 * 60 * 1_000,
+                end_time: now + 20 * 60 * 1_000,
+                task_id: None,
+                intensity: 4,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("current block should create");
+
+        let emergency = start_emergency_block(
+            &connection,
+            &schedule,
+            &preferences,
+            EmergencyBlockRequest {
+                title: Some("Urgent call".to_string()),
+                duration_minutes: 999,
+            },
+        )
+        .expect("emergency block should start")
+        .current_block
+        .expect("emergency block should exist");
+
+        assert_eq!(emergency.source, BlockSource::Emergency);
+        assert_eq!(
+            (emergency.end_time - emergency.start_time) / 60_000,
+            i64::from(preferences.emergency_block_max_minutes)
+        );
     }
 
     #[test]

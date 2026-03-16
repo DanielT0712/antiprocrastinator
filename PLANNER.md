@@ -119,3 +119,23 @@ Over time, frontend/UI layers can use planner output to compute semantic diffs s
 - compress preferred rest
 
 The current backend implementation already persists regenerated planner blocks and warnings from a single rebuild transaction.
+
+## Runtime Adjustments
+
+Short runtime actions do not immediately trigger a full rebuild.
+
+- extending the current block first borrows time from future planner rest up to the next immutable boundary
+- completing early first donates reclaimed time into future rest, capped by the configured rest multiplier
+- pausing borrows from the immediately following rest first, then proportionally from later rest before the next immutable boundary
+
+These adjustments never shrink a rest block below the configured minimum rest.
+
+If local rest adjustment cannot satisfy the change cleanly, the backend falls back to a planner rebuild with the current block preserved.
+
+## Emergency Blocks
+
+Emergency blocks are explicit manual interruptions with their own source type.
+
+- they are capped by a user preference
+- they trigger a rebuild of future planner blocks around the emergency window
+- process enforcement stays active during the emergency block, except for the configured emergency app allowlist
