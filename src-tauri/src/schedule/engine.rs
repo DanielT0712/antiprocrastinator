@@ -11,9 +11,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::{config::models::UserPreferences, db::DatabaseState};
 
 use super::models::{
-    BlockSource, BlockStatus, BlockType, DayTemplate, EmergencyBlockRequest, FixedTemplateBlock,
-    NewTimeBlock, ScheduleActionResult, ScheduleRebuildResult, ScheduleWarning, TimeBlock,
-    TimeBlockUpdate, TimerTickPayload, Weekday, WeeklyTemplate,
+    BlockDecisionPrompt, BlockSource, BlockStatus, BlockType, DayTemplate, EmergencyBlockRequest,
+    FixedTemplateBlock, NewTimeBlock, ScheduleActionResult, ScheduleRebuildResult, ScheduleWarning,
+    TimeBlock, TimeBlockUpdate, TimerTickPayload, Weekday, WeeklyTemplate,
 };
 
 pub struct ScheduleState {
@@ -24,6 +24,8 @@ pub struct ScheduleState {
 struct ScheduleRuntime {
     paused: Option<PausedBlock>,
     last_emitted_block_id: Option<i64>,
+    prompted_block_id: Option<i64>,
+    continuing_block_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -472,10 +474,10 @@ pub fn extend_current_block(
     }
 
     let now = timestamp_ms();
-    let block = current_or_paused_block(connection, schedule)?
+    let block = current_or_overdue_work_block(connection, schedule)?
         .ok_or_else(|| "no active block to extend".to_string())?;
     let old_end = block.end_time;
-    let delta = minutes * 60 * 1_000;
+    let delta = minutes * 60 * 1_000 + now.saturating_sub(block.end_time);
     let mut warnings = Vec::new();
     let plan = build_rest_shrink_plan(
         connection,
@@ -612,6 +614,34 @@ pub fn resume_current_block(
     })
 }
 
+pub fn continue_current_block(
+    connection: &Connection,
+    schedule: &ScheduleState,
+    preferences: &UserPreferences,
+) -> Result<ScheduleActionResult, String> {
+    let now = timestamp_ms();
+    let block = current_or_overdue_work_block(connection, schedule)?
+        .ok_or_else(|| "no current work block to continue".to_string())?;
+
+    if block.block_type != BlockType::Work {
+        return Err("only work blocks can be continued".to_string());
+    }
+
+    {
+        let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+        runtime.continuing_block_id = Some(block.id);
+        runtime.prompted_block_id = None;
+        runtime.last_emitted_block_id = None;
+    }
+
+    let warnings = sync_overdue_work_block(connection, schedule, preferences, now, block.id, true)?;
+
+    Ok(ScheduleActionResult {
+        current_block: get_block_by_id(connection, block.id)?,
+        warnings,
+    })
+}
+
 pub fn start_emergency_block(
     connection: &Connection,
     schedule: &ScheduleState,
@@ -658,6 +688,12 @@ pub fn start_emergency_block(
         {
             runtime.paused = None;
         }
+        if runtime.continuing_block_id == Some(current.id) {
+            runtime.continuing_block_id = None;
+        }
+        if runtime.prompted_block_id == Some(current.id) {
+            runtime.prompted_block_id = None;
+        }
         runtime.last_emitted_block_id = None;
     }
 
@@ -698,7 +734,7 @@ fn finish_current_block(
     final_status: BlockStatus,
 ) -> Result<Option<TimeBlock>, String> {
     let now = timestamp_ms();
-    let block = current_or_paused_block(connection, schedule)?
+    let block = current_or_overdue_work_block(connection, schedule)?
         .ok_or_else(|| "no current block to update".to_string())?;
     let old_end = block.end_time;
     let new_end = min(now, old_end);
@@ -723,6 +759,12 @@ fn finish_current_block(
         .unwrap_or(false)
     {
         runtime.paused = None;
+    }
+    if runtime.continuing_block_id == Some(block.id) {
+        runtime.continuing_block_id = None;
+    }
+    if runtime.prompted_block_id == Some(block.id) {
+        runtime.prompted_block_id = None;
     }
     runtime.last_emitted_block_id = None;
     drop(runtime);
@@ -772,6 +814,12 @@ fn finish_current_block_with_rest(
         .unwrap_or(false)
     {
         runtime.paused = None;
+    }
+    if runtime.continuing_block_id == Some(block.id) {
+        runtime.continuing_block_id = None;
+    }
+    if runtime.prompted_block_id == Some(block.id) {
+        runtime.prompted_block_id = None;
     }
     runtime.last_emitted_block_id = None;
     drop(runtime);
@@ -1144,6 +1192,226 @@ fn current_or_paused_block(
     refresh_schedule_status(connection)
 }
 
+fn current_or_overdue_work_block(
+    connection: &Connection,
+    schedule: &ScheduleState,
+) -> Result<Option<TimeBlock>, String> {
+    if let Some(block) = current_or_paused_block(connection, schedule)? {
+        if block.block_type == BlockType::Work {
+            return Ok(Some(block));
+        }
+    }
+
+    connection
+        .query_row(
+            r#"
+            SELECT id, title, block_type, start_time, end_time, task_id,
+                   status, intensity, source, created_at, updated_at
+            FROM time_blocks
+            WHERE status = 'active'
+              AND block_type = 'work'
+            ORDER BY end_time DESC, id DESC
+            LIMIT 1
+            "#,
+            [],
+            map_time_block,
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn sync_overdue_work_block(
+    connection: &Connection,
+    schedule: &ScheduleState,
+    preferences: &UserPreferences,
+    now: i64,
+    block_id: i64,
+    explicit_continue: bool,
+) -> Result<Vec<ScheduleWarning>, String> {
+    let Some(block) = get_block_by_id(connection, block_id)? else {
+        return Ok(vec![]);
+    };
+
+    if block.status != BlockStatus::Active
+        || block.block_type != BlockType::Work
+        || block.end_time > now
+    {
+        return Ok(vec![]);
+    }
+
+    let next_work_start = find_next_work_start(connection, block.id, block.start_time)?;
+    let continuing = explicit_continue
+        || schedule
+            .runtime
+            .lock()
+            .map_err(|error| error.to_string())?
+            .continuing_block_id
+            == Some(block.id);
+
+    if !continuing && next_work_start.map(|start| now >= start).unwrap_or(false) {
+        connection
+            .execute(
+                "UPDATE time_blocks SET status = 'completed', updated_at = ?1 WHERE id = ?2",
+                params![now, block.id],
+            )
+            .map_err(|error| error.to_string())?;
+        let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+        if runtime.prompted_block_id == Some(block.id) {
+            runtime.prompted_block_id = None;
+        }
+        if runtime.continuing_block_id == Some(block.id) {
+            runtime.continuing_block_id = None;
+        }
+        runtime.last_emitted_block_id = None;
+        return Ok(vec![]);
+    }
+
+    let target_end = if continuing {
+        now
+    } else {
+        next_work_start.map_or(now, |start| min(now, start))
+    };
+    let delta = target_end.saturating_sub(block.end_time);
+    if delta <= 0 {
+        return Ok(vec![]);
+    }
+
+    if let Some(plan) = build_rest_shrink_plan(
+        connection,
+        block.end_time,
+        preferences,
+        delta,
+        ShrinkStrategy::Sequential,
+    )?
+    .filter(|plan| plan.shift_ms >= delta)
+    {
+        connection
+            .execute(
+                "UPDATE time_blocks SET end_time = end_time + ?1, updated_at = ?2 WHERE id = ?3",
+                params![delta, now, block.id],
+            )
+            .map_err(|error| error.to_string())?;
+        apply_rest_adjustment_plan(connection, &plan)?;
+        return Ok(vec![]);
+    }
+
+    if continuing {
+        connection
+            .execute(
+                "UPDATE time_blocks SET end_time = ?1, updated_at = ?2 WHERE id = ?3",
+                params![target_end, now, block.id],
+            )
+            .map_err(|error| error.to_string())?;
+        rebuild_schedule(connection, target_end, preferences)?;
+        return Ok(vec![ScheduleWarning {
+            kind: "rescheduled_after_continue".to_string(),
+            message: "Continuing this block used up local rest before the next immutable boundary, so the future schedule was rebuilt around the longer work block.".to_string(),
+        }]);
+    }
+
+    {
+        let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+        if runtime.prompted_block_id == Some(block.id) {
+            runtime.prompted_block_id = None;
+        }
+        runtime.last_emitted_block_id = None;
+    }
+
+    Ok(vec![ScheduleWarning {
+        kind: "overtime_buffer_exhausted".to_string(),
+        message: "This block can no longer borrow rest without breaking minimum rest, so the schedule will move on unless you explicitly continue it.".to_string(),
+    }])
+}
+
+fn current_overdue_prompt(
+    connection: &Connection,
+    schedule: &ScheduleState,
+) -> Result<Option<BlockDecisionPrompt>, String> {
+    let Some(block) = connection
+        .query_row(
+            r#"
+            SELECT id, title, block_type, start_time, end_time, task_id,
+                   status, intensity, source, created_at, updated_at
+            FROM time_blocks
+            WHERE status = 'active'
+              AND block_type = 'work'
+              AND end_time <= ?1
+            ORDER BY end_time DESC, id DESC
+            LIMIT 1
+            "#,
+            params![timestamp_ms()],
+            map_time_block,
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+
+    let overlapping_other = connection
+        .query_row(
+            r#"
+            SELECT 1
+            FROM time_blocks
+            WHERE id != ?1
+              AND start_time <= ?2
+              AND end_time > ?2
+              AND status IN ('scheduled', 'active')
+            LIMIT 1
+            "#,
+            params![block.id, timestamp_ms()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if overlapping_other.is_some() {
+        return Ok(None);
+    }
+
+    let runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+    if runtime.continuing_block_id == Some(block.id) {
+        return Ok(None);
+    }
+
+    let next_work_start = find_next_work_start(connection, block.id, block.start_time)?;
+    if next_work_start
+        .map(|start| timestamp_ms() >= start)
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(BlockDecisionPrompt {
+        block,
+        next_work_start,
+        continuing: false,
+    }))
+}
+
+fn find_next_work_start(
+    connection: &Connection,
+    block_id: i64,
+    block_start_time: i64,
+) -> Result<Option<i64>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT start_time
+            FROM time_blocks
+            WHERE id != ?1
+              AND block_type = 'work'
+              AND status IN ('scheduled', 'active')
+              AND start_time > ?2
+            ORDER BY start_time ASC, id ASC
+            LIMIT 1
+            "#,
+            params![block_id, block_start_time],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
 fn tick_schedule(app: &AppHandle) -> Result<(), String> {
     let database = app.state::<DatabaseState>();
     let config = app.state::<crate::config::manager::ConfigState>();
@@ -1199,10 +1467,39 @@ fn tick_schedule(app: &AppHandle) -> Result<(), String> {
 
     drop(runtime);
 
-    let current = {
-        let connection = database.connection()?;
-        refresh_schedule_status(&connection)?
+    let preferences = config.get_preferences()?;
+    let connection = database.connection()?;
+    let overdue_work = current_or_overdue_work_block(&connection, &schedule)?;
+    let warnings = if let Some(block) = &overdue_work {
+        sync_overdue_work_block(
+            &connection,
+            &schedule,
+            &preferences,
+            timestamp_ms(),
+            block.id,
+            false,
+        )?
+    } else {
+        vec![]
     };
+    if !warnings.is_empty() {
+        app.emit("schedule-warning", &warnings)
+            .map_err(|error| error.to_string())?;
+    }
+
+    if let Some(prompt) = current_overdue_prompt(&connection, &schedule)? {
+        let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+        if runtime.prompted_block_id != Some(prompt.block.id) {
+            app.emit("block-finished-prompt", &prompt)
+                .map_err(|error| error.to_string())?;
+            runtime.prompted_block_id = Some(prompt.block.id);
+        }
+    } else {
+        let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+        runtime.prompted_block_id = None;
+    }
+
+    let current = refresh_schedule_status(&connection)?;
 
     if let Some(block) = current {
         let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
@@ -1213,6 +1510,12 @@ fn tick_schedule(app: &AppHandle) -> Result<(), String> {
             runtime.last_emitted_block_id = Some(block.id);
         }
 
+        if runtime.prompted_block_id == Some(block.id)
+            && runtime.continuing_block_id == Some(block.id)
+        {
+            runtime.prompted_block_id = None;
+        }
+
         app.emit(
             "timer-tick",
             TimerTickPayload {
@@ -1221,6 +1524,9 @@ fn tick_schedule(app: &AppHandle) -> Result<(), String> {
             },
         )
         .map_err(|error| error.to_string())?;
+    } else {
+        let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+        runtime.prompted_block_id = None;
     }
 
     Ok(())
@@ -1231,7 +1537,7 @@ fn refresh_schedule_status(connection: &Connection) -> Result<Option<TimeBlock>,
 
     connection
         .execute(
-            "UPDATE time_blocks SET status = 'completed', updated_at = ?1 WHERE status = 'active' AND end_time <= ?1",
+            "UPDATE time_blocks SET status = 'completed', updated_at = ?1 WHERE status = 'active' AND end_time <= ?1 AND block_type != 'work'",
             params![now],
         )
         .map_err(|error| error.to_string())?;
@@ -1267,6 +1573,27 @@ fn refresh_schedule_status(connection: &Connection) -> Result<Option<TimeBlock>,
         }
 
         return Ok(Some(block));
+    }
+
+    let overdue_work = connection
+        .query_row(
+            r#"
+            SELECT id, title, block_type, start_time, end_time, task_id,
+                   status, intensity, source, created_at, updated_at
+            FROM time_blocks
+            WHERE status = 'active'
+              AND block_type = 'work'
+            ORDER BY end_time DESC, id DESC
+            LIMIT 1
+            "#,
+            [],
+            map_time_block,
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+
+    if overdue_work.is_some() {
+        return Ok(overdue_work);
     }
 
     connection
@@ -2407,19 +2734,20 @@ fn block_source_from_str(value: &str) -> Result<BlockSource, String> {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
 
     use super::{
-        add_time_block, apply_weekly_template, complete_current_block, extend_current_block,
-        get_schedule_range, pause_current_block, resume_current_block, save_weekly_template,
-        start_emergency_block, ScheduleState,
+        add_time_block, apply_weekly_template, complete_current_block, continue_current_block,
+        extend_current_block, get_block_by_id, get_current_block, get_schedule_range,
+        pause_current_block, resume_current_block, save_weekly_template, start_emergency_block,
+        sync_overdue_work_block, ScheduleState,
     };
     use crate::{
         config::models::UserPreferences,
         db::migrations::run_migrations,
         schedule::models::{
-            BlockSource, BlockType, EmergencyBlockRequest, FixedTemplateBlock, NewTimeBlock,
-            TimeBlock, Weekday, WeeklyTemplate,
+            BlockSource, BlockStatus, BlockType, EmergencyBlockRequest, FixedTemplateBlock,
+            NewTimeBlock, TimeBlock, Weekday, WeeklyTemplate,
         },
     };
 
@@ -2570,7 +2898,8 @@ mod tests {
 
         assert!(result.warnings.is_empty());
         assert_eq!(updated_break.end_time, break_block.end_time);
-        assert_eq!(updated_break.duration_secs() / 60, 20);
+        assert!(updated_break.duration_secs() / 60 < 30);
+        assert!(updated_break.duration_secs() / 60 >= i64::from(preferences.minimum_rest_minutes));
         assert_eq!(updated_next.start_time, next_work.start_time);
     }
 
@@ -2621,6 +2950,123 @@ mod tests {
 
         assert!(resumed.end_time >= original.end_time);
         assert!(updated_break.duration_secs() / 60 <= 30);
+    }
+
+    #[test]
+    fn overdue_work_block_can_be_explicitly_continued() {
+        let (connection, schedule) = setup();
+        let now = now_ms();
+        let preferences = preferences();
+
+        let work = add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Current".to_string(),
+                block_type: BlockType::Work,
+                start_time: now - 20 * 60 * 1_000,
+                end_time: now + 5 * 60 * 1_000,
+                task_id: None,
+                intensity: 4,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("work block should create");
+        connection
+            .execute(
+                "UPDATE time_blocks SET end_time = ?1, status = 'active' WHERE id = ?2",
+                params![now - 60 * 1_000, work.id],
+            )
+            .expect("work block should become overdue active");
+
+        add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Break".to_string(),
+                block_type: BlockType::Break,
+                start_time: work.end_time,
+                end_time: work.end_time + 30 * 60 * 1_000,
+                task_id: None,
+                intensity: 1,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("break block should create");
+
+        let continued = continue_current_block(&connection, &schedule, &preferences)
+            .expect("continue should work")
+            .current_block
+            .expect("continued block should load");
+
+        assert!(continued.end_time >= now);
+    }
+
+    #[test]
+    fn overdue_work_block_yields_to_next_work_block_without_user_input() {
+        let (connection, schedule) = setup();
+        let now = now_ms();
+        let preferences = preferences();
+
+        let current = add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Current".to_string(),
+                block_type: BlockType::Work,
+                start_time: now - 30 * 60 * 1_000,
+                end_time: now + 5 * 60 * 1_000,
+                task_id: None,
+                intensity: 4,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("current block should create");
+        connection
+            .execute(
+                "UPDATE time_blocks SET end_time = ?1, status = 'active' WHERE id = ?2",
+                params![now - 20 * 60 * 1_000, current.id],
+            )
+            .expect("current block should become overdue active");
+
+        add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Break".to_string(),
+                block_type: BlockType::Break,
+                start_time: current.end_time,
+                end_time: current.end_time + 15 * 60 * 1_000,
+                task_id: None,
+                intensity: 1,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("break should create");
+
+        let next_work = add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Next".to_string(),
+                block_type: BlockType::Work,
+                start_time: now - 5 * 60 * 1_000,
+                end_time: now + 20 * 60 * 1_000,
+                task_id: None,
+                intensity: 4,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("next work should create");
+
+        let warnings =
+            sync_overdue_work_block(&connection, &schedule, &preferences, now, current.id, false)
+                .expect("sync should work");
+        let active = get_current_block(&connection, &schedule)
+            .expect("current block should load")
+            .expect("there should be a current block");
+        let finished = get_block_by_id(&connection, current.id)
+            .expect("finished block should load")
+            .expect("finished block should exist");
+
+        assert!(warnings.is_empty());
+        assert_eq!(active.id, next_work.id);
+        assert_eq!(finished.status, BlockStatus::Completed);
     }
 
     #[test]

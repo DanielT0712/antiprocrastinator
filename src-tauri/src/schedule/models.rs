@@ -79,6 +79,14 @@ pub struct ScheduleActionResult {
     pub warnings: Vec<ScheduleWarning>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockDecisionPrompt {
+    pub block: TimeBlock,
+    pub next_work_start: Option<i64>,
+    pub continuing: bool,
+}
+
 impl TimeBlock {
     pub fn duration_secs(&self) -> i64 {
         ((self.end_time - self.start_time) / 1_000).max(0)

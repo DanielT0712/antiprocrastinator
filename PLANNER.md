@@ -127,6 +127,9 @@ Short runtime actions do not immediately trigger a full rebuild.
 - extending the current block first borrows time from future planner rest up to the next immutable boundary
 - completing early first donates reclaimed time into future rest, capped by the configured rest multiplier
 - pausing borrows from the immediately following rest first, then proportionally from later rest before the next immutable boundary
+- overdue work blocks raise a decision prompt instead of auto-completing immediately
+- if the user does nothing, overdue work passively consumes available rest until the next work block takes over
+- if the user explicitly continues, elapsed overtime is treated the same as an extension and can trigger a planner rebuild if local rest is exhausted
 
 These adjustments never shrink a rest block below the configured minimum rest.
 

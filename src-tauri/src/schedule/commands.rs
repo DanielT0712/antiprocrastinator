@@ -146,6 +146,17 @@ pub fn resume_current_block(
 }
 
 #[tauri::command]
+pub fn continue_current_block(
+    database: State<'_, DatabaseState>,
+    schedule: State<'_, engine::ScheduleState>,
+    config: State<'_, ConfigState>,
+) -> Result<ScheduleActionResult, String> {
+    let connection = database.connection()?;
+    let preferences = config.get_preferences()?;
+    engine::continue_current_block(&connection, &schedule, &preferences)
+}
+
+#[tauri::command]
 pub fn start_emergency_block(
     request: EmergencyBlockRequest,
     database: State<'_, DatabaseState>,
