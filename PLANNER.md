@@ -130,6 +130,8 @@ Short runtime actions do not immediately trigger a full rebuild.
 - overdue work blocks raise a decision prompt instead of auto-completing immediately
 - if the user does nothing, overdue work passively consumes available rest until the next work block takes over
 - if the user explicitly continues, elapsed overtime is treated the same as an extension and can trigger a planner rebuild if local rest is exhausted
+- passive overdue time uses rest/break process permissions, while explicit continue switches enforcement back to work mode
+- prompt, continue, extend, complete-early, emergency, and auto-handoff actions are recorded as analytics events for later reporting
 
 These adjustments never shrink a rest block below the configured minimum rest.
 

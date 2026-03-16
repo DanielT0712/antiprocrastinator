@@ -232,7 +232,10 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         schedule_engine::get_current_block(&connection, &schedule)?
     };
     let preferences = config.get_preferences()?;
-    let active_block_type = current_block.as_ref().map(|block| block.block_type);
+    let active_block_type = {
+        let connection = database.connection()?;
+        schedule_engine::effective_enforcement_block_type(&connection, &schedule)?
+    };
     let emergency_mode = current_block
         .as_ref()
         .map(|block| block.source == BlockSource::Emergency)

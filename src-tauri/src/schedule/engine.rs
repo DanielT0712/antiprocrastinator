@@ -6,9 +6,14 @@ use std::{
 
 use chrono::{Datelike, Days, NaiveDate, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::{config::models::UserPreferences, db::DatabaseState};
+use crate::{
+    analytics::{models::AnalyticsEvent, tracker},
+    config::models::UserPreferences,
+    db::DatabaseState,
+};
 
 use super::models::{
     BlockDecisionPrompt, BlockSource, BlockStatus, BlockType, DayTemplate, EmergencyBlockRequest,
@@ -110,6 +115,26 @@ impl ScheduleState {
     }
 }
 
+fn record_schedule_event(
+    connection: &Connection,
+    event_type: &str,
+    block: Option<&TimeBlock>,
+    payload: serde_json::Value,
+) {
+    let _ = tracker::record_event(
+        connection,
+        AnalyticsEvent {
+            id: 0,
+            event_type: event_type.to_string(),
+            task_id: block.and_then(|block| block.task_id),
+            block_id: block.map(|block| block.id),
+            process_name: None,
+            payload_json: Some(payload.to_string()),
+            occurred_at: timestamp_ms(),
+        },
+    );
+}
+
 pub fn start_timer_loop(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -167,6 +192,28 @@ pub fn get_next_block(
         )
         .optional()
         .map_err(|error| error.to_string())
+}
+
+pub fn effective_enforcement_block_type(
+    connection: &Connection,
+    schedule: &ScheduleState,
+) -> Result<Option<BlockType>, String> {
+    if let Some(block) = current_or_overdue_work_block(connection, schedule)? {
+        if block.block_type == BlockType::Work
+            && block.end_time <= timestamp_ms()
+            && schedule
+                .runtime
+                .lock()
+                .map_err(|error| error.to_string())?
+                .continuing_block_id
+                != Some(block.id)
+        {
+            return Ok(Some(BlockType::Break));
+        }
+        return Ok(Some(block.block_type));
+    }
+
+    get_current_block(connection, schedule).map(|block| block.map(|block| block.block_type))
 }
 
 pub fn get_schedule_range(
@@ -504,6 +551,18 @@ pub fn extend_current_block(
         rebuild_schedule(connection, old_end, preferences)?;
     }
 
+    record_schedule_event(
+        connection,
+        "schedule.extend",
+        Some(&block),
+        json!({
+            "requestedMinutes": minutes,
+            "elapsedOvertimeMinutes": now.saturating_sub(old_end) / 60_000,
+            "totalExtendedMinutes": delta / 60_000,
+            "warningKinds": warnings.iter().map(|warning| warning.kind.clone()).collect::<Vec<_>>()
+        }),
+    );
+
     if let Some(paused) = &mut schedule
         .runtime
         .lock()
@@ -584,6 +643,14 @@ pub fn pause_current_block(
         available_pause_ms,
         horizon_end: plan.horizon_end,
     });
+    record_schedule_event(
+        connection,
+        "schedule.pause",
+        Some(&block),
+        json!({
+            "availablePauseMinutes": available_pause_ms / 60_000
+        }),
+    );
 
     Ok(ScheduleActionResult {
         current_block: get_block_by_id(connection, block.id)?,
@@ -607,6 +674,17 @@ pub fn resume_current_block(
         .saturating_sub(paused.paused_at)
         .min(paused.available_pause_ms);
     let warnings = apply_pause_resume(connection, paused, preferences, delta, false)?;
+    if let Some(block) = get_block_by_id(connection, block_id)? {
+        record_schedule_event(
+            connection,
+            "schedule.resume",
+            Some(&block),
+            json!({
+                "consumedPauseMinutes": delta / 60_000,
+                "warningKinds": warnings.iter().map(|warning| warning.kind.clone()).collect::<Vec<_>>()
+            }),
+        );
+    }
 
     Ok(ScheduleActionResult {
         current_block: get_block_by_id(connection, block_id)?,
@@ -635,6 +713,16 @@ pub fn continue_current_block(
     }
 
     let warnings = sync_overdue_work_block(connection, schedule, preferences, now, block.id, true)?;
+    if let Some(updated) = get_block_by_id(connection, block.id)? {
+        record_schedule_event(
+            connection,
+            "schedule.continue",
+            Some(&updated),
+            json!({
+                "warningKinds": warnings.iter().map(|warning| warning.kind.clone()).collect::<Vec<_>>()
+            }),
+        );
+    }
 
     Ok(ScheduleActionResult {
         current_block: get_block_by_id(connection, block.id)?,
@@ -721,6 +809,16 @@ pub fn start_emergency_block(
     }
 
     rebuild_schedule(connection, now, preferences)?;
+    record_schedule_event(
+        connection,
+        "schedule.emergency_block_started",
+        Some(&emergency),
+        json!({
+            "requestedMinutes": request.duration_minutes,
+            "appliedMinutes": capped_minutes,
+            "warningKinds": warnings.iter().map(|warning| warning.kind.clone()).collect::<Vec<_>>()
+        }),
+    );
 
     Ok(ScheduleActionResult {
         current_block: get_block_by_id(connection, emergency.id)?,
@@ -805,6 +903,22 @@ fn finish_current_block_with_rest(
             rebuild_schedule(connection, new_end, preferences)?;
         }
     }
+
+    record_schedule_event(
+        connection,
+        match final_status {
+            BlockStatus::Completed if reclaimed_ms > 0 => "schedule.complete_early",
+            BlockStatus::Completed => "schedule.complete",
+            BlockStatus::Skipped => "schedule.skip",
+            _ => "schedule.block_finalized",
+        },
+        Some(&block),
+        json!({
+            "finalStatus": block_status_to_str(final_status),
+            "reclaimedMinutes": reclaimed_ms / 60_000,
+            "warningKinds": warnings.iter().map(|warning| warning.kind.clone()).collect::<Vec<_>>()
+        }),
+    );
 
     let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
     if runtime
@@ -1255,6 +1369,14 @@ fn sync_overdue_work_block(
                 params![now, block.id],
             )
             .map_err(|error| error.to_string())?;
+        record_schedule_event(
+            connection,
+            "schedule.auto_handoff_to_next_work_block",
+            Some(&block),
+            json!({
+                "nextWorkStart": next_work_start
+            }),
+        );
         let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
         if runtime.prompted_block_id == Some(block.id) {
             runtime.prompted_block_id = None;
@@ -1303,6 +1425,14 @@ fn sync_overdue_work_block(
             )
             .map_err(|error| error.to_string())?;
         rebuild_schedule(connection, target_end, preferences)?;
+        record_schedule_event(
+            connection,
+            "schedule.continue_rescheduled",
+            Some(&block),
+            json!({
+                "targetEnd": target_end
+            }),
+        );
         return Ok(vec![ScheduleWarning {
             kind: "rescheduled_after_continue".to_string(),
             message: "Continuing this block used up local rest before the next immutable boundary, so the future schedule was rebuilt around the longer work block.".to_string(),
@@ -1492,6 +1622,14 @@ fn tick_schedule(app: &AppHandle) -> Result<(), String> {
         if runtime.prompted_block_id != Some(prompt.block.id) {
             app.emit("block-finished-prompt", &prompt)
                 .map_err(|error| error.to_string())?;
+            record_schedule_event(
+                &connection,
+                "schedule.block_finished_prompted",
+                Some(&prompt.block),
+                json!({
+                    "nextWorkStart": prompt.next_work_start
+                }),
+            );
             runtime.prompted_block_id = Some(prompt.block.id);
         }
     } else {
@@ -2738,9 +2876,9 @@ mod tests {
 
     use super::{
         add_time_block, apply_weekly_template, complete_current_block, continue_current_block,
-        extend_current_block, get_block_by_id, get_current_block, get_schedule_range,
-        pause_current_block, resume_current_block, save_weekly_template, start_emergency_block,
-        sync_overdue_work_block, ScheduleState,
+        effective_enforcement_block_type, extend_current_block, get_block_by_id, get_current_block,
+        get_schedule_range, pause_current_block, resume_current_block, save_weekly_template,
+        start_emergency_block, sync_overdue_work_block, ScheduleState,
     };
     use crate::{
         config::models::UserPreferences,
@@ -3067,6 +3205,69 @@ mod tests {
         assert!(warnings.is_empty());
         assert_eq!(active.id, next_work.id);
         assert_eq!(finished.status, BlockStatus::Completed);
+    }
+
+    #[test]
+    fn passive_overdue_work_uses_break_enforcement_until_continued() {
+        let (connection, schedule) = setup();
+        let now = now_ms();
+        let preferences = preferences();
+
+        let block = add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Current".to_string(),
+                block_type: BlockType::Work,
+                start_time: now - 20 * 60 * 1_000,
+                end_time: now + 5 * 60 * 1_000,
+                task_id: None,
+                intensity: 4,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("block should create");
+        connection
+            .execute(
+                "UPDATE time_blocks SET end_time = ?1, status = 'active' WHERE id = ?2",
+                params![now - 60 * 1_000, block.id],
+            )
+            .expect("block should become overdue active");
+        add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Break".to_string(),
+                block_type: BlockType::Break,
+                start_time: now - 60 * 1_000,
+                end_time: now + 20 * 60 * 1_000,
+                task_id: None,
+                intensity: 1,
+                source: Some(BlockSource::Planner),
+            },
+        )
+        .expect("break should exist");
+
+        assert_eq!(
+            effective_enforcement_block_type(&connection, &schedule)
+                .expect("effective type should load"),
+            Some(BlockType::Break)
+        );
+
+        continue_current_block(&connection, &schedule, &preferences).expect("continue should work");
+
+        let continue_events: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM analytics_events WHERE event_type = 'schedule.continue'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("continue analytics should query");
+
+        assert_eq!(
+            effective_enforcement_block_type(&connection, &schedule)
+                .expect("effective type should load"),
+            Some(BlockType::Work)
+        );
+        assert_eq!(continue_events, 1);
     }
 
     #[test]

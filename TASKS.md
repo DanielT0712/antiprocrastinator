@@ -10,6 +10,7 @@
 - [x] Documented the current planner algorithm in `PLANNER.md`
 - [x] Replaced simple shift-based completion/extend/pause behavior with local rest-buffer adjustment plus planner fallback, and added emergency blocks with enforcement allowlists
 - [x] Added overdue work-block prompting plus explicit continue mode that consumes rest buffers until the user marks done or the next work block takes over
+- [x] Routed passive overdue blocks through rest permissions and recorded schedule prompt/continue/handoff actions in analytics events
 
 # Next Backend Tasks
 
