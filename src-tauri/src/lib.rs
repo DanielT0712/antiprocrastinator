@@ -35,6 +35,8 @@ pub fn run() {
             analytics::commands::get_task_completion_stats,
             analytics::commands::get_process_kill_stats,
             processes::commands::get_running_processes,
+            processes::commands::get_known_apps,
+            processes::commands::refresh_known_apps_inventory,
             processes::commands::get_process_rules,
             processes::commands::set_process_rule,
             processes::commands::delete_process_rule,

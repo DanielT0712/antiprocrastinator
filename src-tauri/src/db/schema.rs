@@ -1,4 +1,4 @@
-pub const CURRENT_SCHEMA_VERSION: i32 = 2;
+pub const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 pub const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS task_groups (
@@ -53,6 +53,22 @@ CREATE TABLE IF NOT EXISTS process_rules (
     updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS known_apps (
+    app_key TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    executable_name TEXT,
+    executable_path TEXT,
+    app_path TEXT,
+    platform TEXT NOT NULL,
+    source TEXT NOT NULL,
+    category_guess TEXT,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    classification_status TEXT NOT NULL DEFAULT 'unclassified',
+    first_seen_at INTEGER NOT NULL,
+    last_seen_running_at INTEGER,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS analytics_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
@@ -80,6 +96,8 @@ CREATE INDEX IF NOT EXISTS idx_tasks_group_id ON tasks(group_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_name ON tasks(name);
 CREATE INDEX IF NOT EXISTS idx_time_blocks_start_time ON time_blocks(start_time);
 CREATE INDEX IF NOT EXISTS idx_time_blocks_status ON time_blocks(status);
+CREATE INDEX IF NOT EXISTS idx_known_apps_status ON known_apps(classification_status);
+CREATE INDEX IF NOT EXISTS idx_known_apps_updated_at ON known_apps(updated_at);
 CREATE INDEX IF NOT EXISTS idx_analytics_events_occurred_at ON analytics_events(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_blocked_processes_occurred_at ON blocked_processes_log(occurred_at);
 "#;

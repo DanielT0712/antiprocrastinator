@@ -42,6 +42,24 @@ pub struct ProcessInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct KnownApp {
+    pub app_key: String,
+    pub display_name: String,
+    pub executable_name: Option<String>,
+    pub executable_path: Option<String>,
+    pub app_path: Option<String>,
+    pub platform: String,
+    pub source: String,
+    pub category_guess: Option<String>,
+    pub confidence: f64,
+    pub classification_status: String,
+    pub first_seen_at: i64,
+    pub last_seen_running_at: Option<i64>,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProcessWarning {
     pub process_name: String,
     pub seconds_until_kill: u32,

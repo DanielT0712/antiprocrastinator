@@ -5,7 +5,8 @@ use crate::db::DatabaseState;
 use super::{
     categories,
     models::{
-        BlockedProcessLogEntry, EnforcementStatus, ProcessCategory, ProcessInfo, ProcessRule,
+        BlockedProcessLogEntry, EnforcementStatus, KnownApp, ProcessCategory, ProcessInfo,
+        ProcessRule,
     },
     monitor::{self, ProcessMonitorState},
 };
@@ -13,6 +14,21 @@ use super::{
 #[tauri::command]
 pub fn get_running_processes() -> Result<Vec<ProcessInfo>, String> {
     Ok(monitor::scan_processes())
+}
+
+#[tauri::command]
+pub fn get_known_apps(database: State<'_, DatabaseState>) -> Result<Vec<KnownApp>, String> {
+    let connection = database.connection()?;
+    monitor::get_known_apps(&connection)
+}
+
+#[tauri::command]
+pub fn refresh_known_apps_inventory(
+    database: State<'_, DatabaseState>,
+) -> Result<Vec<KnownApp>, String> {
+    let connection = database.connection()?;
+    monitor::refresh_known_apps_inventory(&connection)?;
+    monitor::get_known_apps(&connection)
 }
 
 #[tauri::command]

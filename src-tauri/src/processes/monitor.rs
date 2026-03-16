@@ -1,10 +1,12 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use sysinfo::{ProcessesToUpdate, Signal, System};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -20,8 +22,8 @@ use crate::{
 use super::{
     categories,
     models::{
-        BlockedProcessLogEntry, EnforcementStatus, ProcessAction, ProcessInfo, ProcessRule,
-        ProcessWarning,
+        BlockedProcessLogEntry, EnforcementStatus, KnownApp, ProcessAction, ProcessInfo,
+        ProcessRule, ProcessWarning,
     },
 };
 
@@ -42,6 +44,19 @@ struct WarningState {
     task_id: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+struct DiscoveredApp {
+    app_key: String,
+    display_name: String,
+    executable_name: Option<String>,
+    executable_path: Option<String>,
+    app_path: Option<String>,
+    platform: String,
+    source: String,
+    category_guess: Option<String>,
+    confidence: f64,
+}
+
 pub fn new_state() -> ProcessMonitorState {
     ProcessMonitorState {
         runtime: Mutex::new(ProcessMonitorRuntime::default()),
@@ -50,6 +65,10 @@ pub fn new_state() -> ProcessMonitorState {
 
 pub fn start_monitor_loop(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
+        if let Err(error) = refresh_known_apps_from_app(&app) {
+            log::error!("initial known app refresh failed: {error}");
+        }
+
         loop {
             if let Err(error) = scan_and_enforce(&app) {
                 log::error!("process monitor scan failed: {error}");
@@ -74,6 +93,57 @@ pub fn scan_processes() -> Vec<ProcessInfo> {
             memory_bytes: process.memory(),
         })
         .collect()
+}
+
+pub fn get_known_apps(connection: &Connection) -> Result<Vec<KnownApp>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT app_key, display_name, executable_name, executable_path, app_path,
+                   platform, source, category_guess, confidence, classification_status,
+                   first_seen_at, last_seen_running_at, updated_at
+            FROM known_apps
+            ORDER BY classification_status ASC, display_name ASC
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(KnownApp {
+                app_key: row.get(0)?,
+                display_name: row.get(1)?,
+                executable_name: row.get(2)?,
+                executable_path: row.get(3)?,
+                app_path: row.get(4)?,
+                platform: row.get(5)?,
+                source: row.get(6)?,
+                category_guess: row.get(7)?,
+                confidence: row.get(8)?,
+                classification_status: row.get(9)?,
+                first_seen_at: row.get(10)?,
+                last_seen_running_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+pub fn refresh_known_apps_inventory(connection: &Connection) -> Result<(), String> {
+    let discovered = discover_installed_apps();
+    for app in discovered {
+        upsert_known_app(connection, &app, None)?;
+    }
+    Ok(())
+}
+
+fn refresh_known_apps_from_app(app: &AppHandle) -> Result<(), String> {
+    let database = app.state::<DatabaseState>();
+    let connection = database.connection()?;
+    refresh_known_apps_inventory(&connection)
 }
 
 pub fn get_process_rules(connection: &Connection) -> Result<Vec<ProcessRule>, String> {
@@ -216,6 +286,313 @@ pub fn get_blocked_processes_log(
     Ok(entries)
 }
 
+struct UpsertOutcome {
+    inserted: bool,
+    classification_status: String,
+}
+
+fn upsert_known_app(
+    connection: &Connection,
+    app: &DiscoveredApp,
+    last_seen_running_at: Option<i64>,
+) -> Result<UpsertOutcome, String> {
+    let existing = connection
+        .query_row(
+            "SELECT classification_status FROM known_apps WHERE app_key = ?1",
+            params![app.app_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let inserted = existing.is_none();
+    let now = timestamp_ms();
+    let classification_status = existing.unwrap_or_else(|| "unclassified".to_string());
+
+    connection
+        .execute(
+            r#"
+            INSERT INTO known_apps (
+                app_key, display_name, executable_name, executable_path, app_path,
+                platform, source, category_guess, confidence, classification_status,
+                first_seen_at, last_seen_running_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(app_key) DO UPDATE SET
+                display_name = excluded.display_name,
+                executable_name = COALESCE(excluded.executable_name, known_apps.executable_name),
+                executable_path = COALESCE(excluded.executable_path, known_apps.executable_path),
+                app_path = COALESCE(excluded.app_path, known_apps.app_path),
+                platform = excluded.platform,
+                source = excluded.source,
+                category_guess = COALESCE(known_apps.category_guess, excluded.category_guess),
+                confidence = MAX(known_apps.confidence, excluded.confidence),
+                last_seen_running_at = COALESCE(excluded.last_seen_running_at, known_apps.last_seen_running_at),
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                app.app_key,
+                app.display_name,
+                app.executable_name,
+                app.executable_path,
+                app.app_path,
+                app.platform,
+                app.source,
+                app.category_guess,
+                app.confidence,
+                classification_status,
+                now,
+                last_seen_running_at,
+                now
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(UpsertOutcome {
+        inserted,
+        classification_status,
+    })
+}
+
+fn running_app_candidate(process: &ProcessInfo) -> DiscoveredApp {
+    let display_name = executable_display_name(process);
+    let executable_name = process
+        .exe_path
+        .as_deref()
+        .and_then(|path| Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .or_else(|| Some(process.name.clone()));
+    let (category_guess, confidence) =
+        classify_app_candidate(&display_name, process.exe_path.as_deref());
+    DiscoveredApp {
+        app_key: app_key_for(
+            &display_name,
+            executable_name.as_deref(),
+            process.exe_path.as_deref(),
+        ),
+        display_name,
+        executable_name,
+        executable_path: process.exe_path.clone(),
+        app_path: process.exe_path.clone(),
+        platform: std::env::consts::OS.to_string(),
+        source: "running_detected".to_string(),
+        category_guess,
+        confidence,
+    }
+}
+
+fn discover_installed_apps() -> Vec<DiscoveredApp> {
+    let mut apps = Vec::new();
+    let mut seen = HashSet::new();
+
+    for candidate in discover_installed_apps_for_platform() {
+        if seen.insert(candidate.app_key.clone()) {
+            apps.push(candidate);
+        }
+    }
+
+    apps
+}
+
+#[cfg(target_os = "macos")]
+fn discover_installed_apps_for_platform() -> Vec<DiscoveredApp> {
+    let mut apps = Vec::new();
+    let mut roots = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/System/Applications"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join("Applications"));
+    }
+
+    for root in roots {
+        collect_app_bundles(&root, &mut apps);
+    }
+
+    apps
+}
+
+#[cfg(target_os = "windows")]
+fn discover_installed_apps_for_platform() -> Vec<DiscoveredApp> {
+    let mut apps = Vec::new();
+    let mut roots = Vec::new();
+
+    for key in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+        if let Ok(value) = std::env::var(key) {
+            let path = PathBuf::from(value);
+            if key == "LOCALAPPDATA" {
+                roots.push(path.join("Programs"));
+            } else {
+                roots.push(path);
+            }
+        }
+    }
+    if let Ok(program_data) = std::env::var("ProgramData") {
+        roots.push(PathBuf::from(program_data).join("Microsoft/Windows/Start Menu/Programs"));
+    }
+    if let Ok(app_data) = std::env::var("APPDATA") {
+        roots.push(PathBuf::from(app_data).join("Microsoft/Windows/Start Menu/Programs"));
+    }
+
+    for root in roots {
+        collect_windows_apps(&root, &mut apps);
+    }
+
+    apps
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn discover_installed_apps_for_platform() -> Vec<DiscoveredApp> {
+    vec![]
+}
+
+#[cfg(target_os = "macos")]
+fn collect_app_bundles(root: &Path, apps: &mut Vec<DiscoveredApp>) {
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("app") {
+                continue;
+            }
+            let Some(display_name) = path
+                .file_stem()
+                .map(|name| name.to_string_lossy().to_string())
+            else {
+                continue;
+            };
+            let path_str = path.display().to_string();
+            let (category_guess, confidence) =
+                classify_app_candidate(&display_name, Some(&path_str));
+            apps.push(DiscoveredApp {
+                app_key: app_key_for(&display_name, Some(&display_name), Some(&path_str)),
+                display_name: display_name.clone(),
+                executable_name: Some(display_name.clone()),
+                executable_path: None,
+                app_path: Some(path_str),
+                platform: "macos".to_string(),
+                source: "installed_scan".to_string(),
+                category_guess,
+                confidence,
+            });
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn collect_windows_apps(root: &Path, apps: &mut Vec<DiscoveredApp>) {
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let display_name = if path.is_dir() {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            } else {
+                path.file_stem()
+                    .map(|name| name.to_string_lossy().to_string())
+            };
+            let Some(display_name) = display_name.filter(|name| !name.trim().is_empty()) else {
+                continue;
+            };
+            let path_str = path.display().to_string();
+            let (category_guess, confidence) =
+                classify_app_candidate(&display_name, Some(&path_str));
+            apps.push(DiscoveredApp {
+                app_key: app_key_for(&display_name, Some(&display_name), Some(&path_str)),
+                display_name: display_name.clone(),
+                executable_name: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string()),
+                executable_path: if path.extension().and_then(|ext| ext.to_str()) == Some("exe") {
+                    Some(path_str.clone())
+                } else {
+                    None
+                },
+                app_path: Some(path_str),
+                platform: "windows".to_string(),
+                source: "installed_scan".to_string(),
+                category_guess,
+                confidence,
+            });
+        }
+    }
+}
+
+fn executable_display_name(process: &ProcessInfo) -> String {
+    process
+        .exe_path
+        .as_deref()
+        .and_then(|path| Path::new(path).file_stem())
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| process.name.clone())
+}
+
+fn app_key_for(display_name: &str, executable_name: Option<&str>, path: Option<&str>) -> String {
+    let primary = executable_name
+        .and_then(normalized_name_token)
+        .or_else(|| normalized_name_token(display_name))
+        .or_else(|| path.and_then(normalized_path_token))
+        .unwrap_or_else(|| normalize_process_name(display_name));
+    primary
+}
+
+fn normalized_name_token(value: &str) -> Option<String> {
+    let stem = Path::new(value)
+        .file_stem()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| value.to_string());
+    let normalized = normalize_process_name(&stem);
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn normalized_path_token(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_stem()
+        .map(|name| normalize_process_name(&name.to_string_lossy()))
+        .filter(|token| !token.is_empty())
+}
+
+fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<String>, f64) {
+    let normalized = normalize_process_name(display_name);
+    for category in categories::built_in_categories() {
+        if category
+            .process_names
+            .iter()
+            .any(|candidate| normalize_process_name(candidate) == normalized)
+        {
+            return (Some(category.name), 0.95);
+        }
+    }
+
+    let haystack = format!(
+        "{} {}",
+        normalized,
+        path.map(normalize_process_name).unwrap_or_default()
+    );
+    for (category, keywords) in [
+        ("Games", &["steam", "riot", "epic", "battle", "game"][..]),
+        (
+            "Social Media",
+            &[
+                "discord", "telegram", "whatsapp", "signal", "wechat", "line",
+            ][..],
+        ),
+        (
+            "Entertainment",
+            &["spotify", "vlc", "iina", "netflix", "music"][..],
+        ),
+        (
+            "Browsers",
+            &[
+                "chrome", "firefox", "safari", "edge", "arc", "brave", "browser",
+            ][..],
+        ),
+    ] {
+        if keywords.iter().any(|keyword| haystack.contains(keyword)) {
+            return (Some(category.to_string()), 0.65);
+        }
+    }
+
+    (None, 0.0)
+}
+
 fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     let database = app.state::<DatabaseState>();
     let config = app.state::<ConfigState>();
@@ -223,6 +600,25 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     let process_state = app.state::<ProcessMonitorState>();
 
     let processes = scan_processes();
+    {
+        let connection = database.connection()?;
+        for process in &processes {
+            let candidate = running_app_candidate(process);
+            let outcome = upsert_known_app(&connection, &candidate, Some(timestamp_ms()))?;
+            if outcome.inserted && outcome.classification_status == "unclassified" {
+                app.emit(
+                    "unknown-app-detected",
+                    serde_json::json!({
+                        "appKey": candidate.app_key,
+                        "displayName": candidate.display_name,
+                        "processName": process.name,
+                        "executablePath": process.exe_path
+                    }),
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+    }
     let rules = {
         let connection = database.connection()?;
         get_process_rules(&connection)?
@@ -476,4 +872,32 @@ fn to_from_sql_error(error: String) -> rusqlite::Error {
         rusqlite::types::Type::Text,
         Box::new(std::io::Error::other(error)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use super::{get_known_apps, running_app_candidate, upsert_known_app, ProcessInfo};
+    use crate::db::migrations::run_migrations;
+
+    #[test]
+    fn persists_new_running_processes_into_known_apps() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        run_migrations(&connection).expect("migrations should run");
+
+        let process = ProcessInfo {
+            pid: 42,
+            name: "ObscureApp".to_string(),
+            exe_path: Some("/Applications/ObscureApp.app".to_string()),
+            memory_bytes: 0,
+        };
+        let candidate = running_app_candidate(&process);
+        upsert_known_app(&connection, &candidate, Some(1234)).expect("upsert should work");
+
+        let apps = get_known_apps(&connection).expect("known apps should load");
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].display_name, "ObscureApp");
+        assert_eq!(apps[0].classification_status, "unclassified");
+    }
 }

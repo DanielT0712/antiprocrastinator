@@ -26,6 +26,30 @@ pub fn run_migrations(connection: &Connection) -> Result<(), rusqlite::Error> {
         }
     }
 
+    if current_version < 3 {
+        connection.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS known_apps (
+                app_key TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                executable_name TEXT,
+                executable_path TEXT,
+                app_path TEXT,
+                platform TEXT NOT NULL,
+                source TEXT NOT NULL,
+                category_guess TEXT,
+                confidence REAL NOT NULL DEFAULT 0.0,
+                classification_status TEXT NOT NULL DEFAULT 'unclassified',
+                first_seen_at INTEGER NOT NULL,
+                last_seen_running_at INTEGER,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_known_apps_status ON known_apps(classification_status);
+            CREATE INDEX IF NOT EXISTS idx_known_apps_updated_at ON known_apps(updated_at);
+            "#,
+        )?;
+    }
+
     if current_version != CURRENT_SCHEMA_VERSION {
         connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     }
@@ -56,8 +80,16 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("sqlite_master query should work");
+        let known_apps_count: i32 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'known_apps'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("sqlite_master query should work");
 
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
         assert_eq!(task_group_count, 1);
+        assert_eq!(known_apps_count, 1);
     }
 }
