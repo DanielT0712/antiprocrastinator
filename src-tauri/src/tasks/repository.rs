@@ -13,10 +13,10 @@ pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<
             .prepare(
                 r#"
                 SELECT id, name, group_id, priority, estimated_minutes, deadline,
-                       max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
-                       work_ratio, rest_ratio, protect_generated_blocks,
-                       average_priority, average_actual_minutes, completion_count,
-                       created_at, updated_at
+                   max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                   work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile,
+                   average_priority, average_actual_minutes, completion_count,
+                   created_at, updated_at
                 FROM tasks
                 WHERE group_id = ?1 AND LOWER(name) LIKE LOWER(?2)
                 ORDER BY updated_at DESC, name ASC
@@ -27,10 +27,10 @@ pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<
             .prepare(
                 r#"
                 SELECT id, name, group_id, priority, estimated_minutes, deadline,
-                       max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
-                       work_ratio, rest_ratio, protect_generated_blocks,
-                       average_priority, average_actual_minutes, completion_count,
-                       created_at, updated_at
+                   max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                   work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile,
+                   average_priority, average_actual_minutes, completion_count,
+                   created_at, updated_at
                 FROM tasks
                 WHERE group_id = ?1
                 ORDER BY updated_at DESC, name ASC
@@ -41,10 +41,10 @@ pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<
             .prepare(
                 r#"
                 SELECT id, name, group_id, priority, estimated_minutes, deadline,
-                       max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
-                       work_ratio, rest_ratio, protect_generated_blocks,
-                       average_priority, average_actual_minutes, completion_count,
-                       created_at, updated_at
+                   max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                   work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile,
+                   average_priority, average_actual_minutes, completion_count,
+                   created_at, updated_at
                 FROM tasks
                 WHERE LOWER(name) LIKE LOWER(?1)
                 ORDER BY updated_at DESC, name ASC
@@ -55,10 +55,10 @@ pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<
             .prepare(
                 r#"
                 SELECT id, name, group_id, priority, estimated_minutes, deadline,
-                       max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
-                       work_ratio, rest_ratio, protect_generated_blocks,
-                       average_priority, average_actual_minutes, completion_count,
-                       created_at, updated_at
+                   max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                   work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile,
+                   average_priority, average_actual_minutes, completion_count,
+                   created_at, updated_at
                 FROM tasks
                 ORDER BY updated_at DESC, name ASC
                 "#,
@@ -86,7 +86,7 @@ pub fn search_tasks(connection: &Connection, query: &str) -> Result<Vec<Task>, S
             r#"
             SELECT id, name, group_id, priority, estimated_minutes, deadline,
                    max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
-                   work_ratio, rest_ratio, protect_generated_blocks,
+                   work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile,
                    average_priority, average_actual_minutes, completion_count,
                    created_at, updated_at
             FROM tasks
@@ -123,10 +123,10 @@ pub fn create_task(connection: &Connection, new_task: NewTask) -> Result<Task, S
             INSERT INTO tasks (
                 name, group_id, priority, estimated_minutes, deadline,
                 max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
-                work_ratio, rest_ratio, protect_generated_blocks,
+                work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile,
                 average_priority, average_actual_minutes, completion_count,
                 created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             "#,
             params![
                 name,
@@ -140,6 +140,7 @@ pub fn create_task(connection: &Connection, new_task: NewTask) -> Result<Task, S
                 new_task.work_ratio,
                 new_task.rest_ratio,
                 new_task.protect_generated_blocks.unwrap_or(false),
+                new_task.enforcement_profile,
                 priority as f64,
                 Option::<f64>::None,
                 0_i64,
@@ -178,6 +179,9 @@ pub fn update_task(connection: &Connection, id: i64, updates: TaskUpdate) -> Res
     let protect_generated_blocks = updates
         .protect_generated_blocks
         .unwrap_or(existing.protect_generated_blocks);
+    let enforcement_profile = updates
+        .enforcement_profile
+        .unwrap_or(existing.enforcement_profile.clone());
     let average_priority = validate_average_priority(
         updates
             .average_priority
@@ -216,11 +220,12 @@ pub fn update_task(connection: &Connection, id: i64, updates: TaskUpdate) -> Res
                 work_ratio = ?9,
                 rest_ratio = ?10,
                 protect_generated_blocks = ?11,
-                average_priority = ?12,
-                average_actual_minutes = ?13,
-                completion_count = ?14,
-                updated_at = ?15
-            WHERE id = ?16
+                enforcement_profile = ?12,
+                average_priority = ?13,
+                average_actual_minutes = ?14,
+                completion_count = ?15,
+                updated_at = ?16
+            WHERE id = ?17
             "#,
             params![
                 name,
@@ -234,6 +239,7 @@ pub fn update_task(connection: &Connection, id: i64, updates: TaskUpdate) -> Res
                 work_ratio,
                 rest_ratio,
                 protect_generated_blocks,
+                enforcement_profile,
                 average_priority,
                 average_actual_minutes,
                 completion_count,
@@ -312,7 +318,7 @@ fn get_task_by_id(connection: &Connection, id: i64) -> Result<Task, String> {
             r#"
             SELECT id, name, group_id, priority, estimated_minutes, deadline,
                    max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
-                   work_ratio, rest_ratio, protect_generated_blocks,
+                   work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile,
                    average_priority, average_actual_minutes, completion_count,
                    created_at, updated_at
             FROM tasks
@@ -348,11 +354,12 @@ fn map_task(row: &Row<'_>) -> rusqlite::Result<Task> {
         work_ratio: row.get(9)?,
         rest_ratio: row.get(10)?,
         protect_generated_blocks: row.get(11)?,
-        average_priority: row.get(12)?,
-        average_actual_minutes: row.get(13)?,
-        completion_count: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
+        enforcement_profile: row.get(12)?,
+        average_priority: row.get(13)?,
+        average_actual_minutes: row.get(14)?,
+        completion_count: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
     })
 }
 
@@ -516,6 +523,7 @@ mod tests {
                 priority: Some(4),
                 estimated_minutes: Some(45),
                 deadline: None,
+                enforcement_profile: None,
                 max_chunk_minutes: None,
                 min_chunk_minutes: None,
                 minimum_rest_minutes: None,
@@ -557,6 +565,7 @@ mod tests {
                 priority: Some(3),
                 estimated_minutes: None,
                 deadline: None,
+                enforcement_profile: None,
                 max_chunk_minutes: None,
                 min_chunk_minutes: None,
                 minimum_rest_minutes: None,

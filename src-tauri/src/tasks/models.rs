@@ -24,6 +24,7 @@ pub struct Task {
     pub work_ratio: Option<i64>,
     pub rest_ratio: Option<i64>,
     pub protect_generated_blocks: bool,
+    pub enforcement_profile: Option<String>,
     pub average_priority: f64,
     pub average_actual_minutes: Option<f64>,
     pub completion_count: i64,
@@ -62,6 +63,8 @@ pub struct NewTask {
     pub rest_ratio: Option<i64>,
     #[serde(default)]
     pub protect_generated_blocks: Option<bool>,
+    #[serde(default)]
+    pub enforcement_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -78,6 +81,7 @@ pub struct TaskUpdate {
     pub work_ratio: Option<Option<i64>>,
     pub rest_ratio: Option<Option<i64>>,
     pub protect_generated_blocks: Option<bool>,
+    pub enforcement_profile: Option<Option<String>>,
     pub average_priority: Option<f64>,
     pub average_actual_minutes: Option<Option<f64>>,
     pub completion_count: Option<i64>,

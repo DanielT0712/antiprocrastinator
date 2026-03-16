@@ -125,6 +125,102 @@ pub fn run_migrations(connection: &Connection) -> Result<(), rusqlite::Error> {
         }
     }
 
+    if current_version < 7 {
+        for (table, column, sql) in [
+            (
+                "tasks",
+                "enforcement_profile",
+                "ALTER TABLE tasks ADD COLUMN enforcement_profile TEXT",
+            ),
+            (
+                "time_blocks",
+                "enforcement_profile",
+                "ALTER TABLE time_blocks ADD COLUMN enforcement_profile TEXT",
+            ),
+            (
+                "known_apps",
+                "classification_action",
+                "ALTER TABLE known_apps ADD COLUMN classification_action TEXT NOT NULL DEFAULT 'unclassified'",
+            ),
+        ] {
+            let pragma_query =
+                format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
+            let has_column: i32 = connection.query_row(&pragma_query, [column], |row| row.get(0))?;
+
+            if has_column == 0 {
+                connection.execute(sql, [])?;
+            }
+        }
+
+        connection.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS app_categories (
+                name TEXT PRIMARY KEY,
+                builtin INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS app_category_memberships (
+                app_key TEXT NOT NULL,
+                category_name TEXT NOT NULL,
+                PRIMARY KEY (app_key, category_name),
+                FOREIGN KEY (app_key) REFERENCES known_apps(app_key) ON DELETE CASCADE,
+                FOREIGN KEY (category_name) REFERENCES app_categories(name) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS known_browser_targets (
+                target_key TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                keyword TEXT NOT NULL,
+                category_name TEXT,
+                confidence REAL NOT NULL DEFAULT 0.0,
+                classification_action TEXT NOT NULL DEFAULT 'unclassified',
+                builtin INTEGER NOT NULL DEFAULT 0,
+                first_seen_at INTEGER,
+                last_seen_at INTEGER,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (category_name) REFERENCES app_categories(name) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS enforcement_profiles (
+                name TEXT PRIMARY KEY,
+                parent_name TEXT,
+                builtin INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (parent_name) REFERENCES enforcement_profiles(name) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS enforcement_profile_overrides (
+                profile_name TEXT NOT NULL,
+                subject_type TEXT NOT NULL,
+                subject_key TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (profile_name, subject_type, subject_key),
+                FOREIGN KEY (profile_name) REFERENCES enforcement_profiles(name) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS enforcement_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_kind TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                payload_json TEXT,
+                occurred_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS schedule_mutation_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                occurred_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_known_apps_classification_action ON known_apps(classification_action);
+            CREATE INDEX IF NOT EXISTS idx_app_category_memberships_category_name ON app_category_memberships(category_name);
+            CREATE INDEX IF NOT EXISTS idx_known_browser_targets_classification_action ON known_browser_targets(classification_action);
+            CREATE INDEX IF NOT EXISTS idx_enforcement_history_occurred_at ON enforcement_history(occurred_at);
+            CREATE INDEX IF NOT EXISTS idx_schedule_mutation_history_occurred_at ON schedule_mutation_history(occurred_at);
+            "#,
+        )?;
+    }
+
     if current_version != CURRENT_SCHEMA_VERSION {
         connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     }

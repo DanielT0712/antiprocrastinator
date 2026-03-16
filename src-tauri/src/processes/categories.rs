@@ -1,4 +1,12 @@
-use super::models::{ProcessAction, ProcessCategory};
+use super::models::{EnforcementProfile, ProcessAction, ProcessCategory};
+
+pub struct BrowserTargetSeed {
+    pub target_key: &'static str,
+    pub display_name: &'static str,
+    pub keyword: &'static str,
+    pub category_name: &'static str,
+    pub confidence: f64,
+}
 
 pub fn built_in_categories() -> Vec<ProcessCategory> {
     vec![
@@ -33,6 +41,16 @@ pub fn built_in_categories() -> Vec<ProcessCategory> {
             default_action: ProcessAction::AllowDuringBreak,
         },
         ProcessCategory {
+            name: "Communication".to_string(),
+            process_names: vec![
+                "gmail".to_string(),
+                "outlook".to_string(),
+                "slack".to_string(),
+                "teams".to_string(),
+            ],
+            default_action: ProcessAction::AllowDuringBreak,
+        },
+        ProcessCategory {
             name: "Browsers".to_string(),
             process_names: vec![
                 "google chrome".to_string(),
@@ -43,6 +61,101 @@ pub fn built_in_categories() -> Vec<ProcessCategory> {
                 "brave browser".to_string(),
             ],
             default_action: ProcessAction::Warn,
+        },
+    ]
+}
+
+pub fn built_in_profile_names() -> Vec<EnforcementProfile> {
+    let now = 0;
+    vec![
+        EnforcementProfile {
+            name: "rest".to_string(),
+            parent_name: None,
+            builtin: true,
+            created_at: now,
+            updated_at: now,
+        },
+        EnforcementProfile {
+            name: "work".to_string(),
+            parent_name: Some("rest".to_string()),
+            builtin: true,
+            created_at: now,
+            updated_at: now,
+        },
+        EnforcementProfile {
+            name: "deep_work".to_string(),
+            parent_name: Some("work".to_string()),
+            builtin: true,
+            created_at: now,
+            updated_at: now,
+        },
+    ]
+}
+
+pub fn built_in_browser_targets() -> Vec<BrowserTargetSeed> {
+    vec![
+        BrowserTargetSeed {
+            target_key: "youtube",
+            display_name: "YouTube",
+            keyword: "youtube",
+            category_name: "Entertainment",
+            confidence: 0.98,
+        },
+        BrowserTargetSeed {
+            target_key: "twitter",
+            display_name: "Twitter/X",
+            keyword: "twitter",
+            category_name: "Social Media",
+            confidence: 0.95,
+        },
+        BrowserTargetSeed {
+            target_key: "x",
+            display_name: "Twitter/X",
+            keyword: " x ",
+            category_name: "Social Media",
+            confidence: 0.7,
+        },
+        BrowserTargetSeed {
+            target_key: "reddit",
+            display_name: "Reddit",
+            keyword: "reddit",
+            category_name: "Social Media",
+            confidence: 0.95,
+        },
+        BrowserTargetSeed {
+            target_key: "netflix",
+            display_name: "Netflix",
+            keyword: "netflix",
+            category_name: "Entertainment",
+            confidence: 0.98,
+        },
+        BrowserTargetSeed {
+            target_key: "instagram",
+            display_name: "Instagram",
+            keyword: "instagram",
+            category_name: "Social Media",
+            confidence: 0.95,
+        },
+        BrowserTargetSeed {
+            target_key: "facebook",
+            display_name: "Facebook",
+            keyword: "facebook",
+            category_name: "Social Media",
+            confidence: 0.95,
+        },
+        BrowserTargetSeed {
+            target_key: "tiktok",
+            display_name: "TikTok",
+            keyword: "tiktok",
+            category_name: "Entertainment",
+            confidence: 0.95,
+        },
+        BrowserTargetSeed {
+            target_key: "gmail",
+            display_name: "Gmail",
+            keyword: "gmail",
+            category_name: "Communication",
+            confidence: 0.92,
         },
     ]
 }

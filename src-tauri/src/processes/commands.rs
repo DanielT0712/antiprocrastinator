@@ -5,8 +5,11 @@ use crate::db::DatabaseState;
 use super::{
     categories,
     models::{
-        BlockedProcessLogEntry, EnforcementStatus, FocusedWindowInfo, KnownApp, KnownAppUpdate,
-        ProcessCategory, ProcessInfo, ProcessRule,
+        AppCategory, AppCategoryInput, BlockedProcessLogEntry, EnforcementProfile,
+        EnforcementProfileInput, EnforcementProfileOverride, EnforcementProfileOverrideInput,
+        EnforcementStatus, FocusedWindowInfo, HistoryEntry, KnownApp, KnownAppUpdate,
+        KnownBrowserTarget, KnownBrowserTargetUpdate, PendingClassificationBatch, ProcessCategory,
+        ProcessInfo, ProcessRule,
     },
     monitor::{self, ProcessMonitorState},
 };
@@ -47,6 +50,32 @@ pub fn update_known_app(
 }
 
 #[tauri::command]
+pub fn get_known_browser_targets(
+    database: State<'_, DatabaseState>,
+) -> Result<Vec<KnownBrowserTarget>, String> {
+    let connection = database.connection()?;
+    monitor::get_known_browser_targets(&connection)
+}
+
+#[tauri::command]
+pub fn update_known_browser_target(
+    target_key: String,
+    updates: KnownBrowserTargetUpdate,
+    database: State<'_, DatabaseState>,
+) -> Result<KnownBrowserTarget, String> {
+    let connection = database.connection()?;
+    monitor::update_known_browser_target(&connection, &target_key, updates)
+}
+
+#[tauri::command]
+pub fn get_pending_classifications(
+    database: State<'_, DatabaseState>,
+) -> Result<PendingClassificationBatch, String> {
+    let connection = database.connection()?;
+    monitor::get_pending_classifications(&connection)
+}
+
+#[tauri::command]
 pub fn get_process_rules(database: State<'_, DatabaseState>) -> Result<Vec<ProcessRule>, String> {
     let connection = database.connection()?;
     monitor::get_process_rules(&connection)
@@ -76,6 +105,87 @@ pub fn get_process_categories() -> Result<Vec<ProcessCategory>, String> {
 }
 
 #[tauri::command]
+pub fn get_app_categories(database: State<'_, DatabaseState>) -> Result<Vec<AppCategory>, String> {
+    let connection = database.connection()?;
+    monitor::get_app_categories(&connection)
+}
+
+#[tauri::command]
+pub fn upsert_app_category(
+    category: AppCategoryInput,
+    database: State<'_, DatabaseState>,
+) -> Result<AppCategory, String> {
+    let connection = database.connection()?;
+    monitor::upsert_app_category(&connection, category)
+}
+
+#[tauri::command]
+pub fn delete_app_category(name: String, database: State<'_, DatabaseState>) -> Result<(), String> {
+    let connection = database.connection()?;
+    monitor::delete_app_category(&connection, &name)
+}
+
+#[tauri::command]
+pub fn get_enforcement_profiles(
+    database: State<'_, DatabaseState>,
+) -> Result<Vec<EnforcementProfile>, String> {
+    let connection = database.connection()?;
+    monitor::get_enforcement_profiles(&connection)
+}
+
+#[tauri::command]
+pub fn upsert_enforcement_profile(
+    profile: EnforcementProfileInput,
+    database: State<'_, DatabaseState>,
+) -> Result<EnforcementProfile, String> {
+    let connection = database.connection()?;
+    monitor::upsert_enforcement_profile(&connection, profile)
+}
+
+#[tauri::command]
+pub fn delete_enforcement_profile(
+    name: String,
+    database: State<'_, DatabaseState>,
+) -> Result<(), String> {
+    let connection = database.connection()?;
+    monitor::delete_enforcement_profile(&connection, &name)
+}
+
+#[tauri::command]
+pub fn get_enforcement_profile_overrides(
+    profile_name: String,
+    database: State<'_, DatabaseState>,
+) -> Result<Vec<EnforcementProfileOverride>, String> {
+    let connection = database.connection()?;
+    monitor::get_enforcement_profile_overrides(&connection, &profile_name)
+}
+
+#[tauri::command]
+pub fn set_enforcement_profile_override(
+    override_entry: EnforcementProfileOverrideInput,
+    database: State<'_, DatabaseState>,
+) -> Result<EnforcementProfileOverride, String> {
+    let connection = database.connection()?;
+    monitor::set_enforcement_profile_override(&connection, override_entry)
+}
+
+#[tauri::command]
+pub fn delete_enforcement_profile_override(
+    profile_name: String,
+    subject_type: String,
+    subject_key: String,
+    database: State<'_, DatabaseState>,
+) -> Result<(), String> {
+    let connection = database.connection()?;
+    monitor::delete_enforcement_profile_override(
+        &connection,
+        &profile_name,
+        &subject_type,
+        &subject_key,
+    )
+}
+
+#[tauri::command]
 pub fn get_enforcement_status(
     monitor_state: State<'_, ProcessMonitorState>,
 ) -> Result<EnforcementStatus, String> {
@@ -90,4 +200,14 @@ pub fn get_blocked_processes_log(
 ) -> Result<Vec<BlockedProcessLogEntry>, String> {
     let connection = database.connection()?;
     monitor::get_blocked_processes_log(&connection, from, to)
+}
+
+#[tauri::command]
+pub fn get_enforcement_history(
+    from: i64,
+    to: i64,
+    database: State<'_, DatabaseState>,
+) -> Result<Vec<HistoryEntry>, String> {
+    let connection = database.connection()?;
+    monitor::get_enforcement_history(&connection, from, to)
 }

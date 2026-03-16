@@ -18,8 +18,8 @@ use crate::{
 use super::models::{
     BlockDecisionPrompt, BlockSource, BlockStatus, BlockType, DayTemplate, EmergencyBlockRequest,
     FixedTemplateBlock, NewTimeBlock, ScheduleActionResult, ScheduleMutation,
-    ScheduleMutationResult, ScheduleRebuildResult, ScheduleWarning, TimeBlock, TimeBlockUpdate,
-    TimerTickPayload, Weekday, WeeklyTemplate,
+    ScheduleMutationHistoryEntry, ScheduleMutationResult, ScheduleRebuildResult, ScheduleWarning,
+    TimeBlock, TimeBlockUpdate, TimerTickPayload, Weekday, WeeklyTemplate,
 };
 
 pub struct ScheduleState {
@@ -68,6 +68,7 @@ struct TemplateInterval {
     intensity: u8,
     source: BlockSource,
     is_protected: bool,
+    enforcement_profile: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +76,7 @@ struct PlannerTask {
     task_id: i64,
     title: String,
     group_id: Option<i64>,
+    enforcement_profile: Option<String>,
     priority: i64,
     deadline: Option<i64>,
     estimated_minutes: i64,
@@ -144,6 +146,27 @@ fn record_schedule_event(
     );
 }
 
+fn record_schedule_mutation_history(
+    connection: &Connection,
+    action: &str,
+    result: &ScheduleMutationResult,
+) -> Result<(), String> {
+    connection
+        .execute(
+            r#"
+            INSERT INTO schedule_mutation_history (action, payload_json, occurred_at)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![
+                action,
+                serde_json::to_string(result).map_err(|error| error.to_string())?,
+                timestamp_ms()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub fn start_timer_loop(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -190,7 +213,7 @@ pub fn get_next_block(
         .query_row(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, is_protected, created_at, updated_at
+                   status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
             FROM time_blocks
             WHERE start_time > ?1 AND status IN ('scheduled', 'active', 'paused')
             ORDER BY start_time ASC
@@ -225,6 +248,46 @@ pub fn effective_enforcement_block_type(
     get_current_block(connection, schedule).map(|block| block.map(|block| block.block_type))
 }
 
+pub fn effective_enforcement_profile(
+    connection: &Connection,
+    schedule: &ScheduleState,
+) -> Result<String, String> {
+    if let Some(block) = current_or_overdue_work_block(connection, schedule)? {
+        if block.block_type == BlockType::Work
+            && block.end_time <= timestamp_ms()
+            && schedule
+                .runtime
+                .lock()
+                .map_err(|error| error.to_string())?
+                .continuing_block_id
+                != Some(block.id)
+        {
+            return Ok("rest".to_string());
+        }
+
+        return Ok(match block.block_type {
+            BlockType::Break | BlockType::Sleep | BlockType::Meal => "rest".to_string(),
+            _ => block
+                .enforcement_profile
+                .clone()
+                .unwrap_or_else(|| "work".to_string()),
+        });
+    }
+
+    Ok(get_current_block(connection, schedule)?
+        .and_then(|block| {
+            if matches!(
+                block.block_type,
+                BlockType::Break | BlockType::Sleep | BlockType::Meal
+            ) {
+                Some("rest".to_string())
+            } else {
+                block.enforcement_profile
+            }
+        })
+        .unwrap_or_else(|| "rest".to_string()))
+}
+
 pub fn get_schedule_range(
     connection: &Connection,
     from: i64,
@@ -234,7 +297,7 @@ pub fn get_schedule_range(
         .prepare(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, is_protected, created_at, updated_at
+                   status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
             FROM time_blocks
             WHERE start_time < ?2 AND end_time > ?1
             ORDER BY start_time ASC, id ASC
@@ -249,6 +312,38 @@ pub fn get_schedule_range(
         .map_err(|error| error.to_string())?;
 
     Ok(blocks)
+}
+
+pub fn get_schedule_mutation_history(
+    connection: &Connection,
+    from: i64,
+    to: i64,
+) -> Result<Vec<ScheduleMutationHistoryEntry>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT id, action, payload_json, occurred_at
+            FROM schedule_mutation_history
+            WHERE occurred_at >= ?1 AND occurred_at < ?2
+            ORDER BY occurred_at DESC, id DESC
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let entries = statement
+        .query_map(params![from, to], |row| {
+            Ok(ScheduleMutationHistoryEntry {
+                id: row.get(0)?,
+                action: row.get(1)?,
+                payload_json: row.get(2)?,
+                occurred_at: row.get(3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    Ok(entries)
 }
 
 pub fn add_time_block(connection: &Connection, block: NewTimeBlock) -> Result<TimeBlock, String> {
@@ -272,8 +367,8 @@ pub fn add_time_block(connection: &Connection, block: NewTimeBlock) -> Result<Ti
             r#"
             INSERT INTO time_blocks (
                 title, block_type, start_time, end_time, task_id,
-                status, intensity, source, is_protected, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             "#,
             params![
                 block.title.trim(),
@@ -285,6 +380,7 @@ pub fn add_time_block(connection: &Connection, block: NewTimeBlock) -> Result<Ti
                 i64::from(block.intensity),
                 block_source_to_str(source),
                 block.is_protected.unwrap_or(false),
+                block.enforcement_profile,
                 now,
                 now
             ],
@@ -312,6 +408,9 @@ pub fn update_time_block(
     let intensity = updates.intensity.unwrap_or(existing.intensity);
     let source = updates.source.unwrap_or(existing.source);
     let is_protected = updates.is_protected.unwrap_or(existing.is_protected);
+    let enforcement_profile = updates
+        .enforcement_profile
+        .unwrap_or(existing.enforcement_profile.clone());
 
     validate_time_block_input(&title, start_time, end_time, intensity)?;
 
@@ -328,8 +427,9 @@ pub fn update_time_block(
                 intensity = ?7,
                 source = ?8,
                 is_protected = ?9,
-                updated_at = ?10
-            WHERE id = ?11
+                enforcement_profile = ?10,
+                updated_at = ?11
+            WHERE id = ?12
             "#,
             params![
                 title.trim(),
@@ -341,6 +441,7 @@ pub fn update_time_block(
                 i64::from(intensity),
                 block_source_to_str(source),
                 is_protected,
+                enforcement_profile,
                 timestamp_ms(),
                 id
             ],
@@ -370,6 +471,7 @@ pub fn add_time_block_with_mutation(
     let created = add_time_block(connection, block)?;
     build_schedule_mutation_result(
         connection,
+        Some("add_time_block"),
         created.start_time,
         None,
         before,
@@ -390,6 +492,7 @@ pub fn update_time_block_with_mutation(
     let updated = update_time_block(connection, id, updates)?;
     build_schedule_mutation_result(
         connection,
+        Some("update_time_block"),
         existing.start_time.min(updated.start_time),
         None,
         before,
@@ -409,6 +512,7 @@ pub fn delete_time_block_with_mutation(
     delete_time_block(connection, id)?;
     build_schedule_mutation_result(
         connection,
+        Some("delete_time_block"),
         existing.start_time,
         None,
         before,
@@ -493,6 +597,7 @@ pub fn apply_weekly_template(
                 intensity: interval.intensity,
                 source: Some(interval.source),
                 is_protected: Some(interval.is_protected),
+                enforcement_profile: interval.enforcement_profile,
             },
         )?;
         created.push(created_block);
@@ -511,6 +616,7 @@ pub fn apply_weekly_template_with_mutation(
     let _ = apply_weekly_template(connection, template, from, to)?;
     build_schedule_mutation_result(
         connection,
+        Some("apply_weekly_template"),
         from,
         Some(to),
         before,
@@ -524,6 +630,15 @@ pub fn rebuild_schedule(
     connection: &Connection,
     from: i64,
     preferences: &UserPreferences,
+) -> Result<ScheduleRebuildResult, String> {
+    rebuild_schedule_internal(connection, from, preferences, Some("rebuild_schedule"))
+}
+
+fn rebuild_schedule_internal(
+    connection: &Connection,
+    from: i64,
+    preferences: &UserPreferences,
+    history_action: Option<&str>,
 ) -> Result<ScheduleRebuildResult, String> {
     let before = load_schedule_snapshot(connection, from, None)?;
     let template = get_weekly_template(connection)?.unwrap_or_default();
@@ -541,6 +656,7 @@ pub fn rebuild_schedule(
         let pseudo_deadline = end_of_day(date_from_timestamp(from)?)?;
         return build_schedule_mutation_result(
             connection,
+            history_action,
             from,
             Some(pseudo_deadline),
             before,
@@ -585,6 +701,7 @@ pub fn rebuild_schedule(
 
     build_schedule_mutation_result(
         connection,
+        history_action,
         from,
         Some(pseudo_deadline),
         before,
@@ -612,6 +729,7 @@ pub fn skip_current_block(
     let current_block = finish_current_block(connection, schedule, BlockStatus::Skipped)?;
     build_schedule_mutation_result(
         connection,
+        Some("skip_current_block"),
         block.start_time,
         None,
         before,
@@ -660,7 +778,7 @@ pub fn extend_current_block(
             kind: "rescheduled_after_extend".to_string(),
             message: "Not enough rest remained before the next fixed boundary, so the future schedule was rebuilt around the longer current block.".to_string(),
         });
-        rebuild_schedule(connection, old_end, preferences)?;
+        rebuild_schedule_internal(connection, old_end, preferences, None)?;
     }
 
     record_schedule_event(
@@ -689,6 +807,7 @@ pub fn extend_current_block(
 
     build_schedule_mutation_result(
         connection,
+        Some("extend_current_block"),
         block.start_time,
         None,
         before,
@@ -722,6 +841,7 @@ pub fn pause_current_block(
     else {
         return build_schedule_mutation_result(
             connection,
+            Some("pause_current_block"),
             block.start_time,
             None,
             before,
@@ -742,6 +862,7 @@ pub fn pause_current_block(
     if available_pause_ms <= 0 {
         return build_schedule_mutation_result(
             connection,
+            Some("pause_current_block"),
             block.start_time,
             None,
             before,
@@ -782,6 +903,7 @@ pub fn pause_current_block(
 
     build_schedule_mutation_result(
         connection,
+        Some("pause_current_block"),
         block.start_time,
         None,
         before,
@@ -822,6 +944,7 @@ pub fn resume_current_block(
 
     build_schedule_mutation_result(
         connection,
+        Some("resume_current_block"),
         now,
         None,
         before,
@@ -866,6 +989,7 @@ pub fn continue_current_block(
 
     build_schedule_mutation_result(
         connection,
+        Some("continue_current_block"),
         block.start_time,
         None,
         before,
@@ -942,6 +1066,7 @@ pub fn start_emergency_block(
             intensity: 5,
             source: Some(BlockSource::Emergency),
             is_protected: Some(true),
+            enforcement_profile: Some("rest".to_string()),
         },
     )?;
 
@@ -955,7 +1080,7 @@ pub fn start_emergency_block(
         });
     }
 
-    rebuild_schedule(connection, now, preferences)?;
+    rebuild_schedule_internal(connection, now, preferences, None)?;
     record_schedule_event(
         connection,
         "schedule.emergency_block_started",
@@ -969,6 +1094,7 @@ pub fn start_emergency_block(
 
     build_schedule_mutation_result(
         connection,
+        Some("start_emergency_block"),
         now,
         None,
         before,
@@ -1053,7 +1179,7 @@ fn finish_current_block_with_rest(
                 kind: "rescheduled_after_early_completion".to_string(),
                 message: "Early completion produced more free time than nearby rest could absorb, so the future schedule was rebuilt.".to_string(),
             });
-            rebuild_schedule(connection, new_end, preferences)?;
+            rebuild_schedule_internal(connection, new_end, preferences, None)?;
         }
     }
 
@@ -1093,6 +1219,11 @@ fn finish_current_block_with_rest(
 
     build_schedule_mutation_result(
         connection,
+        Some(match final_status {
+            BlockStatus::Completed => "complete_current_block",
+            BlockStatus::Skipped => "skip_current_block",
+            _ => "finalize_current_block",
+        }),
         block.start_time,
         None,
         before,
@@ -1398,7 +1529,7 @@ fn load_adjustable_horizon_blocks(
         .prepare(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, is_protected, created_at, updated_at
+                   status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
             FROM time_blocks
             WHERE start_time >= ?1
               AND start_time < ?2
@@ -1421,7 +1552,7 @@ fn find_local_horizon_end(connection: &Connection, from_time: i64) -> Result<i64
         .prepare(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, is_protected, created_at, updated_at
+                   status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
             FROM time_blocks
             WHERE start_time >= ?1
               AND status IN ('scheduled', 'active', 'paused')
@@ -1479,7 +1610,7 @@ fn current_or_overdue_work_block(
         .query_row(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, is_protected, created_at, updated_at
+                   status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
             FROM time_blocks
             WHERE status = 'active'
               AND block_type = 'work'
@@ -1583,7 +1714,7 @@ fn sync_overdue_work_block(
                 params![target_end, now, block.id],
             )
             .map_err(|error| error.to_string())?;
-        rebuild_schedule(connection, target_end, preferences)?;
+        rebuild_schedule_internal(connection, target_end, preferences, None)?;
         record_schedule_event(
             connection,
             "schedule.continue_rescheduled",
@@ -1620,7 +1751,7 @@ fn current_overdue_prompt(
         .query_row(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, is_protected, created_at, updated_at
+                   status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
             FROM time_blocks
             WHERE status = 'active'
               AND block_type = 'work'
@@ -1843,7 +1974,7 @@ fn refresh_schedule_status(connection: &Connection) -> Result<Option<TimeBlock>,
         .query_row(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, is_protected, created_at, updated_at
+                   status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
             FROM time_blocks
             WHERE start_time <= ?1
               AND end_time > ?1
@@ -1876,7 +2007,7 @@ fn refresh_schedule_status(connection: &Connection) -> Result<Option<TimeBlock>,
         .query_row(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, is_protected, created_at, updated_at
+                   status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
             FROM time_blocks
             WHERE status = 'active'
               AND block_type = 'work'
@@ -1908,7 +2039,7 @@ fn get_block_by_id(connection: &Connection, id: i64) -> Result<Option<TimeBlock>
         .query_row(
             r#"
             SELECT id, title, block_type, start_time, end_time, task_id,
-                   status, intensity, source, is_protected, created_at, updated_at
+                   status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
             FROM time_blocks
             WHERE id = ?1
             "#,
@@ -1927,7 +2058,7 @@ fn load_schedule_snapshot(
     let mut query = String::from(
         r#"
         SELECT id, title, block_type, start_time, end_time, task_id,
-               status, intensity, source, is_protected, created_at, updated_at
+               status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
         FROM time_blocks
         WHERE end_time > ?1
         "#,
@@ -1952,6 +2083,7 @@ fn load_schedule_snapshot(
 
 fn build_schedule_mutation_result(
     connection: &Connection,
+    history_action: Option<&str>,
     from: i64,
     to: Option<i64>,
     before: Vec<TimeBlock>,
@@ -1961,13 +2093,17 @@ fn build_schedule_mutation_result(
 ) -> Result<ScheduleMutationResult, String> {
     let blocks = load_schedule_snapshot(connection, from, to)?;
     let mutations = diff_schedule_blocks(&before, &blocks);
-    Ok(ScheduleMutationResult {
+    let result = ScheduleMutationResult {
         current_block,
         blocks,
         warnings,
         pseudo_deadline,
         mutations,
-    })
+    };
+    if let Some(action) = history_action {
+        record_schedule_mutation_history(connection, action, &result)?;
+    }
+    Ok(result)
 }
 
 fn diff_schedule_blocks(before: &[TimeBlock], after: &[TimeBlock]) -> Vec<ScheduleMutation> {
@@ -2095,6 +2231,7 @@ fn load_preserved_intervals(
             intensity: block.intensity,
             source: block.source,
             is_protected: block.is_protected,
+            enforcement_profile: block.enforcement_profile,
         })
         .collect())
 }
@@ -2185,6 +2322,11 @@ fn generate_gap_blocks(
             intensity: if next_type == BlockType::Work { 4 } else { 2 },
             source: BlockSource::Template,
             is_protected: false,
+            enforcement_profile: Some(if next_type == BlockType::Break {
+                "rest".to_string()
+            } else {
+                "work".to_string()
+            }),
         });
 
         cursor = end_time;
@@ -2266,6 +2408,10 @@ fn build_interval(
         intensity,
         source: BlockSource::Template,
         is_protected: matches!(block_type, BlockType::Sleep | BlockType::Meal),
+        enforcement_profile: Some(match block_type {
+            BlockType::Work => "work".to_string(),
+            _ => "rest".to_string(),
+        }),
     }])
 }
 
@@ -2301,7 +2447,7 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
             r#"
             SELECT id, name, group_id, priority, estimated_minutes, deadline,
                    max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
-                   work_ratio, rest_ratio, protect_generated_blocks
+                   work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile
             FROM tasks
             WHERE estimated_minutes IS NOT NULL
               AND estimated_minutes > 0
@@ -2317,6 +2463,7 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
                 task_id: row.get(0)?,
                 title: row.get(1)?,
                 group_id: row.get(2)?,
+                enforcement_profile: row.get(12)?,
                 priority: row.get(3)?,
                 estimated_minutes: row.get(4)?,
                 deadline: row.get(5)?,
@@ -2735,6 +2882,12 @@ fn materialize_sections(
                     intensity: intensity_for_priority(candidate.priority),
                     source: BlockSource::Planner,
                     is_protected: tasks[candidate.task_index].protect_generated_blocks,
+                    enforcement_profile: Some(
+                        tasks[candidate.task_index]
+                            .enforcement_profile
+                            .clone()
+                            .unwrap_or_else(|| "work".to_string()),
+                    ),
                 });
                 consume_candidate_chunk(&mut remaining_chunks, candidate.task_index);
                 cursor += duration_ms;
@@ -2756,6 +2909,7 @@ fn materialize_sections(
                         intensity: 1,
                         source: BlockSource::Planner,
                         is_protected: false,
+                        enforcement_profile: Some("rest".to_string()),
                     });
                     cursor += min_break_minutes * 60 * 1_000;
                     total_break_built += min_break_minutes;
@@ -2772,6 +2926,7 @@ fn materialize_sections(
                     intensity: 1,
                     source: BlockSource::Planner,
                     is_protected: false,
+                    enforcement_profile: Some("rest".to_string()),
                 });
                 total_break_built += (window.end_time - cursor) / 60_000;
             }
@@ -3116,6 +3271,7 @@ fn persist_generated_blocks(
                 intensity: block.intensity,
                 source: Some(block.source),
                 is_protected: Some(block.is_protected),
+                enforcement_profile: block.enforcement_profile.clone(),
             },
         )?;
     }
@@ -3371,8 +3527,9 @@ fn map_time_block(row: &Row<'_>) -> rusqlite::Result<TimeBlock> {
             )
         })?,
         is_protected: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        enforcement_profile: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
@@ -3493,6 +3650,7 @@ mod tests {
                 intensity: 4,
                 source: None,
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("current block should create");
@@ -3508,6 +3666,7 @@ mod tests {
                 intensity: 2,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("next block should create");
@@ -3523,6 +3682,7 @@ mod tests {
                 intensity: 4,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("follow-up block should create");
@@ -3562,6 +3722,7 @@ mod tests {
                 intensity: 4,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("current block should create");
@@ -3577,6 +3738,7 @@ mod tests {
                 intensity: 1,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("break block should create");
@@ -3592,6 +3754,7 @@ mod tests {
                 intensity: 4,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("next work should create");
@@ -3632,6 +3795,7 @@ mod tests {
                 intensity: 4,
                 source: None,
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("current block should create");
@@ -3647,6 +3811,7 @@ mod tests {
                 intensity: 1,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("break should create");
@@ -3683,6 +3848,7 @@ mod tests {
                 intensity: 4,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("work block should create");
@@ -3704,6 +3870,7 @@ mod tests {
                 intensity: 1,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("break block should create");
@@ -3733,6 +3900,7 @@ mod tests {
                 intensity: 4,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("current block should create");
@@ -3754,6 +3922,7 @@ mod tests {
                 intensity: 1,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("break should create");
@@ -3769,6 +3938,7 @@ mod tests {
                 intensity: 4,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("next work should create");
@@ -3805,6 +3975,7 @@ mod tests {
                 intensity: 4,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("block should create");
@@ -3825,6 +3996,7 @@ mod tests {
                 intensity: 1,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("break should exist");
@@ -3870,6 +4042,7 @@ mod tests {
                 intensity: 4,
                 source: Some(BlockSource::Planner),
                 is_protected: None,
+                enforcement_profile: None,
             },
         )
         .expect("current block should create");

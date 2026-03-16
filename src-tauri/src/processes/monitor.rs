@@ -14,17 +14,18 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::{
     config::manager::ConfigState,
     db::DatabaseState,
-    schedule::{
-        engine as schedule_engine,
-        models::{BlockSource, BlockType},
-    },
+    schedule::{engine as schedule_engine, models::BlockSource},
 };
 
 use super::{
     categories,
     models::{
-        BlockedProcessLogEntry, EnforcementStatus, FocusedWindowInfo, KnownApp, KnownAppUpdate,
-        ProcessAction, ProcessInfo, ProcessRule, ProcessWarning,
+        AppCategory, AppCategoryInput, BlockedProcessLogEntry, ClassificationAction,
+        EnforcementDecision, EnforcementProfile, EnforcementProfileInput,
+        EnforcementProfileOverride, EnforcementProfileOverrideInput, EnforcementStatus,
+        FocusedWindowInfo, HistoryEntry, KnownApp, KnownAppUpdate, KnownBrowserTarget,
+        KnownBrowserTargetUpdate, PendingClassificationBatch, ProcessAction, ProcessInfo,
+        ProcessRule, ProcessWarning,
     },
 };
 
@@ -35,6 +36,8 @@ pub struct ProcessMonitorState {
 #[derive(Default)]
 struct ProcessMonitorRuntime {
     warnings: HashMap<String, WarningState>,
+    prompted_app_keys: HashSet<String>,
+    prompted_browser_target_keys: HashSet<String>,
     status: EnforcementStatus,
 }
 
@@ -72,19 +75,6 @@ struct EnforcementCandidate {
     action: ProcessAction,
 }
 
-#[derive(Debug, Clone)]
-struct BrowserTitleMatch {
-    decision: BrowserTitleDecision,
-    reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrowserTitleDecision {
-    NoMatch,
-    Allow,
-    Block,
-}
-
 pub fn new_state() -> ProcessMonitorState {
     ProcessMonitorState {
         runtime: Mutex::new(ProcessMonitorRuntime::default()),
@@ -105,6 +95,70 @@ pub fn start_monitor_loop(app: AppHandle) {
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
+}
+
+fn ensure_enforcement_defaults(connection: &Connection) -> Result<(), String> {
+    let now = timestamp_ms();
+    for category in categories::built_in_categories() {
+        connection
+            .execute(
+                r#"
+                INSERT INTO app_categories (name, builtin, created_at, updated_at)
+                VALUES (?1, 1, ?2, ?2)
+                ON CONFLICT(name) DO UPDATE SET
+                    builtin = 1,
+                    updated_at = excluded.updated_at
+                "#,
+                params![category.name, now],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    for profile in categories::built_in_profile_names() {
+        connection
+            .execute(
+                r#"
+                INSERT INTO enforcement_profiles (name, parent_name, builtin, created_at, updated_at)
+                VALUES (?1, ?2, 1, ?3, ?3)
+                ON CONFLICT(name) DO UPDATE SET
+                    parent_name = excluded.parent_name,
+                    builtin = 1,
+                    updated_at = excluded.updated_at
+                "#,
+                params![profile.name, profile.parent_name, now],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    for target in categories::built_in_browser_targets() {
+        connection
+            .execute(
+                r#"
+                INSERT INTO known_browser_targets (
+                    target_key, display_name, keyword, category_name, confidence,
+                    classification_action, builtin, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 'unclassified', 1, ?6)
+                ON CONFLICT(target_key) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    keyword = excluded.keyword,
+                    category_name = excluded.category_name,
+                    confidence = excluded.confidence,
+                    builtin = 1,
+                    updated_at = excluded.updated_at
+                "#,
+                params![
+                    target.target_key,
+                    target.display_name,
+                    normalize_keyword(target.keyword).unwrap_or_else(|| target.keyword.to_string()),
+                    Some(target.category_name.to_string()),
+                    target.confidence,
+                    now
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
 }
 
 pub fn scan_processes() -> Vec<ProcessInfo> {
@@ -128,20 +182,21 @@ pub fn get_focused_window() -> Result<Option<FocusedWindowInfo>, String> {
 }
 
 pub fn get_known_apps(connection: &Connection) -> Result<Vec<KnownApp>, String> {
+    ensure_enforcement_defaults(connection)?;
     let mut statement = connection
         .prepare(
             r#"
             SELECT app_key, display_name, executable_name, executable_path, app_path,
                    platform, source, category_guess, category_override,
                    COALESCE(category_override, category_guess) AS effective_category,
-                   confidence, classification_status, first_seen_at, last_seen_running_at, updated_at
+                   classification_action, confidence, classification_status, first_seen_at, last_seen_running_at, updated_at
             FROM known_apps
             ORDER BY classification_status ASC, display_name ASC
             "#,
         )
         .map_err(|error| error.to_string())?;
 
-    let rows = statement
+    let mut rows = statement
         .query_map([], |row| {
             Ok(KnownApp {
                 app_key: row.get(0)?,
@@ -154,17 +209,25 @@ pub fn get_known_apps(connection: &Connection) -> Result<Vec<KnownApp>, String> 
                 category_guess: row.get(7)?,
                 category_override: row.get(8)?,
                 effective_category: row.get(9)?,
-                confidence: row.get(10)?,
-                classification_status: row.get(11)?,
-                first_seen_at: row.get(12)?,
-                last_seen_running_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                categories: vec![],
+                classification_action: classification_action_from_str(&row.get::<_, String>(10)?)
+                    .map_err(to_from_sql_error)?,
+                confidence: row.get(11)?,
+                classification_status: row.get(12)?,
+                first_seen_at: row.get(13)?,
+                last_seen_running_at: row.get(14)?,
+                updated_at: row.get(15)?,
             })
         })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
 
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+    for app in &mut rows {
+        app.categories = load_app_category_names(connection, &app.app_key)?;
+    }
+
+    Ok(rows)
 }
 
 pub fn update_known_app(
@@ -185,6 +248,9 @@ pub fn update_known_app(
         .classification_status
         .unwrap_or_else(|| existing.classification_status.clone());
     validate_known_app_status(&classification_status)?;
+    let classification_action = updates
+        .classification_action
+        .unwrap_or(existing.classification_action);
     let category_override = updates
         .category_override
         .unwrap_or(existing.category_override.clone());
@@ -196,13 +262,15 @@ pub fn update_known_app(
             UPDATE known_apps
             SET display_name = ?1,
                 category_override = ?2,
-                classification_status = ?3,
-                updated_at = ?4
-            WHERE app_key = ?5
+                classification_action = ?3,
+                classification_status = ?4,
+                updated_at = ?5
+            WHERE app_key = ?6
             "#,
             params![
                 display_name.trim(),
                 category_override,
+                classification_action_to_str(classification_action),
                 classification_status,
                 now,
                 app_key
@@ -210,8 +278,25 @@ pub fn update_known_app(
         )
         .map_err(|error| error.to_string())?;
 
+    if let Some(category_names) = updates.category_names {
+        replace_app_categories(connection, app_key, &category_names)?;
+    }
+
     let updated = get_known_app_by_key(connection, app_key)?
         .ok_or_else(|| format!("known app {app_key} disappeared after update"))?;
+
+    record_enforcement_history(
+        connection,
+        "known_app",
+        app_key,
+        "updated",
+        serde_json::json!({
+            "classificationAction": classification_action_to_str(updated.classification_action),
+            "classificationStatus": updated.classification_status,
+            "categories": updated.categories,
+            "categoryOverride": updated.category_override
+        }),
+    );
 
     if updates.sync_rule.unwrap_or(true) {
         sync_known_app_to_rule(connection, &updated)?;
@@ -221,11 +306,471 @@ pub fn update_known_app(
 }
 
 pub fn refresh_known_apps_inventory(connection: &Connection) -> Result<(), String> {
+    ensure_enforcement_defaults(connection)?;
     let discovered = discover_installed_apps();
     for app in discovered {
         upsert_known_app(connection, &app, None)?;
     }
     Ok(())
+}
+
+pub fn get_known_browser_targets(
+    connection: &Connection,
+) -> Result<Vec<KnownBrowserTarget>, String> {
+    ensure_enforcement_defaults(connection)?;
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT target_key, display_name, keyword, category_name, confidence,
+                   classification_action, builtin, first_seen_at, last_seen_at, updated_at
+            FROM known_browser_targets
+            ORDER BY display_name ASC
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let targets = statement
+        .query_map([], |row| {
+            Ok(KnownBrowserTarget {
+                target_key: row.get(0)?,
+                display_name: row.get(1)?,
+                keyword: row.get(2)?,
+                category_name: row.get(3)?,
+                confidence: row.get(4)?,
+                classification_action: classification_action_from_str(&row.get::<_, String>(5)?)
+                    .map_err(to_from_sql_error)?,
+                builtin: row.get(6)?,
+                first_seen_at: row.get(7)?,
+                last_seen_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(targets)
+}
+
+pub fn update_known_browser_target(
+    connection: &Connection,
+    target_key: &str,
+    updates: KnownBrowserTargetUpdate,
+) -> Result<KnownBrowserTarget, String> {
+    ensure_enforcement_defaults(connection)?;
+    let existing = get_known_browser_target_by_key(connection, target_key)?
+        .ok_or_else(|| format!("browser target {target_key} does not exist"))?;
+    let category_name = updates
+        .category_name
+        .unwrap_or(existing.category_name.clone());
+    let classification_action = updates
+        .classification_action
+        .unwrap_or(existing.classification_action);
+    let now = timestamp_ms();
+
+    connection
+        .execute(
+            r#"
+            UPDATE known_browser_targets
+            SET category_name = ?1,
+                classification_action = ?2,
+                updated_at = ?3
+            WHERE target_key = ?4
+            "#,
+            params![
+                category_name,
+                classification_action_to_str(classification_action),
+                now,
+                target_key
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    let updated = get_known_browser_target_by_key(connection, target_key)?
+        .ok_or_else(|| format!("browser target {target_key} disappeared after update"))?;
+    record_enforcement_history(
+        connection,
+        "browser_target",
+        target_key,
+        "updated",
+        serde_json::json!({
+            "classificationAction": classification_action_to_str(updated.classification_action),
+            "categoryName": updated.category_name,
+        }),
+    );
+    Ok(updated)
+}
+
+pub fn get_pending_classifications(
+    connection: &Connection,
+) -> Result<PendingClassificationBatch, String> {
+    let apps = get_known_apps(connection)?
+        .into_iter()
+        .filter(|app| app.classification_action == ClassificationAction::Unclassified)
+        .collect();
+    let browser_targets = get_known_browser_targets(connection)?
+        .into_iter()
+        .filter(|target| {
+            target.classification_action == ClassificationAction::Unclassified
+                && target.last_seen_at.is_some()
+        })
+        .collect();
+    Ok(PendingClassificationBatch {
+        apps,
+        browser_targets,
+    })
+}
+
+pub fn get_app_categories(connection: &Connection) -> Result<Vec<AppCategory>, String> {
+    ensure_enforcement_defaults(connection)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT name, builtin, created_at, updated_at FROM app_categories ORDER BY builtin DESC, name ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let categories = statement
+        .query_map([], |row| {
+            Ok(AppCategory {
+                name: row.get(0)?,
+                builtin: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(categories)
+}
+
+pub fn upsert_app_category(
+    connection: &Connection,
+    category: AppCategoryInput,
+) -> Result<AppCategory, String> {
+    let name = category.name.trim();
+    if name.is_empty() {
+        return Err("name cannot be empty".to_string());
+    }
+    let now = timestamp_ms();
+    connection
+        .execute(
+            r#"
+            INSERT INTO app_categories (name, builtin, created_at, updated_at)
+            VALUES (?1, 0, ?2, ?2)
+            ON CONFLICT(name) DO UPDATE SET
+                updated_at = excluded.updated_at
+            "#,
+            params![name, now],
+        )
+        .map_err(|error| error.to_string())?;
+    record_enforcement_history(
+        connection,
+        "app_category",
+        name,
+        "upserted",
+        serde_json::json!({}),
+    );
+    connection
+        .query_row(
+            "SELECT name, builtin, created_at, updated_at FROM app_categories WHERE name = ?1",
+            params![name],
+            |row| {
+                Ok(AppCategory {
+                    name: row.get(0)?,
+                    builtin: row.get(1)?,
+                    created_at: row.get(2)?,
+                    updated_at: row.get(3)?,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+pub fn delete_app_category(connection: &Connection, name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.eq_ignore_ascii_case("Games")
+        || trimmed.eq_ignore_ascii_case("Social Media")
+        || trimmed.eq_ignore_ascii_case("Entertainment")
+        || trimmed.eq_ignore_ascii_case("Browsers")
+        || trimmed.eq_ignore_ascii_case("Communication")
+    {
+        return Err("built-in categories cannot be deleted".to_string());
+    }
+    let deleted = connection
+        .execute(
+            "DELETE FROM app_categories WHERE name = ?1",
+            params![trimmed],
+        )
+        .map_err(|error| error.to_string())?;
+    if deleted == 0 {
+        return Err(format!("app category {trimmed} does not exist"));
+    }
+    record_enforcement_history(
+        connection,
+        "app_category",
+        trimmed,
+        "deleted",
+        serde_json::json!({}),
+    );
+    Ok(())
+}
+
+pub fn get_enforcement_profiles(
+    connection: &Connection,
+) -> Result<Vec<EnforcementProfile>, String> {
+    ensure_enforcement_defaults(connection)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT name, parent_name, builtin, created_at, updated_at FROM enforcement_profiles ORDER BY builtin DESC, name ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let profiles = statement
+        .query_map([], |row| {
+            Ok(EnforcementProfile {
+                name: row.get(0)?,
+                parent_name: row.get(1)?,
+                builtin: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(profiles)
+}
+
+pub fn upsert_enforcement_profile(
+    connection: &Connection,
+    profile: EnforcementProfileInput,
+) -> Result<EnforcementProfile, String> {
+    ensure_enforcement_defaults(connection)?;
+    let name = normalize_profile_name(&profile.name)?;
+    if let Some(parent_name) = &profile.parent_name {
+        let parent_name = normalize_profile_name(parent_name)?;
+        if parent_name == name {
+            return Err("profile cannot inherit from itself".to_string());
+        }
+    }
+    let now = timestamp_ms();
+    let parent_name = profile
+        .parent_name
+        .map(|value| normalize_profile_name(&value))
+        .transpose()?;
+    connection
+        .execute(
+            r#"
+            INSERT INTO enforcement_profiles (name, parent_name, builtin, created_at, updated_at)
+            VALUES (?1, ?2, 0, ?3, ?3)
+            ON CONFLICT(name) DO UPDATE SET
+                parent_name = excluded.parent_name,
+                updated_at = excluded.updated_at
+            "#,
+            params![name, parent_name, now],
+        )
+        .map_err(|error| error.to_string())?;
+    record_enforcement_history(
+        connection,
+        "enforcement_profile",
+        &name,
+        "upserted",
+        serde_json::json!({ "parentName": parent_name }),
+    );
+    connection
+        .query_row(
+            "SELECT name, parent_name, builtin, created_at, updated_at FROM enforcement_profiles WHERE name = ?1",
+            params![name],
+            |row| {
+                Ok(EnforcementProfile {
+                    name: row.get(0)?,
+                    parent_name: row.get(1)?,
+                    builtin: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+pub fn delete_enforcement_profile(connection: &Connection, name: &str) -> Result<(), String> {
+    let name = normalize_profile_name(name)?;
+    if matches!(name.as_str(), "rest" | "work" | "deep_work") {
+        return Err("built-in profiles cannot be deleted".to_string());
+    }
+    let deleted = connection
+        .execute(
+            "DELETE FROM enforcement_profiles WHERE name = ?1",
+            params![name],
+        )
+        .map_err(|error| error.to_string())?;
+    if deleted == 0 {
+        return Err(format!("enforcement profile {name} does not exist"));
+    }
+    record_enforcement_history(
+        connection,
+        "enforcement_profile",
+        &name,
+        "deleted",
+        serde_json::json!({}),
+    );
+    Ok(())
+}
+
+pub fn get_enforcement_profile_overrides(
+    connection: &Connection,
+    profile_name: &str,
+) -> Result<Vec<EnforcementProfileOverride>, String> {
+    let profile_name = normalize_profile_name(profile_name)?;
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT profile_name, subject_type, subject_key, decision, created_at, updated_at
+            FROM enforcement_profile_overrides
+            WHERE profile_name = ?1
+            ORDER BY subject_type ASC, subject_key ASC
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let overrides = statement
+        .query_map(params![profile_name], |row| {
+            Ok(EnforcementProfileOverride {
+                profile_name: row.get(0)?,
+                subject_type: row.get(1)?,
+                subject_key: row.get(2)?,
+                decision: enforcement_decision_from_str(&row.get::<_, String>(3)?)
+                    .map_err(to_from_sql_error)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(overrides)
+}
+
+pub fn set_enforcement_profile_override(
+    connection: &Connection,
+    override_entry: EnforcementProfileOverrideInput,
+) -> Result<EnforcementProfileOverride, String> {
+    let profile_name = normalize_profile_name(&override_entry.profile_name)?;
+    let now = timestamp_ms();
+    connection
+        .execute(
+            r#"
+            INSERT INTO enforcement_profile_overrides (
+                profile_name, subject_type, subject_key, decision, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            ON CONFLICT(profile_name, subject_type, subject_key) DO UPDATE SET
+                decision = excluded.decision,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                profile_name,
+                normalize_subject_type(&override_entry.subject_type)?,
+                normalize_subject_key(&override_entry.subject_key),
+                enforcement_decision_to_str(override_entry.decision),
+                now
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    record_enforcement_history(
+        connection,
+        "profile_override",
+        &format!(
+            "{}:{}:{}",
+            profile_name,
+            normalize_subject_type(&override_entry.subject_type)?,
+            normalize_subject_key(&override_entry.subject_key)
+        ),
+        "set",
+        serde_json::json!({ "decision": enforcement_decision_to_str(override_entry.decision) }),
+    );
+    connection
+        .query_row(
+            r#"
+            SELECT profile_name, subject_type, subject_key, decision, created_at, updated_at
+            FROM enforcement_profile_overrides
+            WHERE profile_name = ?1 AND subject_type = ?2 AND subject_key = ?3
+            "#,
+            params![
+                profile_name,
+                normalize_subject_type(&override_entry.subject_type)?,
+                normalize_subject_key(&override_entry.subject_key)
+            ],
+            |row| {
+                Ok(EnforcementProfileOverride {
+                    profile_name: row.get(0)?,
+                    subject_type: row.get(1)?,
+                    subject_key: row.get(2)?,
+                    decision: enforcement_decision_from_str(&row.get::<_, String>(3)?)
+                        .map_err(to_from_sql_error)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+pub fn delete_enforcement_profile_override(
+    connection: &Connection,
+    profile_name: &str,
+    subject_type: &str,
+    subject_key: &str,
+) -> Result<(), String> {
+    let profile_name = normalize_profile_name(profile_name)?;
+    let subject_type = normalize_subject_type(subject_type)?;
+    let subject_key = normalize_subject_key(subject_key);
+    let deleted = connection
+        .execute(
+            "DELETE FROM enforcement_profile_overrides WHERE profile_name = ?1 AND subject_type = ?2 AND subject_key = ?3",
+            params![profile_name, subject_type, subject_key],
+        )
+        .map_err(|error| error.to_string())?;
+    if deleted == 0 {
+        return Err("override does not exist".to_string());
+    }
+    record_enforcement_history(
+        connection,
+        "profile_override",
+        &format!("{profile_name}:{subject_type}:{subject_key}"),
+        "deleted",
+        serde_json::json!({}),
+    );
+    Ok(())
+}
+
+pub fn get_enforcement_history(
+    connection: &Connection,
+    from: i64,
+    to: i64,
+) -> Result<Vec<HistoryEntry>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT id, entity_kind, entity_key, action, payload_json, occurred_at
+            FROM enforcement_history
+            WHERE occurred_at >= ?1 AND occurred_at < ?2
+            ORDER BY occurred_at DESC, id DESC
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let history = statement
+        .query_map(params![from, to], |row| {
+            Ok(HistoryEntry {
+                id: row.get(0)?,
+                entity_kind: row.get(1)?,
+                entity_key: row.get(2)?,
+                action: row.get(3)?,
+                payload_json: row.get(4)?,
+                occurred_at: row.get(5)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(history)
 }
 
 fn refresh_known_apps_from_app(app: &AppHandle) -> Result<(), String> {
@@ -293,7 +838,7 @@ pub fn set_process_rule(connection: &Connection, rule: ProcessRule) -> Result<Pr
         )
         .map_err(|error| error.to_string())?;
 
-    connection
+    let saved_rule = connection
         .query_row(
             r#"
             SELECT process_name, category, action, warn_seconds, created_at, updated_at
@@ -313,20 +858,41 @@ pub fn set_process_rule(connection: &Connection, rule: ProcessRule) -> Result<Pr
                 })
             },
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    record_enforcement_history(
+        connection,
+        "process_rule",
+        &saved_rule.process_name,
+        "set",
+        serde_json::json!({
+            "category": saved_rule.category,
+            "action": process_action_to_str(saved_rule.action),
+            "warnSeconds": saved_rule.warn_seconds
+        }),
+    );
+    Ok(saved_rule)
 }
 
 pub fn delete_process_rule(connection: &Connection, process_name: &str) -> Result<(), String> {
+    let normalized_name = normalize_process_name(process_name);
     let deleted = connection
         .execute(
             "DELETE FROM process_rules WHERE process_name = ?1",
-            params![normalize_process_name(process_name)],
+            params![normalized_name],
         )
         .map_err(|error| error.to_string())?;
 
     if deleted == 0 {
         return Err(format!("process rule for {process_name} does not exist"));
     }
+
+    record_enforcement_history(
+        connection,
+        "process_rule",
+        &normalized_name,
+        "deleted",
+        serde_json::json!({}),
+    );
 
     Ok(())
 }
@@ -341,7 +907,7 @@ fn get_known_app_by_key(
             SELECT app_key, display_name, executable_name, executable_path, app_path,
                    platform, source, category_guess, category_override,
                    COALESCE(category_override, category_guess) AS effective_category,
-                   confidence, classification_status, first_seen_at, last_seen_running_at, updated_at
+                   classification_action, confidence, classification_status, first_seen_at, last_seen_running_at, updated_at
             FROM known_apps
             WHERE app_key = ?1
             "#,
@@ -361,15 +927,114 @@ fn get_known_app_by_key(
                 category_guess: row.get(7)?,
                 category_override: row.get(8)?,
                 effective_category: row.get(9)?,
-                confidence: row.get(10)?,
-                classification_status: row.get(11)?,
-                first_seen_at: row.get(12)?,
-                last_seen_running_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                categories: vec![],
+                classification_action: classification_action_from_str(&row.get::<_, String>(10)?)
+                    .map_err(to_from_sql_error)?,
+                confidence: row.get(11)?,
+                classification_status: row.get(12)?,
+                first_seen_at: row.get(13)?,
+                last_seen_running_at: row.get(14)?,
+                updated_at: row.get(15)?,
             })
         })
         .optional()
+        .map_err(|error| error.to_string())?
+        .map(|mut app| {
+            app.categories = load_app_category_names(connection, &app.app_key)?;
+            Ok(app)
+        })
+        .transpose()
+}
+
+fn get_known_browser_target_by_key(
+    connection: &Connection,
+    target_key: &str,
+) -> Result<Option<KnownBrowserTarget>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT target_key, display_name, keyword, category_name, confidence,
+                   classification_action, builtin, first_seen_at, last_seen_at, updated_at
+            FROM known_browser_targets
+            WHERE target_key = ?1
+            "#,
+            params![target_key],
+            |row| {
+                Ok(KnownBrowserTarget {
+                    target_key: row.get(0)?,
+                    display_name: row.get(1)?,
+                    keyword: row.get(2)?,
+                    category_name: row.get(3)?,
+                    confidence: row.get(4)?,
+                    classification_action: classification_action_from_str(
+                        &row.get::<_, String>(5)?,
+                    )
+                    .map_err(to_from_sql_error)?,
+                    builtin: row.get(6)?,
+                    first_seen_at: row.get(7)?,
+                    last_seen_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
+        .optional()
         .map_err(|error| error.to_string())
+}
+
+fn load_app_category_names(connection: &Connection, app_key: &str) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT category_name FROM app_category_memberships WHERE app_key = ?1 ORDER BY category_name ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let category_names = statement
+        .query_map(params![app_key], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(category_names)
+}
+
+fn ensure_category_membership(
+    connection: &Connection,
+    app_key: &str,
+    category_name: &str,
+) -> Result<(), String> {
+    let category_name = category_name.trim();
+    if category_name.is_empty() {
+        return Ok(());
+    }
+    let now = timestamp_ms();
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO app_categories (name, builtin, created_at, updated_at) VALUES (?1, 0, ?2, ?2)",
+            params![category_name, now],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO app_category_memberships (app_key, category_name) VALUES (?1, ?2)",
+            params![app_key, category_name],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn replace_app_categories(
+    connection: &Connection,
+    app_key: &str,
+    category_names: &[String],
+) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM app_category_memberships WHERE app_key = ?1",
+            params![app_key],
+        )
+        .map_err(|error| error.to_string())?;
+    for category_name in category_names {
+        ensure_category_membership(connection, app_key, category_name)?;
+    }
+    Ok(())
 }
 
 fn validate_known_app_status(status: &str) -> Result<(), String> {
@@ -384,12 +1049,19 @@ fn sync_known_app_to_rule(connection: &Connection, app: &KnownApp) -> Result<(),
         return Ok(());
     }
 
+    let action = match app.classification_action {
+        ClassificationAction::AlwaysBan => ProcessAction::AlwaysBlock,
+        ClassificationAction::BanDuringWork => ProcessAction::BlockDuringWork,
+        ClassificationAction::NeverBan | ClassificationAction::Unclassified => {
+            ProcessAction::AlwaysAllow
+        }
+    };
     let Some(category) = app.effective_category.as_ref() else {
         return Ok(());
     };
-    let Some(default_action) = default_action_for_category(category) else {
+    if action == ProcessAction::AlwaysAllow {
         return Ok(());
-    };
+    }
     let process_name = normalized_name_token(app.app_key.as_str())
         .or_else(|| {
             app.executable_name
@@ -416,20 +1088,13 @@ fn sync_known_app_to_rule(connection: &Connection, app: &KnownApp) -> Result<(),
             params![
                 process_name,
                 category,
-                process_action_to_str(default_action),
+                process_action_to_str(action),
                 now
             ],
         )
         .map_err(|error| error.to_string())?;
 
     Ok(())
-}
-
-fn default_action_for_category(category_name: &str) -> Option<ProcessAction> {
-    categories::built_in_categories()
-        .into_iter()
-        .find(|category| category.name.eq_ignore_ascii_case(category_name))
-        .map(|category| category.default_action)
 }
 
 pub fn get_enforcement_status(state: &ProcessMonitorState) -> Result<EnforcementStatus, String> {
@@ -475,16 +1140,11 @@ pub fn get_blocked_processes_log(
     Ok(entries)
 }
 
-struct UpsertOutcome {
-    inserted: bool,
-    classification_status: String,
-}
-
 fn upsert_known_app(
     connection: &Connection,
     app: &DiscoveredApp,
     last_seen_running_at: Option<i64>,
-) -> Result<UpsertOutcome, String> {
+) -> Result<(), String> {
     let existing = connection
         .query_row(
             "SELECT classification_status FROM known_apps WHERE app_key = ?1",
@@ -493,7 +1153,6 @@ fn upsert_known_app(
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let inserted = existing.is_none();
     let now = timestamp_ms();
     let classification_status = existing.unwrap_or_else(|| "unclassified".to_string());
 
@@ -502,9 +1161,9 @@ fn upsert_known_app(
             r#"
             INSERT INTO known_apps (
                 app_key, display_name, executable_name, executable_path, app_path,
-                platform, source, category_guess, category_override, confidence, classification_status,
+                platform, source, category_guess, category_override, classification_action, confidence, classification_status,
                 first_seen_at, last_seen_running_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10, ?11, ?12, ?13)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, 'unclassified', ?9, ?10, ?11, ?12, ?13)
             ON CONFLICT(app_key) DO UPDATE SET
                 display_name = excluded.display_name,
                 executable_name = COALESCE(excluded.executable_name, known_apps.executable_name),
@@ -535,10 +1194,11 @@ fn upsert_known_app(
         )
         .map_err(|error| error.to_string())?;
 
-    Ok(UpsertOutcome {
-        inserted,
-        classification_status,
-    })
+    if let Some(category_name) = app.category_guess.clone() {
+        ensure_category_membership(connection, &app.app_key, &category_name)?;
+    }
+
+    Ok(())
 }
 
 fn running_app_candidate(process: &ProcessInfo) -> DiscoveredApp {
@@ -791,28 +1451,23 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     let processes = scan_processes();
     {
         let connection = database.connection()?;
+        ensure_enforcement_defaults(&connection)?;
         for process in &processes {
             let candidate = running_app_candidate(process);
-            let outcome = upsert_known_app(&connection, &candidate, Some(timestamp_ms()))?;
-            if outcome.inserted && outcome.classification_status == "unclassified" {
-                app.emit(
-                    "unknown-app-detected",
-                    serde_json::json!({
-                        "appKey": candidate.app_key,
-                        "displayName": candidate.display_name,
-                        "processName": process.name,
-                        "executablePath": process.exe_path,
-                        "categoryGuess": candidate.category_guess,
-                        "confidence": candidate.confidence
-                    }),
-                )
-                .map_err(|error| error.to_string())?;
-            }
+            let _ = upsert_known_app(&connection, &candidate, Some(timestamp_ms()))?;
         }
     }
     let rules = {
         let connection = database.connection()?;
         get_process_rules(&connection)?
+    };
+    let known_apps = {
+        let connection = database.connection()?;
+        get_known_apps(&connection)?
+    };
+    let known_browser_targets = {
+        let connection = database.connection()?;
+        get_known_browser_targets(&connection)?
     };
     let current_block = {
         let connection = database.connection()?;
@@ -823,6 +1478,10 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     let active_block_type = {
         let connection = database.connection()?;
         schedule_engine::effective_enforcement_block_type(&connection, &schedule)?
+    };
+    let active_profile = {
+        let connection = database.connection()?;
+        schedule_engine::effective_enforcement_profile(&connection, &schedule)?
     };
     let emergency_mode = current_block
         .as_ref()
@@ -835,24 +1494,31 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime.status.last_scan_at = Some(now);
     runtime.status.active_block_type = active_block_type;
+    runtime.status.active_profile = Some(active_profile.clone());
     runtime.status.focused_window = focused_window.clone();
     runtime.status.last_killed_processes.clear();
+    let mut prompted_app_keys = std::mem::take(&mut runtime.prompted_app_keys);
+    let mut prompted_browser_target_keys =
+        std::mem::take(&mut runtime.prompted_browser_target_keys);
 
-    if active_block_type != Some(BlockType::Work) && !emergency_mode {
-        runtime.warnings.clear();
-        runtime.status.warnings.clear();
-        return Ok(());
-    }
-
+    let enforcement_connection = database.connection()?;
     let candidates = build_enforcement_candidates(
+        &enforcement_connection,
         &processes,
+        &known_apps,
+        &known_browser_targets,
         &rules,
+        &active_profile,
         emergency_mode,
         &preferences.emergency_allowed_apps,
-        &preferences.browser_title_allow_keywords,
-        &preferences.browser_title_block_keywords,
+        preferences.classification_popups_enabled,
+        &mut prompted_app_keys,
+        &mut prompted_browser_target_keys,
+        app,
         focused_window.as_ref(),
     );
+    runtime.prompted_app_keys = prompted_app_keys;
+    runtime.prompted_browser_target_keys = prompted_browser_target_keys;
     let active_keys: HashSet<String> = candidates
         .iter()
         .map(|candidate| candidate.key.clone())
@@ -863,22 +1529,6 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         let normalized_name = normalize_process_name(&candidate.process_name);
         let warn_seconds = find_warn_seconds(&normalized_name, &rules)
             .unwrap_or(preferences.process_warning_seconds);
-        let browser_close_mode =
-            candidate.window_title.is_some() && candidate.action == ProcessAction::Warn;
-
-        if candidate.action == ProcessAction::Warn && !browser_close_mode {
-            app.emit(
-                "process-warning",
-                ProcessWarning {
-                    process_name: candidate.process_name.clone(),
-                    seconds_until_kill: warn_seconds,
-                    window_title: candidate.window_title.clone(),
-                    match_reason: candidate.match_reason.clone(),
-                },
-            )
-            .map_err(|error| error.to_string())?;
-            continue;
-        }
 
         let warning = runtime
             .warnings
@@ -966,80 +1616,131 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_process_action(
-    process: &ProcessInfo,
+fn resolve_legacy_process_action(
+    process_name: &str,
     rules: &[ProcessRule],
     emergency_mode: bool,
     emergency_allowed_apps: &[String],
-) -> ProcessAction {
-    let normalized_name = normalize_process_name(&process.name);
+) -> Option<ProcessAction> {
+    let normalized_name = normalize_process_name(process_name);
 
     if emergency_mode
         && emergency_allowed_apps
             .iter()
             .any(|candidate| normalize_process_name(candidate) == normalized_name)
     {
-        return ProcessAction::AlwaysAllow;
+        return Some(ProcessAction::AlwaysAllow);
     }
 
     if let Some(rule) = rules
         .iter()
         .find(|rule| normalize_process_name(&rule.process_name) == normalized_name)
     {
-        return rule.action;
+        return Some(rule.action);
     }
 
-    for category in categories::built_in_categories() {
-        if category
-            .process_names
-            .iter()
-            .any(|candidate| normalize_process_name(candidate) == normalized_name)
-        {
-            return category.default_action;
-        }
-    }
-
-    ProcessAction::AlwaysAllow
+    None
 }
 
 fn build_enforcement_candidates(
+    connection: &Connection,
     processes: &[ProcessInfo],
+    known_apps: &[KnownApp],
+    known_browser_targets: &[KnownBrowserTarget],
     rules: &[ProcessRule],
+    active_profile: &str,
     emergency_mode: bool,
     emergency_allowed_apps: &[String],
-    browser_title_allow_keywords: &[String],
-    browser_title_block_keywords: &[String],
+    classification_popups_enabled: bool,
+    prompted_app_keys: &mut HashSet<String>,
+    prompted_browser_target_keys: &mut HashSet<String>,
+    app: &AppHandle,
     focused_window: Option<&FocusedWindowInfo>,
 ) -> Vec<EnforcementCandidate> {
     let mut candidates = Vec::new();
     let mut seen_browser = HashSet::new();
+    let known_app_map = known_apps
+        .iter()
+        .cloned()
+        .map(|known| (known.app_key.clone(), known))
+        .collect::<HashMap<_, _>>();
 
     for process in processes {
-        let action = resolve_process_action(process, rules, emergency_mode, emergency_allowed_apps);
-        if action == ProcessAction::AlwaysAllow {
-            continue;
-        }
-
         let normalized_name = normalize_process_name(&process.name);
         let browser = is_browser_process_name(&normalized_name);
+        let running_candidate = running_app_candidate(process);
+        let known_app = known_app_map.get(&running_candidate.app_key);
+
+        if classification_popups_enabled
+            && known_app
+                .map(|app| app.classification_action == ClassificationAction::Unclassified)
+                .unwrap_or(false)
+            && prompted_app_keys.insert(running_candidate.app_key.clone())
+        {
+            let _ = app.emit(
+                "unknown-app-detected",
+                serde_json::json!({
+                    "appKey": running_candidate.app_key,
+                    "displayName": running_candidate.display_name,
+                    "processName": process.name,
+                    "executablePath": process.exe_path,
+                    "categoryGuess": running_candidate.category_guess,
+                    "confidence": running_candidate.confidence
+                }),
+            );
+        }
+
         if browser {
             if !focused_window_matches_process(focused_window, process) {
                 continue;
             }
 
             let title = focused_window.and_then(clean_browser_window_title);
-            let browser_match = match_browser_title_keywords(
-                title.as_deref(),
-                browser_title_allow_keywords,
-                browser_title_block_keywords,
-            );
-            if matches!(browser_match.decision, BrowserTitleDecision::Allow) {
-                continue;
+            let matched_target = title
+                .as_deref()
+                .and_then(|cleaned| match_browser_target(cleaned, known_browser_targets));
+            if let Some(target) = matched_target.clone() {
+                let _ = mark_browser_target_seen(connection, &target.target_key);
+                if classification_popups_enabled
+                    && target.classification_action == ClassificationAction::Unclassified
+                    && prompted_browser_target_keys.insert(target.target_key.clone())
+                {
+                    let _ = app.emit(
+                        "unknown-browser-target-detected",
+                        serde_json::json!({
+                            "targetKey": target.target_key,
+                            "displayName": target.display_name,
+                            "windowTitle": title,
+                            "categoryName": target.category_name,
+                            "confidence": target.confidence
+                        }),
+                    );
+                }
             }
+
+            let legacy_action = resolve_legacy_process_action(
+                &process.name,
+                rules,
+                emergency_mode,
+                emergency_allowed_apps,
+            );
+            let resolved_action = resolve_effective_action(
+                connection,
+                active_profile,
+                known_app,
+                matched_target.as_ref(),
+                legacy_action,
+            );
+            let Some(action) = resolved_action else {
+                continue;
+            };
             let key = format!(
                 "browser:{}:{}",
                 normalized_name,
-                title.clone().unwrap_or_default()
+                matched_target
+                    .as_ref()
+                    .map(|target| target.target_key.clone())
+                    .unwrap_or_else(|| title.clone().unwrap_or_default())
             );
             if !seen_browser.insert(key.clone()) {
                 continue;
@@ -1049,20 +1750,30 @@ fn build_enforcement_candidates(
                 process_name: process.name.clone(),
                 window_title: title
                     .or_else(|| focused_window.and_then(|window| window.title.clone())),
-                match_reason: browser_match.reason,
+                match_reason: matched_target
+                    .as_ref()
+                    .map(|target| format!("matched browser target '{}'", target.display_name)),
                 pid: focused_window
                     .and_then(|window| window.pid)
                     .unwrap_or(process.pid),
-                action: if matches!(browser_match.decision, BrowserTitleDecision::Block) {
-                    ProcessAction::Warn
-                } else {
-                    action
-                },
+                action,
             });
             continue;
         }
 
-        if action == ProcessAction::Warn || should_block_during_work(action) {
+        let legacy_action = resolve_legacy_process_action(
+            &process.name,
+            rules,
+            emergency_mode,
+            emergency_allowed_apps,
+        );
+        let Some(action) =
+            resolve_effective_action(connection, active_profile, known_app, None, legacy_action)
+        else {
+            continue;
+        };
+
+        if should_enforce_action(action) {
             candidates.push(EnforcementCandidate {
                 key: normalized_name,
                 process_name: process.name.clone(),
@@ -1149,46 +1860,6 @@ fn clean_browser_window_title(window: &FocusedWindowInfo) -> Option<String> {
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
-fn match_browser_title_keywords(
-    cleaned_title: Option<&str>,
-    allow_keywords: &[String],
-    block_keywords: &[String],
-) -> BrowserTitleMatch {
-    let Some(cleaned_title) = cleaned_title else {
-        return BrowserTitleMatch {
-            decision: BrowserTitleDecision::NoMatch,
-            reason: None,
-        };
-    };
-
-    if let Some(keyword) = block_keywords
-        .iter()
-        .filter_map(|keyword| normalize_keyword(keyword))
-        .find(|keyword| cleaned_title.contains(keyword))
-    {
-        return BrowserTitleMatch {
-            decision: BrowserTitleDecision::Block,
-            reason: Some(format!("matched blocked keyword '{}'", keyword)),
-        };
-    }
-
-    if let Some(keyword) = allow_keywords
-        .iter()
-        .filter_map(|keyword| normalize_keyword(keyword))
-        .find(|keyword| cleaned_title.contains(keyword))
-    {
-        return BrowserTitleMatch {
-            decision: BrowserTitleDecision::Allow,
-            reason: Some(format!("matched allowed keyword '{}'", keyword)),
-        };
-    }
-
-    BrowserTitleMatch {
-        decision: BrowserTitleDecision::NoMatch,
-        reason: None,
-    }
-}
-
 fn normalize_keyword(keyword: &str) -> Option<String> {
     let normalized = keyword
         .chars()
@@ -1206,6 +1877,191 @@ fn normalize_keyword(keyword: &str) -> Option<String> {
     (!normalized.is_empty()).then_some(normalized)
 }
 
+fn match_browser_target(
+    cleaned_title: &str,
+    targets: &[KnownBrowserTarget],
+) -> Option<KnownBrowserTarget> {
+    let mut matches = targets
+        .iter()
+        .filter(|target| cleaned_title.contains(target.keyword.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        right
+            .confidence
+            .partial_cmp(&left.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.keyword.len().cmp(&left.keyword.len()))
+    });
+    matches.into_iter().next()
+}
+
+fn mark_browser_target_seen(connection: &Connection, target_key: &str) -> Result<(), String> {
+    let now = timestamp_ms();
+    connection
+        .execute(
+            r#"
+            UPDATE known_browser_targets
+            SET first_seen_at = COALESCE(first_seen_at, ?1),
+                last_seen_at = ?1,
+                updated_at = ?1
+            WHERE target_key = ?2
+            "#,
+            params![now, target_key],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn resolve_effective_action(
+    connection: &Connection,
+    active_profile: &str,
+    known_app: Option<&KnownApp>,
+    browser_target: Option<&KnownBrowserTarget>,
+    legacy_action: Option<ProcessAction>,
+) -> Option<ProcessAction> {
+    if let Some(legacy_action) = legacy_action {
+        if legacy_action != ProcessAction::AlwaysAllow {
+            return Some(legacy_action);
+        }
+    }
+
+    if known_app
+        .map(|app| app.classification_action == ClassificationAction::AlwaysBan)
+        .unwrap_or(false)
+        || browser_target
+            .map(|target| target.classification_action == ClassificationAction::AlwaysBan)
+            .unwrap_or(false)
+    {
+        return Some(ProcessAction::AlwaysBlock);
+    }
+
+    let lineage = profile_lineage(connection, active_profile).ok()?;
+    if let Some(decision) =
+        resolve_profile_override_decision(connection, &lineage, known_app, browser_target)
+    {
+        return match decision {
+            EnforcementDecision::Block => Some(if active_profile == "rest" {
+                ProcessAction::AlwaysBlock
+            } else {
+                ProcessAction::BlockDuringWork
+            }),
+            EnforcementDecision::Allow => None,
+        };
+    }
+
+    let classification_action = browser_target
+        .map(|target| target.classification_action)
+        .unwrap_or_else(|| {
+            known_app
+                .map(|app| app.classification_action)
+                .unwrap_or(ClassificationAction::Unclassified)
+        });
+
+    match classification_action {
+        ClassificationAction::AlwaysBan => Some(ProcessAction::AlwaysBlock),
+        ClassificationAction::BanDuringWork if active_profile != "rest" => {
+            Some(ProcessAction::BlockDuringWork)
+        }
+        ClassificationAction::NeverBan | ClassificationAction::Unclassified => None,
+        ClassificationAction::BanDuringWork => None,
+    }
+}
+
+fn profile_lineage(connection: &Connection, active_profile: &str) -> Result<Vec<String>, String> {
+    let mut lineage = Vec::new();
+    let mut current = Some(normalize_profile_name(active_profile)?);
+    while let Some(profile_name) = current {
+        if lineage.contains(&profile_name) {
+            break;
+        }
+        lineage.push(profile_name.clone());
+        current = connection
+            .query_row(
+                "SELECT parent_name FROM enforcement_profiles WHERE name = ?1",
+                params![profile_name],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .flatten();
+    }
+    if lineage.is_empty() {
+        lineage.push("rest".to_string());
+    }
+    Ok(lineage)
+}
+
+fn resolve_profile_override_decision(
+    connection: &Connection,
+    lineage: &[String],
+    known_app: Option<&KnownApp>,
+    browser_target: Option<&KnownBrowserTarget>,
+) -> Option<EnforcementDecision> {
+    for profile_name in lineage {
+        if let Some(browser_target) = browser_target {
+            if let Ok(Some(decision)) = get_profile_override(
+                connection,
+                profile_name,
+                "browser_target",
+                &browser_target.target_key,
+            ) {
+                return Some(decision);
+            }
+            if let Some(category_name) = browser_target.category_name.as_ref() {
+                if let Ok(Some(decision)) =
+                    get_profile_override(connection, profile_name, "category", category_name)
+                {
+                    return Some(decision);
+                }
+            }
+        }
+
+        if let Some(known_app) = known_app {
+            if let Ok(Some(decision)) =
+                get_profile_override(connection, profile_name, "app", &known_app.app_key)
+            {
+                return Some(decision);
+            }
+
+            let mut category_decision = None;
+            for category_name in &known_app.categories {
+                if let Ok(Some(decision)) =
+                    get_profile_override(connection, profile_name, "category", category_name)
+                {
+                    if decision == EnforcementDecision::Block {
+                        return Some(decision);
+                    }
+                    category_decision = Some(decision);
+                }
+            }
+            if category_decision.is_some() {
+                return category_decision;
+            }
+        }
+    }
+
+    None
+}
+
+fn get_profile_override(
+    connection: &Connection,
+    profile_name: &str,
+    subject_type: &str,
+    subject_key: &str,
+) -> Result<Option<EnforcementDecision>, String> {
+    connection
+        .query_row(
+            "SELECT decision FROM enforcement_profile_overrides WHERE profile_name = ?1 AND subject_type = ?2 AND subject_key = ?3",
+            params![profile_name, subject_type, normalize_subject_key(subject_key)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .map(|value| enforcement_decision_from_str(&value))
+        .transpose()
+}
+
 fn find_warn_seconds(process_name: &str, rules: &[ProcessRule]) -> Option<u32> {
     rules
         .iter()
@@ -1213,12 +2069,10 @@ fn find_warn_seconds(process_name: &str, rules: &[ProcessRule]) -> Option<u32> {
         .and_then(|rule| rule.warn_seconds)
 }
 
-fn should_block_during_work(action: ProcessAction) -> bool {
+fn should_enforce_action(action: ProcessAction) -> bool {
     matches!(
         action,
-        ProcessAction::AlwaysBlock
-            | ProcessAction::BlockDuringWork
-            | ProcessAction::AllowDuringBreak
+        ProcessAction::AlwaysBlock | ProcessAction::BlockDuringWork | ProcessAction::Warn
     )
 }
 
@@ -1325,6 +2179,25 @@ fn normalize_process_name(name: &str) -> String {
     name.trim().to_lowercase()
 }
 
+fn normalize_profile_name(name: &str) -> Result<String, String> {
+    let normalized = normalize_process_name(name);
+    if normalized.is_empty() {
+        return Err("profile name cannot be empty".to_string());
+    }
+    Ok(normalized)
+}
+
+fn normalize_subject_type(subject_type: &str) -> Result<String, String> {
+    match normalize_process_name(subject_type).as_str() {
+        "app" | "category" | "browser_target" => Ok(normalize_process_name(subject_type)),
+        _ => Err(format!("unknown subjectType: {subject_type}")),
+    }
+}
+
+fn normalize_subject_key(subject_key: &str) -> String {
+    normalize_process_name(subject_key)
+}
+
 fn timestamp_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1342,6 +2215,40 @@ pub fn process_action_to_str(action: ProcessAction) -> &'static str {
     }
 }
 
+fn classification_action_to_str(action: ClassificationAction) -> &'static str {
+    match action {
+        ClassificationAction::Unclassified => "unclassified",
+        ClassificationAction::AlwaysBan => "always_ban",
+        ClassificationAction::BanDuringWork => "ban_during_work",
+        ClassificationAction::NeverBan => "never_ban",
+    }
+}
+
+fn classification_action_from_str(value: &str) -> Result<ClassificationAction, String> {
+    match value {
+        "unclassified" => Ok(ClassificationAction::Unclassified),
+        "always_ban" => Ok(ClassificationAction::AlwaysBan),
+        "ban_during_work" => Ok(ClassificationAction::BanDuringWork),
+        "never_ban" => Ok(ClassificationAction::NeverBan),
+        _ => Err(format!("unknown classification action: {value}")),
+    }
+}
+
+fn enforcement_decision_to_str(decision: EnforcementDecision) -> &'static str {
+    match decision {
+        EnforcementDecision::Allow => "allow",
+        EnforcementDecision::Block => "block",
+    }
+}
+
+fn enforcement_decision_from_str(value: &str) -> Result<EnforcementDecision, String> {
+    match value {
+        "allow" => Ok(EnforcementDecision::Allow),
+        "block" => Ok(EnforcementDecision::Block),
+        _ => Err(format!("unknown enforcement decision: {value}")),
+    }
+}
+
 pub fn process_action_from_str(value: &str) -> Result<ProcessAction, String> {
     match value {
         "always_block" => Ok(ProcessAction::AlwaysBlock),
@@ -1351,6 +2258,19 @@ pub fn process_action_from_str(value: &str) -> Result<ProcessAction, String> {
         "always_allow" => Ok(ProcessAction::AlwaysAllow),
         _ => Err(format!("unknown process action: {value}")),
     }
+}
+
+fn record_enforcement_history(
+    connection: &Connection,
+    entity_kind: &str,
+    entity_key: &str,
+    action: &str,
+    payload: serde_json::Value,
+) {
+    let _ = connection.execute(
+        "INSERT INTO enforcement_history (entity_kind, entity_key, action, payload_json, occurred_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![entity_kind, entity_key, action, payload.to_string(), timestamp_ms()],
+    );
 }
 
 fn to_from_sql_error(error: String) -> rusqlite::Error {
@@ -1366,11 +2286,13 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{
-        clean_browser_window_title, get_known_apps, match_browser_title_keywords,
-        running_app_candidate, update_known_app, upsert_known_app, BrowserTitleDecision,
-        FocusedWindowInfo, ProcessInfo,
+        clean_browser_window_title, get_known_apps, match_browser_target, running_app_candidate,
+        update_known_app, upsert_known_app, FocusedWindowInfo, ProcessInfo,
     };
-    use crate::{db::migrations::run_migrations, processes::models::KnownAppUpdate};
+    use crate::{
+        db::migrations::run_migrations,
+        processes::models::{ClassificationAction, KnownAppUpdate, KnownBrowserTarget},
+    };
 
     #[test]
     fn persists_new_running_processes_into_known_apps() {
@@ -1405,18 +2327,39 @@ mod tests {
     }
 
     #[test]
-    fn browser_keyword_block_takes_priority_over_allow() {
-        let matched = match_browser_title_keywords(
-            Some("github youtube video"),
-            &[String::from("github")],
-            &[String::from("youtube")],
-        );
+    fn browser_target_matching_prefers_confident_keyword_hits() {
+        let matched = match_browser_target(
+            "github youtube video",
+            &[
+                KnownBrowserTarget {
+                    target_key: "github".to_string(),
+                    display_name: "GitHub".to_string(),
+                    keyword: "github".to_string(),
+                    category_name: Some("Communication".to_string()),
+                    confidence: 0.7,
+                    classification_action: ClassificationAction::NeverBan,
+                    builtin: true,
+                    first_seen_at: None,
+                    last_seen_at: None,
+                    updated_at: 0,
+                },
+                KnownBrowserTarget {
+                    target_key: "youtube".to_string(),
+                    display_name: "YouTube".to_string(),
+                    keyword: "youtube".to_string(),
+                    category_name: Some("Entertainment".to_string()),
+                    confidence: 0.95,
+                    classification_action: ClassificationAction::BanDuringWork,
+                    builtin: true,
+                    first_seen_at: None,
+                    last_seen_at: None,
+                    updated_at: 0,
+                },
+            ],
+        )
+        .expect("browser target should match");
 
-        assert_eq!(matched.decision, BrowserTitleDecision::Block);
-        assert_eq!(
-            matched.reason.as_deref(),
-            Some("matched blocked keyword 'youtube'")
-        );
+        assert_eq!(matched.target_key, "youtube");
     }
 
     #[test]
@@ -1438,6 +2381,7 @@ mod tests {
             &candidate.app_key,
             KnownAppUpdate {
                 category_override: Some(Some("Social Media".to_string())),
+                classification_action: Some(ClassificationAction::BanDuringWork),
                 classification_status: Some("confirmed".to_string()),
                 sync_rule: Some(true),
                 ..KnownAppUpdate::default()

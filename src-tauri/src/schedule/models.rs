@@ -54,6 +54,7 @@ pub struct TimeBlock {
     pub intensity: u8,
     pub source: BlockSource,
     pub is_protected: bool,
+    pub enforcement_profile: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -95,6 +96,15 @@ pub type ScheduleRebuildResult = ScheduleMutationResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ScheduleMutationHistoryEntry {
+    pub id: i64,
+    pub action: String,
+    pub payload_json: String,
+    pub occurred_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BlockDecisionPrompt {
     pub block: TimeBlock,
     pub next_work_start: Option<i64>,
@@ -122,6 +132,8 @@ pub struct NewTimeBlock {
     pub source: Option<BlockSource>,
     #[serde(default)]
     pub is_protected: Option<bool>,
+    #[serde(default)]
+    pub enforcement_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -136,6 +148,7 @@ pub struct TimeBlockUpdate {
     pub intensity: Option<u8>,
     pub source: Option<BlockSource>,
     pub is_protected: Option<bool>,
+    pub enforcement_profile: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

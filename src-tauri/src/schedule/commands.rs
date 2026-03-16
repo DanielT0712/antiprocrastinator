@@ -5,8 +5,8 @@ use crate::{config::manager::ConfigState, db::DatabaseState};
 use super::{
     engine,
     models::{
-        EmergencyBlockRequest, NewTimeBlock, ScheduleActionResult, ScheduleRebuildResult,
-        TimeBlock, TimeBlockUpdate, WeeklyTemplate,
+        EmergencyBlockRequest, NewTimeBlock, ScheduleActionResult, ScheduleMutationHistoryEntry,
+        ScheduleRebuildResult, TimeBlock, TimeBlockUpdate, WeeklyTemplate,
     },
 };
 
@@ -36,6 +36,16 @@ pub fn get_schedule_range(
 ) -> Result<Vec<TimeBlock>, String> {
     let connection = database.connection()?;
     engine::get_schedule_range(&connection, from, to)
+}
+
+#[tauri::command]
+pub fn get_schedule_mutation_history(
+    from: i64,
+    to: i64,
+    database: State<'_, DatabaseState>,
+) -> Result<Vec<ScheduleMutationHistoryEntry>, String> {
+    let connection = database.connection()?;
+    engine::get_schedule_mutation_history(&connection, from, to)
 }
 
 #[tauri::command]

@@ -1,4 +1,4 @@
-pub const CURRENT_SCHEMA_VERSION: i32 = 6;
+pub const CURRENT_SCHEMA_VERSION: i32 = 7;
 
 pub const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS task_groups (
@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     work_ratio INTEGER,
     rest_ratio INTEGER,
     protect_generated_blocks INTEGER NOT NULL DEFAULT 0,
+    enforcement_profile TEXT,
     average_priority REAL NOT NULL DEFAULT 3.0,
     average_actual_minutes REAL,
     completion_count INTEGER NOT NULL DEFAULT 0,
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS time_blocks (
     intensity INTEGER NOT NULL DEFAULT 3 CHECK (intensity BETWEEN 1 AND 5),
     source TEXT NOT NULL DEFAULT 'manual',
     is_protected INTEGER NOT NULL DEFAULT 0,
+    enforcement_profile TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
@@ -70,6 +72,7 @@ CREATE TABLE IF NOT EXISTS known_apps (
     source TEXT NOT NULL,
     category_guess TEXT,
     category_override TEXT,
+    classification_action TEXT NOT NULL DEFAULT 'unclassified',
     confidence REAL NOT NULL DEFAULT 0.0,
     classification_status TEXT NOT NULL DEFAULT 'unclassified',
     first_seen_at INTEGER NOT NULL,
@@ -89,6 +92,71 @@ CREATE TABLE IF NOT EXISTS analytics_events (
     FOREIGN KEY (block_id) REFERENCES time_blocks(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS app_categories (
+    name TEXT PRIMARY KEY,
+    builtin INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_category_memberships (
+    app_key TEXT NOT NULL,
+    category_name TEXT NOT NULL,
+    PRIMARY KEY (app_key, category_name),
+    FOREIGN KEY (app_key) REFERENCES known_apps(app_key) ON DELETE CASCADE,
+    FOREIGN KEY (category_name) REFERENCES app_categories(name) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS known_browser_targets (
+    target_key TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    keyword TEXT NOT NULL,
+    category_name TEXT,
+    confidence REAL NOT NULL DEFAULT 0.0,
+    classification_action TEXT NOT NULL DEFAULT 'unclassified',
+    builtin INTEGER NOT NULL DEFAULT 0,
+    first_seen_at INTEGER,
+    last_seen_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (category_name) REFERENCES app_categories(name) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS enforcement_profiles (
+    name TEXT PRIMARY KEY,
+    parent_name TEXT,
+    builtin INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (parent_name) REFERENCES enforcement_profiles(name) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS enforcement_profile_overrides (
+    profile_name TEXT NOT NULL,
+    subject_type TEXT NOT NULL,
+    subject_key TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (profile_name, subject_type, subject_key),
+    FOREIGN KEY (profile_name) REFERENCES enforcement_profiles(name) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS enforcement_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_kind TEXT NOT NULL,
+    entity_key TEXT NOT NULL,
+    action TEXT NOT NULL,
+    payload_json TEXT,
+    occurred_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schedule_mutation_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    occurred_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS blocked_processes_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     process_name TEXT NOT NULL,
@@ -106,6 +174,11 @@ CREATE INDEX IF NOT EXISTS idx_time_blocks_start_time ON time_blocks(start_time)
 CREATE INDEX IF NOT EXISTS idx_time_blocks_status ON time_blocks(status);
 CREATE INDEX IF NOT EXISTS idx_known_apps_status ON known_apps(classification_status);
 CREATE INDEX IF NOT EXISTS idx_known_apps_updated_at ON known_apps(updated_at);
+CREATE INDEX IF NOT EXISTS idx_known_apps_classification_action ON known_apps(classification_action);
+CREATE INDEX IF NOT EXISTS idx_app_category_memberships_category_name ON app_category_memberships(category_name);
+CREATE INDEX IF NOT EXISTS idx_known_browser_targets_classification_action ON known_browser_targets(classification_action);
 CREATE INDEX IF NOT EXISTS idx_analytics_events_occurred_at ON analytics_events(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_blocked_processes_occurred_at ON blocked_processes_log(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_enforcement_history_occurred_at ON enforcement_history(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_schedule_mutation_history_occurred_at ON schedule_mutation_history(occurred_at);
 "#;
