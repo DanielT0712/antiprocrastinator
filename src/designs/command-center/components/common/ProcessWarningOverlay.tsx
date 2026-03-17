@@ -25,16 +25,9 @@ export function ProcessWarningOverlay() {
               <p className="text-sm font-semibold text-[var(--warning)] truncate">
                 {warning.processName}
               </p>
-              {warning.windowTitle && (
-                <p className="text-xs text-[var(--text-secondary)] mt-0.5 truncate">
-                  {warning.windowTitle}
-                </p>
-              )}
-              {warning.matchReason && (
-                <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-                  {warning.matchReason}
-                </p>
-              )}
+              <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+                Will be killed in {warning.secondsUntilKill}s
+              </p>
             </div>
             <div className="flex-shrink-0 text-right">
               <span className="text-lg font-bold text-[var(--warning)] tabular-nums">

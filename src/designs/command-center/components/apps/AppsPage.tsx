@@ -2,27 +2,19 @@ import { useEffect, useState } from "react";
 import { useProcessStore } from "@/stores/processStore";
 import * as processApi from "@/api/processes";
 import type {
-  ClassificationAction,
-  KnownApp,
-  KnownBrowserTarget,
-  ProcessRule,
   ProcessAction,
+  ProcessInfo,
+  ProcessRule,
 } from "@/types/process";
 import { Button } from "../common/Button";
 import { Select } from "../common/Select";
+import { Badge } from "../common/Badge";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-type Tab = "apps" | "websites" | "rules" | "profiles";
-
-const classificationOptions = [
-  { value: "unclassified", label: "Unclassified" },
-  { value: "always_ban", label: "Always Ban" },
-  { value: "ban_during_work", label: "Ban During Work" },
-  { value: "never_ban", label: "Never Ban" },
-];
+type Tab = "running" | "rules" | "categories" | "status";
 
 const processActionOptions = [
   { value: "always_block", label: "Always Block" },
@@ -32,204 +24,111 @@ const processActionOptions = [
   { value: "always_allow", label: "Always Allow" },
 ];
 
-function formatDate(ts: number | null): string {
-  if (!ts) return "-";
-  return new Date(ts).toLocaleDateString();
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // ---------------------------------------------------------------------------
-// Pending Classifications
+// Tab: Running Processes
 // ---------------------------------------------------------------------------
 
-function PendingClassifications({
-  apps,
-  browserTargets,
-  onClassifyApp,
-  onClassifyTarget,
-}: {
-  apps: KnownApp[];
-  browserTargets: KnownBrowserTarget[];
-  onClassifyApp: (appKey: string, action: ClassificationAction) => void;
-  onClassifyTarget: (targetKey: string, action: ClassificationAction) => void;
-}) {
-  const total = apps.length + browserTargets.length;
-  if (total === 0) return null;
-
-  return (
-    <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <svg
-          className="w-5 h-5 text-amber-400"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          viewBox="0 0 24 24"
-        >
-          <path d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
-        <span className="text-sm font-semibold text-amber-400 uppercase">
-          Pending Classification
-        </span>
-        <span className="text-xs text-amber-400/70 bg-amber-400/10 rounded-full px-2 py-0.5">
-          {total}
-        </span>
-      </div>
-
-      <div className="space-y-2">
-        {apps.map((app) => (
-          <PendingRow
-            key={app.appKey}
-            name={app.displayName}
-            onAlwaysBan={() => onClassifyApp(app.appKey, "always_ban")}
-            onBanDuringWork={() =>
-              onClassifyApp(app.appKey, "ban_during_work")
-            }
-            onNeverBan={() => onClassifyApp(app.appKey, "never_ban")}
-          />
-        ))}
-        {browserTargets.map((bt) => (
-          <PendingRow
-            key={bt.targetKey}
-            name={bt.displayName}
-            onAlwaysBan={() => onClassifyTarget(bt.targetKey, "always_ban")}
-            onBanDuringWork={() =>
-              onClassifyTarget(bt.targetKey, "ban_during_work")
-            }
-            onNeverBan={() => onClassifyTarget(bt.targetKey, "never_ban")}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function PendingRow({
-  name,
-  onAlwaysBan,
-  onBanDuringWork,
-  onNeverBan,
-}: {
-  name: string;
-  onAlwaysBan: () => void;
-  onBanDuringWork: () => void;
-  onNeverBan: () => void;
-}) {
-  return (
-    <div className="flex items-center gap-2 bg-[var(--bg-secondary)] rounded-md px-3 py-2">
-      <span className="flex-1 text-sm text-[var(--text-primary)] truncate">
-        {name}
-      </span>
-      <Button variant="danger" size="sm" onClick={onAlwaysBan}>
-        Always Ban
-      </Button>
-      <button
-        onClick={onBanDuringWork}
-        className="px-3 py-1 text-xs font-medium rounded-md bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors"
-      >
-        Ban During Work
-      </button>
-      <Button variant="secondary" size="sm" onClick={onNeverBan}>
-        <span className="text-[var(--success)]">Never Ban</span>
-      </Button>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Tab: Apps
-// ---------------------------------------------------------------------------
-
-function AppsTab({
-  knownApps,
-  onUpdate,
+function RunningProcessesTab({
+  processes,
+  processRules,
+  onAddRule,
   onRefresh,
 }: {
-  knownApps: KnownApp[];
-  onUpdate: (appKey: string, action: ClassificationAction) => void;
+  processes: ProcessInfo[];
+  processRules: ProcessRule[];
+  onAddRule: (name: string, action: ProcessAction) => void;
   onRefresh: () => void;
 }) {
+  const [search, setSearch] = useState("");
+
+  const ruleNames = new Set(
+    processRules.map((r) => r.processName.toLowerCase()),
+  );
+
+  const filtered = processes.filter((p) =>
+    p.name.toLowerCase().includes(search.toLowerCase()),
+  );
+
+  // Deduplicate by name (multiple PIDs for same process)
+  const uniqueByName = new Map<string, ProcessInfo[]>();
+  for (const p of filtered) {
+    const key = p.name.toLowerCase();
+    const existing = uniqueByName.get(key);
+    if (existing) {
+      existing.push(p);
+    } else {
+      uniqueByName.set(key, [p]);
+    }
+  }
+
+  const sorted = Array.from(uniqueByName.entries()).sort((a, b) =>
+    a[0].localeCompare(b[0]),
+  );
+
   return (
     <div className="space-y-3">
-      <div className="flex justify-end">
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search processes..."
+          className="flex-1 rounded-md bg-[var(--bg-tertiary)] px-3 py-1.5 text-sm text-[var(--text-primary)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+        />
         <Button variant="secondary" size="sm" onClick={onRefresh}>
           Refresh
         </Button>
       </div>
+      <p className="text-xs text-[var(--text-secondary)]">
+        {processes.length} processes running ({uniqueByName.size} unique)
+      </p>
       <div className="space-y-1 max-h-[60vh] overflow-y-auto">
-        {knownApps.map((app) => (
-          <div
-            key={app.appKey}
-            className="flex items-center gap-3 bg-[var(--bg-secondary)] rounded-lg px-4 py-3"
-          >
-            <span className="flex-1 text-sm text-[var(--text-primary)] truncate">
-              {app.displayName}
-            </span>
-            <Select
-              options={classificationOptions}
-              value={app.classificationAction}
-              onChange={(v) =>
-                onUpdate(app.appKey, v as ClassificationAction)
-              }
-            />
-            <span className="text-xs text-[var(--text-secondary)] w-24 text-right truncate">
-              {app.effectiveCategory ?? "-"}
-            </span>
-            <span className="text-xs text-[var(--text-secondary)] w-20 text-right">
-              {formatDate(app.lastSeenRunningAt)}
-            </span>
-          </div>
-        ))}
-        {knownApps.length === 0 && (
-          <p className="text-center text-sm text-[var(--text-secondary)] py-8">
-            No apps found.
-          </p>
-        )}
+        {sorted.map(([key, procs]) => {
+          const hasRule = ruleNames.has(key);
+          return (
+            <div
+              key={key}
+              className="flex items-center gap-3 bg-[var(--bg-secondary)] rounded-lg px-4 py-2"
+            >
+              <span className="flex-1 text-sm text-[var(--text-primary)] truncate">
+                {procs[0].name}
+              </span>
+              {procs.length > 1 && (
+                <span className="text-xs text-[var(--text-secondary)]">
+                  x{procs.length}
+                </span>
+              )}
+              <span className="text-xs text-[var(--text-secondary)] w-16 text-right">
+                {formatBytes(
+                  procs.reduce((sum, p) => sum + p.memoryBytes, 0),
+                )}
+              </span>
+              {hasRule ? (
+                <span className="text-xs text-[var(--text-secondary)] w-20 text-right">
+                  Has rule
+                </span>
+              ) : (
+                <Select
+                  options={[
+                    { value: "", label: "Add rule..." },
+                    ...processActionOptions,
+                  ]}
+                  value=""
+                  onChange={(v) => {
+                    if (v) onAddRule(procs[0].name, v as ProcessAction);
+                  }}
+                />
+              )}
+            </div>
+          );
+        })}
       </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Tab: Websites
-// ---------------------------------------------------------------------------
-
-function WebsitesTab({
-  browserTargets,
-  onUpdate,
-}: {
-  browserTargets: KnownBrowserTarget[];
-  onUpdate: (targetKey: string, action: ClassificationAction) => void;
-}) {
-  return (
-    <div className="space-y-1 max-h-[60vh] overflow-y-auto">
-      {browserTargets.map((bt) => (
-        <div
-          key={bt.targetKey}
-          className="flex items-center gap-3 bg-[var(--bg-secondary)] rounded-lg px-4 py-3"
-        >
-          <span className="flex-1 text-sm text-[var(--text-primary)] truncate">
-            {bt.displayName}
-          </span>
-          <span className="text-xs text-[var(--text-secondary)] w-24 truncate">
-            {bt.keyword}
-          </span>
-          <Select
-            options={classificationOptions}
-            value={bt.classificationAction}
-            onChange={(v) =>
-              onUpdate(bt.targetKey, v as ClassificationAction)
-            }
-          />
-          <span className="text-xs text-[var(--text-secondary)] w-24 text-right truncate">
-            {bt.categoryName ?? "-"}
-          </span>
-        </div>
-      ))}
-      {browserTargets.length === 0 && (
-        <p className="text-center text-sm text-[var(--text-secondary)] py-8">
-          No browser targets found.
-        </p>
-      )}
     </div>
   );
 }
@@ -242,6 +141,7 @@ function RulesTab({
   processRules,
   onRuleChange,
   onDeleteRule,
+  onRefetch,
 }: {
   processRules: ProcessRule[];
   onRuleChange: (
@@ -249,98 +149,270 @@ function RulesTab({
     updates: { action?: ProcessAction; warnSeconds?: number | null },
   ) => void;
   onDeleteRule: (processName: string) => void;
+  onRefetch: () => void;
 }) {
+  const [newName, setNewName] = useState("");
+  const [newAction, setNewAction] = useState<ProcessAction>("block_during_work");
+
+  const handleAdd = async () => {
+    if (!newName.trim()) return;
+    const now = Date.now();
+    await processApi.setProcessRule({
+      processName: newName.trim(),
+      category: null,
+      action: newAction,
+      warnSeconds: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    setNewName("");
+    onRefetch();
+  };
+
   return (
-    <div className="space-y-1 max-h-[60vh] overflow-y-auto">
-      {processRules.map((rule) => (
-        <div
-          key={rule.processName}
-          className="flex items-center gap-3 bg-[var(--bg-secondary)] rounded-lg px-4 py-3"
-        >
-          <span className="flex-1 text-sm text-[var(--text-primary)] truncate">
-            {rule.processName}
-          </span>
-          <Select
-            options={processActionOptions}
-            value={rule.action}
-            onChange={(v) =>
-              onRuleChange(rule, { action: v as ProcessAction })
-            }
-          />
-          {rule.action === "warn" && (
-            <input
-              type="number"
-              className="w-20 bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--bg-tertiary)] rounded-md px-2 py-1 text-sm outline-none focus:border-[var(--accent)]"
-              value={rule.warnSeconds ?? ""}
-              onChange={(e) =>
-                onRuleChange(rule, {
-                  warnSeconds: e.target.value
-                    ? Number(e.target.value)
-                    : null,
-                })
-              }
-              placeholder="sec"
-            />
-          )}
-          <button
-            onClick={() => onDeleteRule(rule.processName)}
-            className="text-[var(--text-secondary)] hover:text-[var(--danger)] transition-colors p-1"
+    <div className="space-y-3">
+      {/* Add new rule */}
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          placeholder="Process name..."
+          className="flex-1 rounded-md bg-[var(--bg-tertiary)] px-3 py-1.5 text-sm text-[var(--text-primary)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+          onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+        />
+        <Select
+          options={processActionOptions}
+          value={newAction}
+          onChange={(v) => setNewAction(v as ProcessAction)}
+        />
+        <Button variant="primary" size="sm" onClick={handleAdd}>
+          Add
+        </Button>
+      </div>
+
+      <div className="space-y-1 max-h-[60vh] overflow-y-auto">
+        {processRules.map((rule) => (
+          <div
+            key={rule.processName}
+            className="flex items-center gap-3 bg-[var(--bg-secondary)] rounded-lg px-4 py-3"
           >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              viewBox="0 0 24 24"
+            <span className="flex-1 text-sm text-[var(--text-primary)] truncate">
+              {rule.processName}
+            </span>
+            {rule.category && (
+              <span className="text-xs text-[var(--text-secondary)]">
+                {rule.category}
+              </span>
+            )}
+            <Select
+              options={processActionOptions}
+              value={rule.action}
+              onChange={(v) =>
+                onRuleChange(rule, { action: v as ProcessAction })
+              }
+            />
+            {rule.action === "warn" && (
+              <input
+                type="number"
+                className="w-20 bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--bg-tertiary)] rounded-md px-2 py-1 text-sm outline-none focus:border-[var(--accent)]"
+                value={rule.warnSeconds ?? ""}
+                onChange={(e) =>
+                  onRuleChange(rule, {
+                    warnSeconds: e.target.value
+                      ? Number(e.target.value)
+                      : null,
+                  })
+                }
+                placeholder="sec"
+              />
+            )}
+            <button
+              onClick={() => onDeleteRule(rule.processName)}
+              className="text-[var(--text-secondary)] hover:text-[var(--danger)] transition-colors p-1"
             >
-              <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-            </svg>
-          </button>
-        </div>
-      ))}
-      {processRules.length === 0 && (
-        <p className="text-center text-sm text-[var(--text-secondary)] py-8">
-          No process rules configured.
-        </p>
-      )}
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                viewBox="0 0 24 24"
+              >
+                <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+            </button>
+          </div>
+        ))}
+        {processRules.length === 0 && (
+          <p className="text-center text-sm text-[var(--text-secondary)] py-8">
+            No process rules configured. Add one above or use the Running tab to
+            create rules from detected processes.
+          </p>
+        )}
+      </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Tab: Profiles
+// Tab: Categories
 // ---------------------------------------------------------------------------
 
-function ProfilesTab({
-  enforcementProfiles,
-}: {
-  enforcementProfiles: { name: string; parentName: string | null; builtin: boolean }[];
-}) {
+function CategoriesTab() {
+  const categories = useProcessStore((s) => s.processCategories);
+
   return (
-    <div className="space-y-1 max-h-[60vh] overflow-y-auto">
-      {enforcementProfiles.map((profile) => (
-        <div
-          key={profile.name}
-          className="flex items-center gap-3 bg-[var(--bg-secondary)] rounded-lg px-4 py-3"
-        >
-          <span className="flex-1 text-sm text-[var(--text-primary)]">
-            {profile.name}
-          </span>
-          <span className="text-xs text-[var(--text-secondary)]">
-            {profile.parentName ?? "-"}
-          </span>
-          {profile.builtin && (
-            <span className="inline-flex items-center rounded-full bg-[var(--bg-tertiary)] px-2 py-0.5 text-xs font-medium text-[var(--text-secondary)]">
-              builtin
-            </span>
-          )}
-        </div>
-      ))}
-      {enforcementProfiles.length === 0 && (
-        <p className="text-center text-sm text-[var(--text-secondary)] py-8">
-          No enforcement profiles found.
+    <div className="space-y-3">
+      <p className="text-xs text-[var(--text-secondary)]">
+        Built-in process categories. Processes matching these names are
+        automatically enforced even without explicit rules.
+      </p>
+      <div className="space-y-3">
+        {categories.map((cat) => (
+          <div
+            key={cat.name}
+            className="bg-[var(--bg-secondary)] rounded-lg p-4 space-y-2"
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-[var(--text-primary)]">
+                {cat.name}
+              </span>
+              <Badge
+                variant={
+                  cat.defaultAction === "always_block"
+                    ? "work"
+                    : cat.defaultAction === "block_during_work"
+                      ? "work"
+                      : cat.defaultAction === "allow_during_break"
+                        ? "break"
+                        : cat.defaultAction === "warn"
+                          ? "custom"
+                          : "break"
+                }
+              >
+                {cat.defaultAction.replace(/_/g, " ")}
+              </Badge>
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {cat.processNames.map((name) => (
+                <span
+                  key={name}
+                  className="inline-flex rounded-full bg-[var(--bg-tertiary)] px-2.5 py-0.5 text-xs text-[var(--text-secondary)]"
+                >
+                  {name}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab: Enforcement Status
+// ---------------------------------------------------------------------------
+
+function StatusTab() {
+  const enforcementStatus = useProcessStore((s) => s.enforcementStatus);
+  const fetchEnforcementStatus = useProcessStore(
+    (s) => s.fetchEnforcementStatus,
+  );
+
+  if (!enforcementStatus) {
+    return (
+      <div className="text-center py-8">
+        <p className="text-sm text-[var(--text-secondary)]">
+          Loading enforcement status...
         </p>
+        <Button
+          variant="secondary"
+          className="mt-2"
+          onClick={fetchEnforcementStatus}
+        >
+          Refresh
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-end">
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={fetchEnforcementStatus}
+        >
+          Refresh
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded-lg bg-[var(--bg-secondary)] p-4">
+          <p className="text-xs text-[var(--text-secondary)]">Last Scan</p>
+          <p className="mt-1 text-sm font-medium text-[var(--text-primary)]">
+            {enforcementStatus.lastScanAt
+              ? new Date(enforcementStatus.lastScanAt).toLocaleTimeString()
+              : "Never"}
+          </p>
+        </div>
+        <div className="rounded-lg bg-[var(--bg-secondary)] p-4">
+          <p className="text-xs text-[var(--text-secondary)]">
+            Active Block Type
+          </p>
+          <p className="mt-1 text-sm font-medium text-[var(--text-primary)]">
+            {enforcementStatus.activeBlockType ?? "None"}
+          </p>
+        </div>
+      </div>
+
+      {enforcementStatus.warnings.length > 0 && (
+        <div className="space-y-2">
+          <span className="text-xs font-semibold uppercase tracking-wider text-amber-400">
+            Active Warnings
+          </span>
+          {enforcementStatus.warnings.map((w) => (
+            <div
+              key={w.processName}
+              className="flex items-center gap-3 bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-2"
+            >
+              <span className="flex-1 text-sm text-[var(--text-primary)]">
+                {w.processName}
+              </span>
+              <span className="text-sm font-mono text-amber-400">
+                {w.secondsUntilKill}s
+              </span>
+            </div>
+          ))}
+        </div>
       )}
+
+      {enforcementStatus.lastKilledProcesses.length > 0 && (
+        <div className="space-y-2">
+          <span className="text-xs font-semibold uppercase tracking-wider text-[var(--danger)]">
+            Recently Killed
+          </span>
+          {enforcementStatus.lastKilledProcesses.map((name, i) => (
+            <div
+              key={`${name}-${i}`}
+              className="flex items-center gap-3 bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-2"
+            >
+              <span className="text-sm text-[var(--text-primary)]">
+                {name}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {enforcementStatus.warnings.length === 0 &&
+        enforcementStatus.lastKilledProcesses.length === 0 && (
+          <p className="text-center text-sm text-[var(--text-secondary)] py-4">
+            No active warnings or recent kills.
+          </p>
+        )}
     </div>
   );
 }
@@ -351,88 +423,41 @@ function ProfilesTab({
 
 export function AppsPage() {
   const {
-    knownApps,
-    browserTargets,
-    pendingClassifications,
+    runningProcesses,
     processRules,
-    enforcementProfiles,
-    fetchKnownApps,
-    updateKnownApp,
-    fetchBrowserTargets,
-    fetchPendingClassifications,
+    fetchRunningProcesses,
     fetchProcessRules,
-    fetchEnforcementProfiles,
+    fetchProcessCategories,
+    fetchEnforcementStatus,
   } = useProcessStore();
 
-  const [activeTab, setActiveTab] = useState<Tab>("apps");
+  const [activeTab, setActiveTab] = useState<Tab>("running");
 
   useEffect(() => {
-    fetchKnownApps();
-    fetchBrowserTargets();
-    fetchPendingClassifications();
+    fetchRunningProcesses();
     fetchProcessRules();
-    fetchEnforcementProfiles();
+    fetchProcessCategories();
+    fetchEnforcementStatus();
   }, [
-    fetchKnownApps,
-    fetchBrowserTargets,
-    fetchPendingClassifications,
+    fetchRunningProcesses,
     fetchProcessRules,
-    fetchEnforcementProfiles,
+    fetchProcessCategories,
+    fetchEnforcementStatus,
   ]);
 
-  // Classify pending app
-  const classifyApp = async (
-    appKey: string,
-    action: ClassificationAction,
-  ) => {
-    await updateKnownApp(appKey, {
-      classificationAction: action,
-      syncRule: true,
+  const handleAddRule = async (name: string, action: ProcessAction) => {
+    const now = Date.now();
+    await processApi.setProcessRule({
+      processName: name,
+      category: null,
+      action,
+      warnSeconds: null,
+      createdAt: now,
+      updatedAt: now,
     });
-    await fetchPendingClassifications();
+    await fetchProcessRules();
   };
 
-  // Classify pending browser target
-  const classifyTarget = async (
-    targetKey: string,
-    action: ClassificationAction,
-  ) => {
-    await processApi.updateKnownBrowserTarget(targetKey, {
-      classificationAction: action,
-    });
-    await fetchBrowserTargets();
-    await fetchPendingClassifications();
-  };
-
-  // Update app classification
-  const handleUpdateApp = async (
-    appKey: string,
-    action: ClassificationAction,
-  ) => {
-    await updateKnownApp(appKey, {
-      classificationAction: action,
-      syncRule: true,
-    });
-  };
-
-  // Update browser target classification
-  const handleUpdateTarget = async (
-    targetKey: string,
-    action: ClassificationAction,
-  ) => {
-    await processApi.updateKnownBrowserTarget(targetKey, {
-      classificationAction: action,
-    });
-    await fetchBrowserTargets();
-  };
-
-  // Refresh inventory
-  const handleRefresh = async () => {
-    await processApi.refreshKnownAppsInventory();
-    await fetchKnownApps();
-  };
-
-  // Rule changes
   const handleRuleChange = async (
     rule: ProcessRule,
     updates: { action?: ProcessAction; warnSeconds?: number | null },
@@ -455,22 +480,14 @@ export function AppsPage() {
   };
 
   const tabs: { key: Tab; label: string }[] = [
-    { key: "apps", label: "Apps" },
-    { key: "websites", label: "Websites" },
+    { key: "running", label: "Running" },
     { key: "rules", label: "Rules" },
-    { key: "profiles", label: "Profiles" },
+    { key: "categories", label: "Categories" },
+    { key: "status", label: "Status" },
   ];
 
   return (
     <div className="p-6 space-y-6">
-      {/* Pending Classifications */}
-      <PendingClassifications
-        apps={pendingClassifications?.apps ?? []}
-        browserTargets={pendingClassifications?.browserTargets ?? []}
-        onClassifyApp={classifyApp}
-        onClassifyTarget={classifyTarget}
-      />
-
       {/* Tabs */}
       <div className="flex border-b border-[var(--bg-tertiary)]">
         {tabs.map((tab) => (
@@ -489,17 +506,12 @@ export function AppsPage() {
       </div>
 
       {/* Tab content */}
-      {activeTab === "apps" && (
-        <AppsTab
-          knownApps={knownApps}
-          onUpdate={handleUpdateApp}
-          onRefresh={handleRefresh}
-        />
-      )}
-      {activeTab === "websites" && (
-        <WebsitesTab
-          browserTargets={browserTargets}
-          onUpdate={handleUpdateTarget}
+      {activeTab === "running" && (
+        <RunningProcessesTab
+          processes={runningProcesses}
+          processRules={processRules}
+          onAddRule={handleAddRule}
+          onRefresh={fetchRunningProcesses}
         />
       )}
       {activeTab === "rules" && (
@@ -507,11 +519,11 @@ export function AppsPage() {
           processRules={processRules}
           onRuleChange={handleRuleChange}
           onDeleteRule={handleDeleteRule}
+          onRefetch={fetchProcessRules}
         />
       )}
-      {activeTab === "profiles" && (
-        <ProfilesTab enforcementProfiles={enforcementProfiles} />
-      )}
+      {activeTab === "categories" && <CategoriesTab />}
+      {activeTab === "status" && <StatusTab />}
     </div>
   );
 }
