@@ -30,6 +30,192 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// System / background processes to hide by default.
+// Matches case-insensitively against the process name.
+const SYSTEM_PROCESS_PATTERNS = [
+  // macOS system
+  /^com\./,
+  /^kernel/i,
+  /^launchd/i,
+  /^syslog/i,
+  /^mds/i,
+  /^mdworker/i,
+  /^spotlight/i,
+  /^coreaudio/i,
+  /^coreservices/i,
+  /^windowserver/i,
+  /^systemui/i,
+  /^loginwindow/i,
+  /^opendirectory/i,
+  /^notif/i,
+  /^cfpref/i,
+  /^distnote/i,
+  /^usernotif/i,
+  /^corebrightness/i,
+  /^airplay/i,
+  /^bluetoothd/i,
+  /^bluetoothaudio/i,
+  /^audio/i,
+  /^trustd/i,
+  /^securityd/i,
+  /^apsd/i,
+  /^dasd/i,
+  /^endpointsecurityd/i,
+  /^fseventsd/i,
+  /^symptomsd/i,
+  /^rapportd/i,
+  /^timed/i,
+  /^configd/i,
+  /^powerd/i,
+  /^thermalmonitord/i,
+  /^logd/i,
+  /^diagnosticd/i,
+  /^remoted/i,
+  /^diskarbitrationd/i,
+  /^contextstored/i,
+  /^usernoted/i,
+  /^watchdogd/i,
+  /^sandboxd/i,
+  /^containermanager/i,
+  /^corespeech/i,
+  /^hidd/i,
+  /^filecoordination/i,
+  /^iconservices/i,
+  /^askpermission/i,
+  /^sharingd/i,
+  /^siriknowledge/i,
+  /^translationd/i,
+  /^biome/i,
+  /^knowledge/i,
+  /^duet/i,
+  /^intelligenceplatform/i,
+  /^cloudd/i,
+  /^nsurlsession/i,
+  /^networkserviceproxy/i,
+  /^symptom/i,
+  /^lsd$/i,
+  /^pbs$/i,
+  /^gpuinfo/i,
+  /agent$/i,
+  /helper$/i,
+  /^cron/i,
+  /^sshd/i,
+  /^ntpd/i,
+  /^resolved/i,
+  /^taskgated/i,
+  /^runningboard/i,
+  /^nearbyd/i,
+  /^wifip2pd/i,
+  /^wirelessprox/i,
+  /^identityservices/i,
+  /^mediaremote/i,
+  /^mediaanalysisd/i,
+  /^photolibraryd/i,
+  /^callservices/i,
+  // Linux system
+  /^systemd/i,
+  /^kworker/i,
+  /^kthread/i,
+  /^ksoftirq/i,
+  /^rcu_/i,
+  /^irq\//i,
+  /^migration/i,
+  /^dbus/i,
+  /^polkitd/i,
+  /^udevd/i,
+  /^snapd/i,
+  /^networkmanager/i,
+  /^wpa_supplicant/i,
+  /^avahi/i,
+  /^cupsd/i,
+  /^gdm/i,
+  // Generic daemon patterns
+  /d$/i,  // Catch remaining *d daemon processes — aggressive, behind toggle
+];
+
+// Well-known user apps that should always pass through even if they match a pattern
+const USER_APP_ALLOWLIST = new Set([
+  "discord",
+  "telegram",
+  "whatsapp",
+  "signal",
+  "slack",
+  "spotify",
+  "steam",
+  "firefox",
+  "safari",
+  "google chrome",
+  "microsoft edge",
+  "arc",
+  "brave browser",
+  "vlc",
+  "iina",
+  "iterm2",
+  "terminal",
+  "warp",
+  "alacritty",
+  "kitty",
+  "visual studio code",
+  "code",
+  "cursor",
+  "xcode",
+  "figma",
+  "notion",
+  "obsidian",
+  "zoom",
+  "teams",
+  "finder",
+  "preview",
+  "mail",
+  "messages",
+  "calendar",
+  "notes",
+  "pages",
+  "numbers",
+  "keynote",
+  "photos",
+  "music",
+  "podcasts",
+  "tv",
+  "news",
+  "maps",
+  "facetime",
+  "books",
+  "reminders",
+  "weather",
+  "stocks",
+  "home",
+]);
+
+function isLikelyUserApp(p: ProcessInfo): boolean {
+  const name = p.name.toLowerCase();
+
+  // Always show allowlisted apps
+  if (USER_APP_ALLOWLIST.has(name)) return true;
+
+  // Apps with a .app path are user apps
+  if (p.exePath?.includes(".app/")) return true;
+
+  // Anything in /Applications is a user app
+  if (p.exePath?.startsWith("/Applications/")) return true;
+  if (p.exePath?.startsWith("/System/Applications/")) return true;
+
+  // Filter out system processes
+  for (const pattern of SYSTEM_PROCESS_PATTERNS) {
+    if (pattern.test(name)) return false;
+  }
+
+  // If it has no exe path, it's probably a kernel thread
+  if (!p.exePath) return false;
+
+  // System paths
+  if (p.exePath.startsWith("/usr/") || p.exePath.startsWith("/sbin/")) return false;
+  if (p.exePath.startsWith("/System/Library/")) return false;
+  if (p.exePath.startsWith("/Library/Apple/")) return false;
+
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Tab: Running Processes
 // ---------------------------------------------------------------------------
@@ -46,14 +232,15 @@ function RunningProcessesTab({
   onRefresh: () => void;
 }) {
   const [search, setSearch] = useState("");
+  const [showSystem, setShowSystem] = useState(false);
 
   const ruleNames = new Set(
     processRules.map((r) => r.processName.toLowerCase()),
   );
 
-  const filtered = processes.filter((p) =>
-    p.name.toLowerCase().includes(search.toLowerCase()),
-  );
+  const filtered = processes
+    .filter((p) => showSystem || isLikelyUserApp(p))
+    .filter((p) => p.name.toLowerCase().includes(search.toLowerCase()));
 
   // Deduplicate by name (multiple PIDs for same process)
   const uniqueByName = new Map<string, ProcessInfo[]>();
@@ -71,6 +258,12 @@ function RunningProcessesTab({
     a[0].localeCompare(b[0]),
   );
 
+  const totalUnique = (() => {
+    const names = new Set<string>();
+    for (const p of processes) names.add(p.name.toLowerCase());
+    return names.size;
+  })();
+
   return (
     <div className="space-y-3">
       <div className="flex gap-2">
@@ -81,12 +274,23 @@ function RunningProcessesTab({
           placeholder="Search processes..."
           className="flex-1 rounded-md bg-[var(--bg-tertiary)] px-3 py-1.5 text-sm text-[var(--text-primary)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
         />
+        <button
+          onClick={() => setShowSystem(!showSystem)}
+          className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+            showSystem
+              ? "bg-[var(--accent)]/20 text-[var(--accent)]"
+              : "bg-[var(--bg-tertiary)] text-[var(--text-secondary)]"
+          }`}
+        >
+          {showSystem ? "Hide System" : "Show All"}
+        </button>
         <Button variant="secondary" size="sm" onClick={onRefresh}>
           Refresh
         </Button>
       </div>
       <p className="text-xs text-[var(--text-secondary)]">
-        {processes.length} processes running ({uniqueByName.size} unique)
+        Showing {uniqueByName.size} of {totalUnique} unique processes
+        {!showSystem && " (system processes hidden)"}
       </p>
       <div className="space-y-1 max-h-[60vh] overflow-y-auto">
         {sorted.map(([key, procs]) => {
