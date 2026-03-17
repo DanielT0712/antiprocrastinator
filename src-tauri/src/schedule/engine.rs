@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use chrono::{Datelike, Days, NaiveDate, TimeZone, Utc};
+use chrono::{Datelike, Days, Local, NaiveDate, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -1665,7 +1665,7 @@ fn timestamp_for_minute(date: NaiveDate, minute: u16) -> Result<i64, String> {
     let hour = minute / 60;
     let minute_of_hour = minute % 60;
 
-    Utc.with_ymd_and_hms(
+    Local.with_ymd_and_hms(
         date.year(),
         date.month(),
         date.day(),
@@ -1687,7 +1687,7 @@ fn end_of_day(date: NaiveDate) -> Result<i64, String> {
 
 fn date_from_timestamp(timestamp: i64) -> Result<NaiveDate, String> {
     chrono::DateTime::from_timestamp_millis(timestamp)
-        .map(|datetime| datetime.date_naive())
+        .map(|datetime| datetime.with_timezone(&Local).date_naive())
         .ok_or_else(|| "invalid timestamp".to_string())
 }
 

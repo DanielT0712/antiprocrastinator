@@ -5,6 +5,7 @@ import { useTaskStore } from "@/stores/taskStore";
 import type { BlockType } from "@/types/schedule";
 import { Badge } from "../common/Badge";
 import { Button } from "../common/Button";
+import { SetupWizard } from "./SetupWizard";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -144,55 +145,67 @@ function CurrentBlockCard() {
         />
       </div>
 
-      {/* Action buttons */}
+      {/* Action buttons - simplified for non-work blocks */}
       <div className="mt-4 flex gap-2 relative">
-        {isPaused ? (
-          <>
-            <Button variant="primary" onClick={() => resumeCurrentBlock()}>
-              Resume
-            </Button>
-            <Button variant="secondary" onClick={() => completeCurrentBlock()}>
-              Done
-            </Button>
-            <Button variant="ghost" onClick={() => skipCurrentBlock()}>
-              Skip
-            </Button>
-          </>
+        {currentBlock.blockType === "work" ? (
+          isPaused ? (
+            <>
+              <Button variant="primary" onClick={() => resumeCurrentBlock()}>
+                Resume
+              </Button>
+              <Button variant="secondary" onClick={() => completeCurrentBlock()}>
+                Done
+              </Button>
+              <Button variant="ghost" onClick={() => skipCurrentBlock()}>
+                Skip
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button variant="secondary" onClick={() => pauseCurrentBlock()}>
+                Pause
+              </Button>
+              <Button variant="primary" onClick={() => completeCurrentBlock()}>
+                Done
+              </Button>
+              <Button variant="ghost" onClick={() => skipCurrentBlock()}>
+                Skip
+              </Button>
+              <div className="relative">
+                <Button
+                  variant="ghost"
+                  onClick={() => setShowExtend((v) => !v)}
+                >
+                  Extend
+                </Button>
+                {showExtend && (
+                  <div className="absolute bottom-full left-0 mb-1 flex flex-col rounded-md bg-[var(--bg-tertiary)] py-1 shadow-lg z-10">
+                    {[5, 10, 15, 30].map((m) => (
+                      <button
+                        key={m}
+                        className="px-4 py-1.5 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] text-left whitespace-nowrap"
+                        onClick={() => {
+                          extendCurrentBlock(m);
+                          setShowExtend(false);
+                        }}
+                      >
+                        +{m} min
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )
         ) : (
+          /* Break / Sleep / Meal / Custom blocks: just Done and Skip */
           <>
-            <Button variant="secondary" onClick={() => pauseCurrentBlock()}>
-              Pause
-            </Button>
             <Button variant="primary" onClick={() => completeCurrentBlock()}>
               Done
             </Button>
             <Button variant="ghost" onClick={() => skipCurrentBlock()}>
               Skip
             </Button>
-            <div className="relative">
-              <Button
-                variant="ghost"
-                onClick={() => setShowExtend((v) => !v)}
-              >
-                Extend
-              </Button>
-              {showExtend && (
-                <div className="absolute bottom-full left-0 mb-1 flex flex-col rounded-md bg-[var(--bg-tertiary)] py-1 shadow-lg z-10">
-                  {[5, 10, 15, 30].map((m) => (
-                    <button
-                      key={m}
-                      className="px-4 py-1.5 text-sm text-[var(--text-primary)] hover:bg-[var(--bg-secondary)] text-left whitespace-nowrap"
-                      onClick={() => {
-                        extendCurrentBlock(m);
-                        setShowExtend(false);
-                      }}
-                    >
-                      +{m} min
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
           </>
         )}
       </div>
@@ -422,6 +435,9 @@ export function DashboardPage() {
     useScheduleStore();
   const { fetchDailySummary } = useAnalyticsStore();
   const { fetchTasks } = useTaskStore();
+  const tasks = useTaskStore((s) => s.tasks);
+  const todayBlocks = useScheduleStore((s) => s.todayBlocks);
+  const [setupDismissed, setSetupDismissed] = useState(false);
 
   useEffect(() => {
     fetchCurrentBlock();
@@ -430,6 +446,25 @@ export function DashboardPage() {
     fetchDailySummary(todayDateString());
     fetchTasks();
   }, [fetchCurrentBlock, fetchNextBlock, fetchTodayBlocks, fetchDailySummary, fetchTasks]);
+
+  // Show setup wizard on first launch (no tasks and no schedule)
+  const needsSetup =
+    !setupDismissed && tasks.length === 0 && todayBlocks.length === 0;
+
+  if (needsSetup) {
+    return (
+      <SetupWizard
+        onComplete={() => {
+          setSetupDismissed(true);
+          fetchCurrentBlock();
+          fetchNextBlock();
+          fetchTodayBlocks();
+          fetchDailySummary(todayDateString());
+          fetchTasks();
+        }}
+      />
+    );
+  }
 
   return (
     <div className="mx-auto max-w-2xl space-y-6 p-6">
