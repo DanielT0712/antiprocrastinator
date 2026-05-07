@@ -17,6 +17,12 @@ import type {
   KnownBrowserTarget,
 } from '../api/types';
 import { Icons } from '../components/Icons';
+import {
+  AppDrawer,
+  CategoryManagerModal,
+  PendingBanner,
+  ProfileMenu,
+} from '../components/AppsExtras';
 
 const labelStyle: CSSProperties = {
   fontFamily: 'var(--font-mono)',
@@ -47,10 +53,14 @@ function ProfileTabs({
   profiles,
   active,
   onChange,
+  onMenu,
+  onAddProfile,
 }: {
   profiles: EnforcementProfile[];
   active: string;
   onChange: (name: string) => void;
+  onMenu: (profile: EnforcementProfile) => void;
+  onAddProfile: () => void;
 }) {
   return (
     <div style={{
@@ -62,37 +72,81 @@ function ProfileTabs({
       {profiles.map((p) => {
         const sel = p.name === active;
         return (
-          <button
+          <div
             key={p.name}
-            onClick={() => onChange(p.name)}
             style={{
-              padding: '7px 14px',
+              display: 'inline-flex',
+              alignItems: 'stretch',
               borderRadius: 999,
               border: '1px solid ' + (sel ? 'var(--accent)' : 'var(--line)'),
               background: sel ? 'var(--accent-soft)' : 'transparent',
-              color: sel ? 'var(--accent-ink)' : 'var(--muted)',
-              fontSize: 12.5,
-              fontFamily: 'var(--font-sans)',
-              cursor: 'pointer',
-              fontWeight: sel ? 500 : 400,
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 6,
+              overflow: 'hidden',
             }}
           >
-            {PROFILE_DISPLAY[p.name] ?? p.name}
-            {p.parentName && (
-              <span style={{
-                fontSize: 10,
-                color: 'var(--faint)',
-                fontFamily: 'var(--font-mono)',
-              }}>
-                ← {PROFILE_DISPLAY[p.parentName] ?? p.parentName}
-              </span>
-            )}
-          </button>
+            <button
+              onClick={() => onChange(p.name)}
+              style={{
+                padding: '7px 14px',
+                background: 'transparent',
+                color: sel ? 'var(--accent-ink)' : 'var(--muted)',
+                fontSize: 12.5,
+                fontFamily: 'var(--font-sans)',
+                cursor: 'pointer',
+                fontWeight: sel ? 500 : 400,
+                border: 'none',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              {PROFILE_DISPLAY[p.name] ?? p.name}
+              {p.parentName && (
+                <span style={{
+                  fontSize: 10,
+                  color: 'var(--faint)',
+                  fontFamily: 'var(--font-mono)',
+                }}>
+                  ← {PROFILE_DISPLAY[p.parentName] ?? p.parentName}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => onMenu(p)}
+              title="Profile options"
+              style={{
+                padding: '0 10px',
+                background: 'transparent',
+                color: 'var(--muted)',
+                border: 'none',
+                borderLeft: '1px solid var(--line)',
+                cursor: 'pointer',
+                fontSize: 14,
+                lineHeight: 1,
+              }}
+            >
+              ⋯
+            </button>
+          </div>
         );
       })}
+      <button
+        onClick={onAddProfile}
+        style={{
+          padding: '7px 12px',
+          borderRadius: 999,
+          border: '1px dashed var(--line)',
+          background: 'transparent',
+          color: 'var(--muted)',
+          fontSize: 12.5,
+          fontFamily: 'var(--font-sans)',
+          cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+        }}
+      >
+        + New profile
+      </button>
     </div>
   );
 }
@@ -208,6 +262,7 @@ interface CategorySectionProps {
   emergencyBlockedCategories: string[];
   overrides: Map<string, EnforcementProfileOverride>;
   onSetOverride: (key: OverrideKey, decision: EnforcementDecision | null) => void;
+  onOpenApp: (app: KnownApp) => void;
 }
 
 function CategorySection({
@@ -218,6 +273,7 @@ function CategorySection({
   emergencyBlockedCategories,
   overrides,
   onSetOverride,
+  onOpenApp,
 }: CategorySectionProps) {
   const [open, setOpen] = useState(false);
   const categoryHardLocked =
@@ -328,12 +384,20 @@ function CategorySection({
               return (
                 <div
                   key={app.appKey}
+                  onClick={() => onOpenApp(app)}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
                     gap: 12,
                     padding: '10px 16px 10px 40px',
                     borderTop: '1px solid var(--line)',
+                    cursor: 'pointer',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = 'var(--bg)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'transparent';
                   }}
                 >
                   <div style={{ flex: 1, minWidth: 0 }}>
@@ -359,18 +423,20 @@ function CategorySection({
                   {decisionPill(
                     categoryHardLocked ? 'block' : appDecision ?? effectiveCategoryDecision,
                   )}
-                  <DecisionToggle
-                    current={appDecision}
-                    hardLock={
-                      categoryHardLocked
-                        ? {
-                            lockedTo: 'block',
-                            reason: `${category.name} apps cannot be allowed during emergency.`,
-                          }
-                        : undefined
-                    }
-                    onChange={(next) => onSetOverride(appKey, next)}
-                  />
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <DecisionToggle
+                      current={appDecision}
+                      hardLock={
+                        categoryHardLocked
+                          ? {
+                              lockedTo: 'block',
+                              reason: `${category.name} apps cannot be allowed during emergency.`,
+                            }
+                          : undefined
+                      }
+                      onChange={(next) => onSetOverride(appKey, next)}
+                    />
+                  </div>
                 </div>
               );
             })
@@ -769,18 +835,24 @@ export function AppsScreen() {
   const [overrides, setOverrides] = useState<EnforcementProfileOverride[]>([]);
   const [emergencyBlockedCategories, setEmergencyBlocked] = useState<string[]>([]);
   const [browserTargets, setBrowserTargets] = useState<KnownBrowserTarget[]>([]);
+  const [pendingApps, setPendingApps] = useState<KnownApp[]>([]);
+  const [pendingTargets, setPendingTargets] = useState<KnownBrowserTarget[]>([]);
   const [adding, setAdding] = useState(false);
+  const [drawerAppKey, setDrawerAppKey] = useState<string | null>(null);
+  const [categoryManagerOpen, setCategoryManagerOpen] = useState(false);
+  const [profileMenuName, setProfileMenuName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [p, a, c, o, eb, bt] = await Promise.all([
+      const [p, a, c, o, eb, bt, pending] = await Promise.all([
         api.getEnforcementProfiles(),
         api.getKnownApps(),
         api.getAppCategories(),
         api.getEnforcementProfileOverrides(),
         api.getEmergencyBlockedCategories(),
         api.getKnownBrowserTargets(),
+        api.getPendingClassifications(),
       ]);
       setProfiles(p);
       setApps(a);
@@ -788,6 +860,8 @@ export function AppsScreen() {
       setOverrides(o);
       setEmergencyBlocked(eb);
       setBrowserTargets(bt);
+      setPendingApps(pending.apps ?? []);
+      setPendingTargets(pending.browserTargets ?? []);
       if (!p.find((profile) => profile.name === activeProfile) && p.length > 0) {
         setActiveProfile(p[0].name);
       }
@@ -907,6 +981,20 @@ export function AppsScreen() {
           profiles={profiles}
           active={activeProfile}
           onChange={setActiveProfile}
+          onMenu={(p) => setProfileMenuName(p.name)}
+          onAddProfile={async () => {
+            const name = prompt('Name the new profile (lowercase, snake_case):');
+            if (!name) return;
+            try {
+              await api.upsertEnforcementProfile({
+                name: name.trim(),
+                parentName: 'work',
+              });
+              refresh();
+            } catch (err) {
+              setError(String(err));
+            }
+          }}
         />
         <div style={{ height: 14 }} />
         <div style={{
@@ -977,6 +1065,42 @@ export function AppsScreen() {
 
           {tab === 'apps' && (
             <>
+              <PendingBanner
+                apps={pendingApps}
+                browserTargets={pendingTargets}
+                onOpenApp={(app) => setDrawerAppKey(app.appKey)}
+                onOpenBrowserTab={() => setTab('browser_targets')}
+              />
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                marginBottom: 12,
+              }}>
+                <span style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--muted)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
+                }}>
+                  Categories
+                </span>
+                <span style={{ flex: 1 }} />
+                <button
+                  onClick={() => setCategoryManagerOpen(true)}
+                  style={{
+                    padding: '6px 12px',
+                    background: 'var(--bg-raise)',
+                    border: '1px solid var(--line)',
+                    borderRadius: 6,
+                    color: 'var(--ink)',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Manage categories
+                </button>
+              </div>
               {[
                 ...categories,
                 { name: 'Uncategorized', builtin: false, createdAt: 0, updatedAt: 0 },
@@ -990,6 +1114,7 @@ export function AppsScreen() {
                   emergencyBlockedCategories={emergencyBlockedCategories}
                   overrides={overrideMap}
                   onSetOverride={setOverride}
+                  onOpenApp={(app) => setDrawerAppKey(app.appKey)}
                 />
               ))}
 
@@ -1155,6 +1280,70 @@ export function AppsScreen() {
           categories={categories}
           onClose={() => setAdding(false)}
           onCreate={createBrowserTarget}
+        />
+      )}
+
+      {drawerAppKey && (
+        <AppDrawer
+          app={apps.find((a) => a.appKey === drawerAppKey)!}
+          profiles={profiles}
+          overrides={overrides}
+          emergencyBlockedCategories={emergencyBlockedCategories}
+          categories={categories}
+          onClose={() => setDrawerAppKey(null)}
+          onSetOverride={async (profileName, decision) => {
+            try {
+              if (decision == null) {
+                await api.deleteEnforcementProfileOverride(
+                  profileName,
+                  'app',
+                  drawerAppKey,
+                );
+              } else {
+                await api.setEnforcementProfileOverride({
+                  profileName,
+                  subjectType: 'app',
+                  subjectKey: drawerAppKey,
+                  decision,
+                });
+              }
+              refresh();
+            } catch (err) {
+              setError(String(err));
+            }
+          }}
+          onUpdateApp={async (appKey, patch) => {
+            try {
+              await api.updateKnownApp(appKey, {
+                categoryOverride:
+                  patch.categoryOverride === undefined
+                    ? undefined
+                    : { value: patch.categoryOverride },
+              });
+              refresh();
+            } catch (err) {
+              setError(String(err));
+            }
+          }}
+        />
+      )}
+
+      {categoryManagerOpen && (
+        <CategoryManagerModal
+          categories={categories}
+          apps={apps}
+          onClose={() => setCategoryManagerOpen(false)}
+          onRefresh={refresh}
+        />
+      )}
+
+      {profileMenuName && (
+        <ProfileMenu
+          profile={profiles.find((p) => p.name === profileMenuName)!}
+          profiles={profiles}
+          onClose={() => setProfileMenuName(null)}
+          onRefresh={refresh}
+          onError={(msg) => setError(msg)}
         />
       )}
 

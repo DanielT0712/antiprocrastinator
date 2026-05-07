@@ -3,6 +3,7 @@ import { api, onAppEvent } from './api';
 import { Sidebar, type Route } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { SuspendAppModal } from './components/Modals';
+import { applyTheme } from './lib/themes';
 import { HomeScreen } from './screens/HomeScreen';
 import { ScheduleScreen } from './screens/ScheduleScreen';
 import { TasksScreen } from './screens/TasksScreen';
@@ -34,6 +35,19 @@ function App() {
   useEffect(() => {
     localStorage.setItem(COLLAPSED_KEY, collapsed ? '1' : '0');
   }, [collapsed]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getPreferences()
+      .then((prefs) => {
+        if (!cancelled) applyTheme(prefs.theme);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const refreshActiveProfile = useCallback(async () => {
     try {

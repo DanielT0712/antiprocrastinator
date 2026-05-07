@@ -90,6 +90,8 @@ pub fn run() {
             tasks::commands::delete_task,
             tasks::commands::get_task_groups,
             tasks::commands::create_task_group,
+            tasks::commands::update_task_group,
+            tasks::commands::delete_task_group,
             tasks::commands::get_task_stats,
             config::manager::get_preferences,
             config::manager::update_preferences,

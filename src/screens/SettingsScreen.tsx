@@ -1,14 +1,17 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { api } from '../api';
 import type { GuardStatus, UserPreferences } from '../api/types';
+import { THEMES, applyTheme } from '../lib/themes';
 
 const SECTIONS = [
   { id: 'general', label: 'General' },
+  { id: 'appearance', label: 'Appearance' },
   { id: 'scheduling', label: 'Scheduling' },
   { id: 'enforcement', label: 'Enforcement' },
   { id: 'guard', label: 'Guard & Relaunch' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'advanced', label: 'Advanced' },
+  { id: 'about', label: 'About' },
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]['id'];
@@ -345,6 +348,139 @@ export function SettingsScreen() {
                     onChange={(v) => update({ launchAtLogin: v })}
                   />
                 </FieldGrid>
+              </div>
+            </>
+          )}
+
+          {section === 'appearance' && (
+            <>
+              <SectionTitle
+                title="Appearance"
+                blurb="Pick a theme. The accent token, button colors, and surface tones all rebind from the theme on selection."
+              />
+              <div style={cardStyle}>
+                <CardHead title="Theme" />
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                  gap: 10,
+                }}>
+                  {THEMES.map((theme) => {
+                    const active = theme.id === prefs.theme;
+                    return (
+                      <button
+                        key={theme.id}
+                        onClick={() => {
+                          applyTheme(theme.id);
+                          update({ theme: theme.id });
+                        }}
+                        style={{
+                          textAlign: 'left',
+                          padding: 12,
+                          border: '1px solid ' + (active ? 'var(--accent)' : 'var(--line)'),
+                          background: theme.tokens.bgRaise,
+                          color: theme.tokens.ink,
+                          borderRadius: 8,
+                          cursor: 'pointer',
+                          fontFamily: 'var(--font-sans)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                        }}
+                      >
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 8,
+                        }}>
+                          <div>
+                            <div style={{
+                              fontSize: 13.5,
+                              fontWeight: 500,
+                            }}>
+                              {theme.name}
+                            </div>
+                            <div style={{
+                              fontSize: 10.5,
+                              color: theme.tokens.muted,
+                              fontFamily: 'var(--font-mono)',
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.08em',
+                              marginTop: 2,
+                            }}>
+                              {theme.family}
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            {[theme.tokens.bg, theme.tokens.bgRaise, theme.tokens.ink, theme.tokens.accentBase ?? 'oklch(0.68 0.08 45)'].map(
+                              (c, i) => (
+                                <span
+                                  key={i}
+                                  style={{
+                                    width: 12,
+                                    height: 12,
+                                    borderRadius: 3,
+                                    background: c,
+                                    border: '1px solid ' + theme.tokens.line,
+                                  }}
+                                />
+                              ),
+                            )}
+                          </div>
+                        </div>
+                        <div style={{
+                          fontSize: 11.5,
+                          color: theme.tokens.muted,
+                          lineHeight: 1.4,
+                        }}>
+                          {theme.desc}
+                        </div>
+                        {active && (
+                          <div style={{
+                            fontSize: 10.5,
+                            color: theme.tokens.accentInk ?? 'var(--accent-ink)',
+                            fontFamily: 'var(--font-mono)',
+                            textTransform: 'uppercase',
+                            letterSpacing: '0.1em',
+                          }}>
+                            Active
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          )}
+
+          {section === 'about' && (
+            <>
+              <SectionTitle
+                title="About"
+                blurb="The relevant facts."
+              />
+              <div style={cardStyle}>
+                <CardHead title="AntiProcrastinator" />
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: '120px 1fr',
+                  rowGap: 8,
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 12,
+                }}>
+                  <span style={{ color: 'var(--muted)' }}>Version</span>
+                  <span style={{ color: 'var(--ink)' }}>0.4 dev</span>
+                  <span style={{ color: 'var(--muted)' }}>Stack</span>
+                  <span style={{ color: 'var(--ink)' }}>
+                    Tauri v2 · React · SQLite
+                  </span>
+                  <span style={{ color: 'var(--muted)' }}>Source</span>
+                  <span style={{ color: 'var(--ink)' }}>
+                    github.com/DanielT0712/antiprocrastinator
+                  </span>
+                </div>
               </div>
             </>
           )}

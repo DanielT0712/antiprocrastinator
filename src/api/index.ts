@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AppCategory,
   BlockDecisionPrompt,
+  ClassificationAction,
   EmergencyBlockRequest,
   EnforcementProfile,
   EnforcementProfileOverride,
@@ -74,6 +75,30 @@ export const api = {
   getTaskGroups: () => invoke<TaskGroup[]>('get_task_groups'),
   createTaskGroup: (name: string, color: string | null = null) =>
     invoke<TaskGroup>('create_task_group', { name, color }),
+  updateTaskGroup: (
+    id: number,
+    name: string | null = null,
+    color: { value: string | null } | null = null,
+  ) =>
+    invoke<TaskGroup>('update_task_group', {
+      id,
+      name,
+      color: color ? color.value : null,
+    }),
+  deleteTaskGroup: (id: number, reassignTo: number | null = null) =>
+    invoke<void>('delete_task_group', { id, reassignTo }),
+  getPendingClassifications: () =>
+    invoke<{ apps: KnownApp[]; browserTargets: KnownBrowserTarget[] }>(
+      'get_pending_classifications',
+    ),
+  getScheduleMutationHistory: (from: number, to: number) =>
+    invoke<
+      { id: number; action: string; payloadJson: string; occurredAt: number }[]
+    >('get_schedule_mutation_history', { from, to }),
+  getWeeklyTemplate: () =>
+    invoke<unknown | null>('get_weekly_template'),
+  saveWeeklyTemplate: (template: unknown) =>
+    invoke<unknown>('save_weekly_template', { template }),
 
   // Config
   getPreferences: () => invoke<UserPreferences>('get_preferences'),
@@ -92,6 +117,26 @@ export const api = {
   getKnownApps: () => invoke<KnownApp[]>('get_known_apps'),
   refreshKnownAppsInventory: () =>
     invoke<KnownApp[]>('refresh_known_apps_inventory'),
+  updateKnownApp: (
+    appKey: string,
+    updates: {
+      displayName?: string;
+      categoryOverride?: { value: string | null };
+      categoryNames?: string[];
+      classificationAction?: ClassificationAction;
+      classificationStatus?: string;
+      syncRule?: boolean;
+    },
+  ) =>
+    invoke<KnownApp>('update_known_app', {
+      appKey,
+      updates: {
+        ...updates,
+        categoryOverride: updates.categoryOverride
+          ? updates.categoryOverride.value
+          : undefined,
+      },
+    }),
   getEmergencyAllowlist: () => invoke<KnownApp[]>('get_emergency_allowlist'),
   getEmergencyBlockedCategories: () =>
     invoke<string[]>('get_emergency_blocked_categories'),

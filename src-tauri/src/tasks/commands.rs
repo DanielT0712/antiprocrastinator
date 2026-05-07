@@ -64,6 +64,27 @@ pub fn create_task_group(
 }
 
 #[tauri::command]
+pub fn update_task_group(
+    id: i64,
+    name: Option<String>,
+    color: Option<Option<String>>,
+    database: State<'_, DatabaseState>,
+) -> Result<TaskGroup, String> {
+    let connection = database.connection()?;
+    repository::update_task_group(&connection, id, name, color)
+}
+
+#[tauri::command]
+pub fn delete_task_group(
+    id: i64,
+    reassign_to: Option<i64>,
+    database: State<'_, DatabaseState>,
+) -> Result<(), String> {
+    let connection = database.connection()?;
+    repository::delete_task_group(&connection, id, reassign_to)
+}
+
+#[tauri::command]
 pub fn get_task_stats(
     task_id: i64,
     database: State<'_, DatabaseState>,

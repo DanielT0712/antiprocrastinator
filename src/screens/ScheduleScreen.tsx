@@ -640,30 +640,176 @@ function HourLines(): ReactNode {
   return out;
 }
 
-const DAYS_TO_SHOW = 5;
+const DEFAULT_DAYS = 5;
+type ViewMode = 'day' | 'week';
+
+function Stat({
+  n,
+  l,
+  accent,
+}: {
+  n: number;
+  l: string;
+  accent?: boolean;
+}) {
+  return (
+    <span>
+      <span style={{
+        color: accent ? 'var(--accent-ink)' : 'var(--ink)',
+        fontWeight: 500,
+      }}>
+        {n}
+      </span>{' '}
+      {l}
+    </span>
+  );
+}
+
+function DotSep() {
+  return <span style={{ color: 'var(--faint)' }}>·</span>;
+}
+
+function ReplanLog({ entries }: { entries: MutationHistoryEntry[] }) {
+  if (entries.length === 0) {
+    return (
+      <div style={{
+        padding: '16px 28px',
+        fontSize: 12,
+        color: 'var(--muted)',
+        fontFamily: 'var(--font-mono)',
+      }}>
+        No mutations recorded in the last week.
+      </div>
+    );
+  }
+  return (
+    <div style={{
+      maxHeight: 220,
+      overflow: 'auto',
+      padding: '10px 28px',
+      borderTop: '1px solid var(--line)',
+      background: 'var(--bg-raise)',
+    }}>
+      <div style={{
+        fontFamily: 'var(--font-mono)',
+        fontSize: 11,
+        color: 'var(--muted)',
+        textTransform: 'uppercase',
+        letterSpacing: '0.1em',
+        marginBottom: 8,
+      }}>
+        Replan log · {entries.length} entries
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {entries
+          .slice()
+          .sort((a, b) => b.occurredAt - a.occurredAt)
+          .slice(0, 80)
+          .map((e) => (
+            <div
+              key={e.id}
+              style={{
+                padding: '8px 10px',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                background: 'var(--bg)',
+                display: 'grid',
+                gridTemplateColumns: '160px 160px minmax(0, 1fr)',
+                gap: 12,
+                fontSize: 11.5,
+                fontFamily: 'var(--font-mono)',
+                color: 'var(--muted)',
+              }}
+            >
+              <span style={{ color: 'var(--faint)' }}>
+                {new Date(e.occurredAt).toLocaleString('en-US', {
+                  month: 'short',
+                  day: 'numeric',
+                  hour: 'numeric',
+                  minute: '2-digit',
+                  hour12: false,
+                })}
+              </span>
+              <span style={{ color: 'var(--ink)' }}>{e.action}</span>
+              <span style={{
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}>
+                {summariseHistory(e.payloadJson)}
+              </span>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+function summariseHistory(payloadJson: string): string {
+  try {
+    const parsed = JSON.parse(payloadJson) as {
+      mutations?: { kind: string }[];
+      warnings?: { kind: string }[];
+      pseudoDeadline?: number | null;
+    };
+    const mutCount = parsed.mutations?.length ?? 0;
+    const warnCount = parsed.warnings?.length ?? 0;
+    const parts: string[] = [];
+    if (mutCount > 0) parts.push(`${mutCount} mutation${mutCount === 1 ? '' : 's'}`);
+    if (warnCount > 0) parts.push(`${warnCount} warning${warnCount === 1 ? '' : 's'}`);
+    if (parsed.pseudoDeadline) {
+      parts.push(
+        `finish ${new Date(parsed.pseudoDeadline).toLocaleString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: false,
+        })}`,
+      );
+    }
+    return parts.length > 0 ? parts.join(' · ') : 'no diff';
+  } catch {
+    return '—';
+  }
+}
+
+interface MutationHistoryEntry {
+  id: number;
+  action: string;
+  payloadJson: string;
+  occurredAt: number;
+}
 
 export function ScheduleScreen() {
+  const [view, setView] = useState<ViewMode>('week');
   const [blocks, setBlocks] = useState<TimeBlock[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [adding, setAdding] = useState(false);
+  const [history, setHistory] = useState<MutationHistoryEntry[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const daysToShow = view === 'day' ? 1 : DEFAULT_DAYS;
 
   const refresh = useCallback(async () => {
     try {
       const now = Date.now();
       const from = startOfDay(now);
-      const to = from + DAYS_TO_SHOW * 86_400_000;
-      const [list, taskList] = await Promise.all([
+      const to = from + daysToShow * 86_400_000;
+      const [list, taskList, historyList] = await Promise.all([
         api.getScheduleRange(from, to),
         api.getTasks(),
+        api.getScheduleMutationHistory(from - 7 * 86_400_000, to),
       ]);
       setBlocks(list);
       setTasks(taskList);
+      setHistory(historyList);
     } catch (err) {
       setError(String(err));
     }
-  }, []);
+  }, [daysToShow]);
 
   useEffect(() => {
     refresh();
@@ -672,7 +818,7 @@ export function ScheduleScreen() {
   const dayBuckets = useMemo(() => {
     const buckets: { day: number; blocks: TimeBlock[] }[] = [];
     const today = startOfDay(Date.now());
-    for (let i = 0; i < DAYS_TO_SHOW; i++) {
+    for (let i = 0; i < daysToShow; i++) {
       const day = today + i * 86_400_000;
       buckets.push({
         day,
@@ -682,6 +828,45 @@ export function ScheduleScreen() {
       });
     }
     return buckets;
+  }, [blocks, daysToShow]);
+
+  const stats = useMemo(() => {
+    let workMinutes = 0;
+    let deepBlocks = 0;
+    let restMinutes = 0;
+    let fixedBlocks = 0;
+    for (const b of blocks) {
+      const mins = Math.max(0, (b.endTime - b.startTime) / 60_000);
+      if (b.blockType === 'work') workMinutes += mins;
+      if (b.enforcementProfile === 'deep_work') deepBlocks += 1;
+      if (
+        b.blockType === 'break' ||
+        b.blockType === 'sleep' ||
+        b.blockType === 'meal'
+      ) {
+        restMinutes += mins;
+      }
+      if (b.source === 'template') fixedBlocks += 1;
+    }
+    return {
+      blockCount: blocks.length,
+      workHours: Math.round(workMinutes / 6) / 10,
+      deepBlocks,
+      restHours: Math.round(restMinutes / 6) / 10,
+      fixedBlocks,
+    };
+  }, [blocks]);
+
+  const projectedFinish = useMemo(() => {
+    const filtered = blocks.filter(
+      (b) =>
+        b.blockType !== 'sleep' &&
+        b.blockType !== 'meal' &&
+        b.blockType !== 'break' &&
+        (b.status === 'scheduled' || b.status === 'active' || b.status === 'paused'),
+    );
+    if (filtered.length === 0) return null;
+    return Math.max(...filtered.map((b) => b.endTime));
   }, [blocks]);
 
   const taskById = useMemo(() => {
@@ -752,66 +937,143 @@ export function ScheduleScreen() {
     <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div style={{
-          padding: '16px 28px',
+          padding: '16px 28px 14px',
           borderBottom: '1px solid var(--line)',
           display: 'flex',
-          alignItems: 'center',
-          gap: 12,
+          flexDirection: 'column',
+          gap: 10,
         }}>
           <div style={{
-            fontFamily: 'var(--font-display)',
-            fontSize: 22,
-            color: 'var(--ink)',
-            letterSpacing: '-0.02em',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
           }}>
-            Schedule
-          </div>
-          <div style={{
-            fontSize: 12,
-            color: 'var(--muted)',
-            fontFamily: 'var(--font-mono)',
-          }}>
-            {DAYS_TO_SHOW} days · {blocks.length} blocks
-          </div>
-          <span style={{ flex: 1 }} />
-          <button
-            onClick={() => setAdding(true)}
-            style={{
-              padding: '7px 14px',
-              background: 'var(--bg-raise)',
+            <div style={{
+              fontFamily: 'var(--font-display)',
+              fontSize: 22,
+              color: 'var(--ink)',
+              letterSpacing: '-0.02em',
+            }}>
+              Schedule
+            </div>
+            <span style={{ flex: 1 }} />
+            <div style={{
+              display: 'inline-flex',
+              gap: 0,
               border: '1px solid var(--line)',
               borderRadius: 6,
-              color: 'var(--ink)',
-              fontSize: 12.5,
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 5,
-            }}
-          >
-            <Icons.plus size={13} /> Add block
-          </button>
-          <button
-            onClick={rebuild}
-            style={{
-              padding: '7px 14px',
-              background: 'var(--accent)',
-              color: 'oklch(0.18 0.04 60)',
-              border: '1px solid var(--accent)',
-              borderRadius: 6,
-              fontSize: 12.5,
-              cursor: 'pointer',
-            }}
-          >
-            Rebuild
-          </button>
+              overflow: 'hidden',
+            }}>
+              {(['day', 'week'] as ViewMode[]).map((v) => (
+                <button
+                  key={v}
+                  onClick={() => setView(v)}
+                  style={{
+                    padding: '6px 14px',
+                    background: view === v ? 'var(--ink-soft)' : 'transparent',
+                    color: view === v ? 'var(--ink)' : 'var(--muted)',
+                    border: 'none',
+                    fontSize: 12,
+                    fontFamily: 'var(--font-sans)',
+                    cursor: 'pointer',
+                    fontWeight: view === v ? 500 : 400,
+                  }}
+                >
+                  {v === 'day' ? 'Day' : 'Week'}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setShowHistory((v) => !v)}
+              style={{
+                padding: '7px 12px',
+                background: 'var(--bg-raise)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                color: 'var(--ink)',
+                fontSize: 12.5,
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
+              }}
+            >
+              {showHistory ? 'Hide' : 'Show'} replan log
+            </button>
+            <button
+              onClick={() => setAdding(true)}
+              style={{
+                padding: '7px 14px',
+                background: 'var(--bg-raise)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                color: 'var(--ink)',
+                fontSize: 12.5,
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
+              }}
+            >
+              <Icons.plus size={13} /> Add block
+            </button>
+            <button
+              onClick={rebuild}
+              style={{
+                padding: '7px 14px',
+                background: 'var(--accent)',
+                color: 'oklch(0.18 0.04 60)',
+                border: '1px solid var(--accent)',
+                borderRadius: 6,
+                fontSize: 12.5,
+                cursor: 'pointer',
+              }}
+            >
+              Rebuild
+            </button>
+          </div>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 22,
+            flexWrap: 'wrap',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11.5,
+            color: 'var(--muted)',
+          }}>
+            <Stat n={stats.blockCount} l="blocks" />
+            <DotSep />
+            <Stat n={stats.workHours} l="work hours" />
+            <DotSep />
+            <Stat n={stats.deepBlocks} l="deep" accent />
+            <DotSep />
+            <Stat n={stats.restHours} l="rest hours" />
+            <DotSep />
+            <Stat n={stats.fixedBlocks} l="fixed" />
+            {projectedFinish && (
+              <>
+                <DotSep />
+                <span>
+                  projected finish{' '}
+                  <span style={{ color: 'var(--ink)' }}>
+                    {new Date(projectedFinish).toLocaleString('en-US', {
+                      weekday: 'short',
+                      hour: 'numeric',
+                      minute: '2-digit',
+                      hour12: false,
+                    })}
+                  </span>
+                </span>
+              </>
+            )}
+          </div>
         </div>
 
         <div style={{ flex: 1, overflow: 'auto' }}>
           <div style={{
             display: 'grid',
-            gridTemplateColumns: `60px repeat(${DAYS_TO_SHOW}, 1fr)`,
-            minWidth: 720,
+            gridTemplateColumns: `60px repeat(${daysToShow}, 1fr)`,
+            minWidth: view === 'day' ? 320 : 720,
           }}>
             <div style={{
               borderRight: '1px solid var(--line)',
@@ -879,6 +1141,7 @@ export function ScheduleScreen() {
             ))}
           </div>
         </div>
+        {showHistory && <ReplanLog entries={history} />}
       </div>
 
       {selectedBlock && (

@@ -9,6 +9,14 @@ import {
 import { api } from '../api';
 import type { NewTask, Task, TaskGroup, TaskUpdate, TimeBlock } from '../api/types';
 import { Icons } from '../components/Icons';
+import {
+  PlanModal,
+  RemoveFromPlanModal,
+  TasksBulkBar,
+  TasksGroupManager,
+  TasksGroupRail,
+  type BulkAction,
+} from '../components/TasksExtras';
 import { formatDuration, formatHHMM, priorityLabel } from '../lib/format';
 
 const labelStyle: CSSProperties = {
@@ -278,9 +286,21 @@ interface DrawerProps {
   onClose: () => void;
   onUpdate: (id: number, updates: TaskUpdate) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
+  planned: boolean;
+  onAddToPlan: () => void;
+  onRemoveFromPlan: () => void;
 }
 
-function Drawer({ task, groups, onClose, onUpdate, onDelete }: DrawerProps) {
+function Drawer({
+  task,
+  groups,
+  onClose,
+  onUpdate,
+  onDelete,
+  planned,
+  onAddToPlan,
+  onRemoveFromPlan,
+}: DrawerProps) {
   const [draft, setDraft] = useState<Task>(task);
 
   useEffect(() => setDraft(task), [task.id]);
@@ -627,6 +647,37 @@ function Drawer({ task, groups, onClose, onUpdate, onDelete }: DrawerProps) {
             <Icons.trash size={12} /> Delete
           </button>
           <span style={{ flex: 1 }} />
+          {planned ? (
+            <button
+              onClick={onRemoveFromPlan}
+              style={{
+                padding: '6px 12px',
+                background: 'var(--bg-raise)',
+                border: '1px solid var(--line)',
+                borderRadius: 5,
+                color: 'var(--ink)',
+                fontSize: 12.5,
+                cursor: 'pointer',
+              }}
+            >
+              Remove from plan…
+            </button>
+          ) : (
+            <button
+              onClick={onAddToPlan}
+              style={{
+                padding: '6px 12px',
+                background: 'var(--bg-raise)',
+                border: '1px solid var(--line)',
+                borderRadius: 5,
+                color: 'var(--ink)',
+                fontSize: 12.5,
+                cursor: 'pointer',
+              }}
+            >
+              Add to plan…
+            </button>
+          )}
           <button
             onClick={onClose}
             style={{
@@ -906,6 +957,13 @@ export function TasksScreen() {
   const [scheduledBlocks, setScheduledBlocks] = useState<TimeBlock[]>([]);
   const [query, setQuery] = useState('');
   const [openTaskId, setOpenTaskId] = useState<number | null>(null);
+  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
+  const [groupFilter, setGroupFilter] = useState<Set<string>>(new Set());
+  const [groupManagerFocus, setGroupManagerFocus] = useState<
+    number | 'new' | undefined | null
+  >(null);
+  const [planModalTaskId, setPlanModalTaskId] = useState<number | null>(null);
+  const [removeModalTaskId, setRemoveModalTaskId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -937,14 +995,23 @@ export function TasksScreen() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return tasks;
-    return tasks.filter((t) => {
-      if (t.name.toLowerCase().includes(q)) return true;
-      const group = t.groupId ? groupById.get(t.groupId) : undefined;
-      if (group?.name.toLowerCase().includes(q)) return true;
-      return false;
-    });
-  }, [tasks, query, groupById]);
+    let out = tasks;
+    if (groupFilter.size > 0) {
+      out = out.filter((t) => {
+        const key = t.groupId == null ? '__none__' : String(t.groupId);
+        return groupFilter.has(key);
+      });
+    }
+    if (q) {
+      out = out.filter((t) => {
+        if (t.name.toLowerCase().includes(q)) return true;
+        const group = t.groupId ? groupById.get(t.groupId) : undefined;
+        if (group?.name.toLowerCase().includes(q)) return true;
+        return false;
+      });
+    }
+    return out;
+  }, [tasks, query, groupFilter, groupById]);
 
   const create = async (task: NewTask) => {
     try {
@@ -968,6 +1035,45 @@ export function TasksScreen() {
     try {
       await api.deleteTask(id);
       setOpenTaskId(null);
+      refresh();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const toggleGroupFilter = (id: string) => {
+    setGroupFilter((prev) => {
+      const next = new Set(prev);
+      if (id === '__all__') {
+        next.clear();
+        return next;
+      }
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleBulk = async (action: BulkAction) => {
+    const ids = Array.from(selectedRows);
+    if (ids.length === 0) return;
+    try {
+      if (action.kind === 'delete') {
+        if (!confirm(`Delete ${ids.length} task${ids.length === 1 ? '' : 's'}?`))
+          return;
+        for (const id of ids) {
+          await api.deleteTask(id);
+        }
+      } else if (action.kind === 'group') {
+        for (const id of ids) {
+          await api.updateTask(id, { groupId: action.groupId });
+        }
+      } else if (action.kind === 'priority') {
+        for (const id of ids) {
+          await api.updateTask(id, { priority: action.priority });
+        }
+      }
+      setSelectedRows(new Set());
       refresh();
     } catch (err) {
       setError(String(err));
@@ -1181,7 +1287,30 @@ export function TasksScreen() {
           ))}
         </div>
       ) : (
-        <div style={{ flex: 1, overflow: 'auto' }}>
+        <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
+          <TasksGroupRail
+            groups={groups}
+            tasks={tasks}
+            selected={groupFilter}
+            onToggle={toggleGroupFilter}
+            onManageGroups={(focus) => setGroupManagerFocus(focus ?? 'new')}
+          />
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+          {selectedRows.size > 0 && (
+            <div style={{
+              padding: '10px 24px',
+              borderBottom: '1px solid var(--line)',
+              background: 'var(--bg)',
+            }}>
+              <TasksBulkBar
+                count={selectedRows.size}
+                onClear={() => setSelectedRows(new Set())}
+                onAction={handleBulk}
+                groups={groups}
+              />
+            </div>
+          )}
+          <div style={{ flex: 1, overflow: 'auto' }}>
           <table style={{
             width: '100%',
             borderCollapse: 'separate',
@@ -1195,6 +1324,23 @@ export function TasksScreen() {
                 zIndex: 1,
                 background: 'var(--bg)',
               }}>
+                <th style={{ ...th, width: 36, padding: '8px 4px 8px 14px' }}>
+                  <input
+                    type="checkbox"
+                    checked={
+                      filtered.length > 0 &&
+                      filtered.every((t) => selectedRows.has(t.id))
+                    }
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setSelectedRows(new Set(filtered.map((t) => t.id)));
+                      } else {
+                        setSelectedRows(new Set());
+                      }
+                    }}
+                    style={{ accentColor: 'var(--accent)', cursor: 'pointer' }}
+                  />
+                </th>
                 <th style={th}>Name</th>
                 <th style={{ ...th, width: 130 }}>Group</th>
                 <th style={{ ...th, width: 100 }}>Priority</th>
@@ -1209,6 +1355,7 @@ export function TasksScreen() {
               {filtered.map((t) => {
                 const overdue = t.deadline != null && t.deadline < Date.now();
                 const planned = (blocksByTaskId.get(t.id) ?? []).length > 0;
+                const sel = selectedRows.has(t.id);
                 return (
                   <tr
                     key={t.id}
@@ -1216,14 +1363,39 @@ export function TasksScreen() {
                     style={{
                       cursor: 'pointer',
                       borderBottom: '1px solid var(--line)',
+                      background: sel
+                        ? 'color-mix(in oklch, var(--accent) 8%, transparent)'
+                        : 'transparent',
                     }}
                     onMouseEnter={(e) => {
-                      e.currentTarget.style.background = 'var(--bg-raise)';
+                      if (!sel)
+                        e.currentTarget.style.background = 'var(--bg-raise)';
                     }}
                     onMouseLeave={(e) => {
-                      e.currentTarget.style.background = 'transparent';
+                      if (!sel) e.currentTarget.style.background = 'transparent';
                     }}
                   >
+                    <td
+                      style={{ padding: '6px 4px 6px 14px', verticalAlign: 'middle' }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={sel}
+                        onChange={() => {
+                          setSelectedRows((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(t.id)) next.delete(t.id);
+                            else next.add(t.id);
+                            return next;
+                          });
+                        }}
+                        style={{
+                          accentColor: 'var(--accent)',
+                          cursor: 'pointer',
+                        }}
+                      />
+                    </td>
                     <td style={td}>
                       <div style={{
                         color: 'var(--ink)',
@@ -1317,6 +1489,8 @@ export function TasksScreen() {
                 : 'No tasks yet — use Quick add above.'}
             </div>
           )}
+          </div>
+          </div>
         </div>
       )}
 
@@ -1327,6 +1501,38 @@ export function TasksScreen() {
           onClose={() => setOpenTaskId(null)}
           onUpdate={update}
           onDelete={remove}
+          planned={(blocksByTaskId.get(openTask.id) ?? []).length > 0}
+          onAddToPlan={() => setPlanModalTaskId(openTask.id)}
+          onRemoveFromPlan={() => setRemoveModalTaskId(openTask.id)}
+        />
+      )}
+
+      {groupManagerFocus !== null && (
+        <TasksGroupManager
+          initialFocus={groupManagerFocus ?? undefined}
+          groups={groups}
+          tasks={tasks}
+          onClose={() => setGroupManagerFocus(null)}
+          onRefresh={refresh}
+        />
+      )}
+
+      {planModalTaskId != null && (
+        <PlanModal
+          task={tasks.find((t) => t.id === planModalTaskId)!}
+          groups={groups}
+          onClose={() => setPlanModalTaskId(null)}
+          onError={(msg) => setError(msg)}
+          onAfterPlan={refresh}
+        />
+      )}
+
+      {removeModalTaskId != null && (
+        <RemoveFromPlanModal
+          task={tasks.find((t) => t.id === removeModalTaskId)!}
+          onClose={() => setRemoveModalTaskId(null)}
+          onError={(msg) => setError(msg)}
+          onAfterRemove={refresh}
         />
       )}
 

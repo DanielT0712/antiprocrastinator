@@ -302,6 +302,60 @@ pub fn create_task_group(
     get_task_group_by_id(connection, connection.last_insert_rowid())
 }
 
+pub fn update_task_group(
+    connection: &Connection,
+    id: i64,
+    name: Option<String>,
+    color: Option<Option<String>>,
+) -> Result<TaskGroup, String> {
+    let mut updates: Vec<&str> = Vec::new();
+    let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(new_name) = name {
+        let validated = validate_name(&new_name)?;
+        updates.push("name = ?");
+        params_vec.push(rusqlite::types::Value::Text(validated));
+    }
+    if let Some(new_color) = color {
+        updates.push("color = ?");
+        params_vec.push(match new_color {
+            Some(color) => rusqlite::types::Value::Text(color),
+            None => rusqlite::types::Value::Null,
+        });
+    }
+    if updates.is_empty() {
+        return get_task_group_by_id(connection, id);
+    }
+    params_vec.push(rusqlite::types::Value::Integer(id));
+    let sql = format!(
+        "UPDATE task_groups SET {} WHERE id = ?",
+        updates.join(", ")
+    );
+    let mut stmt = connection.prepare(&sql).map_err(|e| e.to_string())?;
+    let bind: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+    stmt.execute(bind.as_slice()).map_err(|e| e.to_string())?;
+    get_task_group_by_id(connection, id)
+}
+
+pub fn delete_task_group(
+    connection: &Connection,
+    id: i64,
+    reassign_to: Option<i64>,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE tasks SET group_id = ?1 WHERE group_id = ?2",
+            params![reassign_to, id],
+        )
+        .map_err(|e| e.to_string())?;
+    let deleted = connection
+        .execute("DELETE FROM task_groups WHERE id = ?1", params![id])
+        .map_err(|e| e.to_string())?;
+    if deleted == 0 {
+        return Err("group not found".to_string());
+    }
+    Ok(())
+}
+
 pub fn get_task_stats(connection: &Connection, task_id: i64) -> Result<TaskStats, String> {
     let task = get_task_by_id(connection, task_id)?;
     Ok(TaskStats {
