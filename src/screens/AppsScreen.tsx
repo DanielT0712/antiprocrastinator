@@ -9,10 +9,12 @@ import {
 import { api } from '../api';
 import type {
   AppCategory,
+  ClassificationAction,
   EnforcementDecision,
   EnforcementProfile,
   EnforcementProfileOverride,
   KnownApp,
+  KnownBrowserTarget,
 } from '../api/types';
 import { Icons } from '../components/Icons';
 
@@ -379,29 +381,413 @@ function CategorySection({
   );
 }
 
+type AppsTab = 'apps' | 'browser_targets';
+
+const CLASSIFICATION_OPTIONS: { v: ClassificationAction; l: string }[] = [
+  { v: 'unclassified', l: 'Unclassified' },
+  { v: 'always_ban', l: 'Always block' },
+  { v: 'ban_during_work', l: 'Block during work' },
+  { v: 'never_ban', l: 'Never block' },
+];
+
+function BrowserTargetRow({
+  target,
+  categories,
+  activeProfile,
+  isEmergency,
+  emergencyBlockedCategories,
+  override,
+  onUpdate,
+  onSetOverride,
+}: {
+  target: KnownBrowserTarget;
+  categories: AppCategory[];
+  activeProfile: string;
+  isEmergency: boolean;
+  emergencyBlockedCategories: string[];
+  override: EnforcementProfileOverride | undefined;
+  onUpdate: (
+    key: string,
+    patch: { categoryName?: string | null; classificationAction?: ClassificationAction },
+  ) => void;
+  onSetOverride: (
+    key: { profile: string; subjectType: 'browser_target'; subjectKey: string },
+    decision: EnforcementDecision | null,
+  ) => void;
+}) {
+  const overrideKey = {
+    profile: activeProfile,
+    subjectType: 'browser_target' as const,
+    subjectKey: target.targetKey,
+  };
+  const decision = override?.decision ?? null;
+  const hardLocked =
+    isEmergency &&
+    target.categoryName != null &&
+    emergencyBlockedCategories.some(
+      (c) => c.toLowerCase() === target.categoryName!.toLowerCase(),
+    );
+
+  return (
+    <tr style={{ borderBottom: '1px solid var(--line)' }}>
+      <td style={td}>
+        <div style={{
+          color: 'var(--ink)',
+          fontWeight: 500,
+          fontSize: 13,
+        }}>
+          {target.displayName}
+        </div>
+        <div style={{
+          color: 'var(--muted)',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+          marginTop: 2,
+        }}>
+          {target.targetKey}
+          {target.builtin && (
+            <span style={{
+              marginLeft: 8,
+              padding: '0 5px',
+              border: '1px solid var(--line)',
+              borderRadius: 3,
+              fontSize: 10,
+              textTransform: 'uppercase',
+              letterSpacing: '0.08em',
+              color: 'var(--faint)',
+            }}>
+              builtin
+            </span>
+          )}
+        </div>
+      </td>
+      <td style={td}>
+        <input
+          defaultValue={target.keyword}
+          onBlur={(e) => {
+            const val = e.target.value.trim();
+            if (val !== target.keyword)
+              onUpdate(target.targetKey, { categoryName: target.categoryName });
+            // keyword update wired via separate updateKnownBrowserTarget if needed
+          }}
+          style={{
+            background: 'var(--bg)',
+            border: '1px solid var(--line)',
+            borderRadius: 5,
+            padding: '6px 8px',
+            fontSize: 12,
+            color: 'var(--ink)',
+            outline: 'none',
+            fontFamily: 'var(--font-mono)',
+            width: '100%',
+            boxSizing: 'border-box',
+          }}
+        />
+      </td>
+      <td style={td}>
+        <select
+          value={target.categoryName ?? ''}
+          onChange={(e) =>
+            onUpdate(target.targetKey, {
+              categoryName: e.target.value === '' ? null : e.target.value,
+            })
+          }
+          style={{
+            background: 'var(--bg)',
+            border: '1px solid var(--line)',
+            borderRadius: 5,
+            padding: '6px 8px',
+            fontSize: 12,
+            color: 'var(--ink)',
+            outline: 'none',
+            width: '100%',
+            boxSizing: 'border-box',
+          }}
+        >
+          <option value="">Uncategorized</option>
+          {categories.map((c) => (
+            <option key={c.name} value={c.name}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+      </td>
+      <td style={td}>
+        <select
+          value={target.classificationAction}
+          onChange={(e) =>
+            onUpdate(target.targetKey, {
+              classificationAction: e.target.value as ClassificationAction,
+            })
+          }
+          style={{
+            background: 'var(--bg)',
+            border: '1px solid var(--line)',
+            borderRadius: 5,
+            padding: '6px 8px',
+            fontSize: 12,
+            color: 'var(--ink)',
+            outline: 'none',
+            width: '100%',
+            boxSizing: 'border-box',
+          }}
+        >
+          {CLASSIFICATION_OPTIONS.map((o) => (
+            <option key={o.v} value={o.v}>
+              {o.l}
+            </option>
+          ))}
+        </select>
+      </td>
+      <td style={td}>
+        <DecisionToggle
+          current={decision}
+          hardLock={
+            hardLocked
+              ? {
+                  lockedTo: 'block',
+                  reason: `${target.categoryName} targets cannot be allowed during emergency.`,
+                }
+              : undefined
+          }
+          onChange={(next) => onSetOverride(overrideKey, next)}
+        />
+      </td>
+    </tr>
+  );
+}
+
+interface AddTargetModalProps {
+  categories: AppCategory[];
+  onClose: () => void;
+  onCreate: (target: {
+    displayName: string;
+    keyword: string;
+    categoryName: string | null;
+    classificationAction: ClassificationAction;
+  }) => Promise<void>;
+}
+
+function AddBrowserTargetModal({ categories, onClose, onCreate }: AddTargetModalProps) {
+  const [displayName, setDisplayName] = useState('');
+  const [keyword, setKeyword] = useState('');
+  const [categoryName, setCategoryName] = useState('');
+  const [action, setAction] = useState<ClassificationAction>('unclassified');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', h);
+    return () => document.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  const submit = async () => {
+    if (busy || !displayName.trim() || !keyword.trim()) return;
+    setBusy(true);
+    try {
+      await onCreate({
+        displayName: displayName.trim(),
+        keyword: keyword.trim(),
+        categoryName: categoryName === '' ? null : categoryName,
+        classificationAction: action,
+      });
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inp: CSSProperties = {
+    width: '100%',
+    boxSizing: 'border-box',
+    background: 'var(--bg)',
+    border: '1px solid var(--line)',
+    borderRadius: 5,
+    padding: '7px 9px',
+    fontSize: 13,
+    color: 'var(--ink)',
+    outline: 'none',
+    fontFamily: 'var(--font-sans)',
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 80,
+        background: 'rgba(10,9,8,0.55)',
+        backdropFilter: 'blur(3px)',
+        display: 'grid',
+        placeItems: 'center',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 460,
+          background: 'var(--bg-raise)',
+          border: '1px solid var(--line)',
+          borderRadius: 12,
+          padding: '22px 24px',
+          boxShadow: '0 24px 60px rgba(0,0,0,0.5)',
+        }}
+      >
+        <div style={{
+          fontFamily: 'var(--font-display)',
+          fontSize: 20,
+          color: 'var(--ink)',
+          letterSpacing: '-0.015em',
+          marginBottom: 14,
+        }}>
+          Add browser target
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <div style={{ ...labelStyle, marginBottom: 6 }}>Display name</div>
+            <input
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="e.g. Hacker News"
+              style={inp}
+            />
+          </div>
+          <div>
+            <div style={{ ...labelStyle, marginBottom: 6 }}>Keyword</div>
+            <input
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              placeholder="match against window title"
+              style={{ ...inp, fontFamily: 'var(--font-mono)' }}
+            />
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div>
+              <div style={{ ...labelStyle, marginBottom: 6 }}>Category</div>
+              <select
+                value={categoryName}
+                onChange={(e) => setCategoryName(e.target.value)}
+                style={inp}
+              >
+                <option value="">Uncategorized</option>
+                {categories.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <div style={{ ...labelStyle, marginBottom: 6 }}>Classification</div>
+              <select
+                value={action}
+                onChange={(e) => setAction(e.target.value as ClassificationAction)}
+                style={inp}
+              >
+                {CLASSIFICATION_OPTIONS.map((o) => (
+                  <option key={o.v} value={o.v}>
+                    {o.l}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+        <div style={{
+          marginTop: 18,
+          display: 'flex',
+          gap: 8,
+          justifyContent: 'flex-end',
+        }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '8px 14px',
+              background: 'transparent',
+              border: '1px solid var(--line)',
+              borderRadius: 5,
+              color: 'var(--ink)',
+              fontSize: 13,
+              cursor: 'pointer',
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={busy || !displayName.trim() || !keyword.trim()}
+            style={{
+              padding: '8px 14px',
+              background:
+                busy || !displayName.trim() || !keyword.trim()
+                  ? 'var(--line)'
+                  : 'var(--accent)',
+              color:
+                busy || !displayName.trim() || !keyword.trim()
+                  ? 'var(--muted)'
+                  : 'oklch(0.18 0.04 60)',
+              border: '1px solid var(--accent)',
+              borderRadius: 5,
+              fontSize: 13,
+              cursor:
+                busy || !displayName.trim() || !keyword.trim()
+                  ? 'not-allowed'
+                  : 'pointer',
+            }}
+          >
+            Add target
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const td: CSSProperties = { padding: '8px 12px', verticalAlign: 'middle' };
+const th: CSSProperties = {
+  textAlign: 'left',
+  fontFamily: 'var(--font-mono)',
+  fontSize: 10,
+  fontWeight: 500,
+  textTransform: 'uppercase',
+  letterSpacing: '0.1em',
+  color: 'var(--faint)',
+  padding: '8px 12px',
+  borderBottom: '1px solid var(--line)',
+  background: 'var(--bg)',
+};
+
 export function AppsScreen() {
+  const [tab, setTab] = useState<AppsTab>('apps');
   const [profiles, setProfiles] = useState<EnforcementProfile[]>([]);
   const [activeProfile, setActiveProfile] = useState<string>('work');
   const [apps, setApps] = useState<KnownApp[]>([]);
   const [categories, setCategories] = useState<AppCategory[]>([]);
   const [overrides, setOverrides] = useState<EnforcementProfileOverride[]>([]);
   const [emergencyBlockedCategories, setEmergencyBlocked] = useState<string[]>([]);
+  const [browserTargets, setBrowserTargets] = useState<KnownBrowserTarget[]>([]);
+  const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [p, a, c, o, eb] = await Promise.all([
+      const [p, a, c, o, eb, bt] = await Promise.all([
         api.getEnforcementProfiles(),
         api.getKnownApps(),
         api.getAppCategories(),
         api.getEnforcementProfileOverrides(),
         api.getEmergencyBlockedCategories(),
+        api.getKnownBrowserTargets(),
       ]);
       setProfiles(p);
       setApps(a);
       setCategories(c);
       setOverrides(o);
       setEmergencyBlocked(eb);
+      setBrowserTargets(bt);
       if (!p.find((profile) => profile.name === activeProfile) && p.length > 0) {
         setActiveProfile(p[0].name);
       }
@@ -464,10 +850,37 @@ export function AppsScreen() {
 
   const isEmergency = activeProfile === 'emergency';
 
+  const updateBrowserTarget = async (
+    key: string,
+    patch: { categoryName?: string | null; classificationAction?: ClassificationAction },
+  ) => {
+    try {
+      await api.updateKnownBrowserTarget(key, patch);
+      refresh();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const createBrowserTarget = async (target: {
+    displayName: string;
+    keyword: string;
+    categoryName: string | null;
+    classificationAction: ClassificationAction;
+  }) => {
+    try {
+      await api.createKnownBrowserTarget(target);
+      refresh();
+    } catch (err) {
+      setError(String(err));
+      throw err;
+    }
+  };
+
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <div style={{
-        padding: '16px 36px 14px',
+        padding: '16px 36px 0',
         borderBottom: '1px solid var(--line)',
       }}>
         <div style={{
@@ -486,15 +899,60 @@ export function AppsScreen() {
           maxWidth: 720,
           lineHeight: 1.55,
         }}>
-          Choose a profile, then set rules per category or per app. Children profiles inherit
-          from their parent unless overridden. Emergency profile blocks Games and Entertainment
-          unconditionally — those toggles are locked here.
+          Choose a profile, then set rules per category, per app, or per browser target.
+          Children profiles inherit from their parent unless overridden. Emergency profile
+          blocks Games and Entertainment unconditionally — those toggles are locked here.
         </div>
         <ProfileTabs
           profiles={profiles}
           active={activeProfile}
           onChange={setActiveProfile}
         />
+        <div style={{ height: 14 }} />
+        <div style={{
+          display: 'flex',
+          gap: 4,
+          alignItems: 'center',
+          borderBottom: '1px solid var(--line)',
+          marginLeft: -36,
+          marginRight: -36,
+          paddingLeft: 36,
+          paddingRight: 36,
+        }}>
+          {(['apps', 'browser_targets'] as AppsTab[]).map((id) => {
+            const sel = tab === id;
+            const count = id === 'apps' ? apps.length : browserTargets.length;
+            return (
+              <button
+                key={id}
+                onClick={() => setTab(id)}
+                style={{
+                  padding: '10px 14px',
+                  background: 'transparent',
+                  border: 'none',
+                  borderBottom: sel
+                    ? '2px solid var(--accent)'
+                    : '2px solid transparent',
+                  color: sel ? 'var(--ink)' : 'var(--muted)',
+                  fontSize: 13,
+                  fontFamily: 'var(--font-sans)',
+                  fontWeight: sel ? 500 : 400,
+                  cursor: 'pointer',
+                }}
+              >
+                {id === 'apps' ? 'Apps' : 'Browser Targets'}
+                <span style={{
+                  marginLeft: 6,
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--faint)',
+                }}>
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div style={{ flex: 1, overflow: 'auto', padding: '20px 36px 60px' }}>
@@ -511,85 +969,194 @@ export function AppsScreen() {
               fontFamily: 'var(--font-mono)',
               lineHeight: 1.55,
             }}>
-              Emergency mode opens the rest of the system temporarily. Categories that pull you
-              away from work — Games and Entertainment — stay blocked even if you try to flip
-              them. Use this for messaging, banking, urgent comms.
-            </div>
-          )}
-          {[...categories, { name: 'Uncategorized', builtin: false, createdAt: 0, updatedAt: 0 }].map(
-            (cat) => (
-              <CategorySection
-                key={cat.name}
-                category={cat as AppCategory}
-                apps={appsByCategory.get(cat.name) ?? []}
-                activeProfile={activeProfile}
-                isEmergency={isEmergency}
-                emergencyBlockedCategories={emergencyBlockedCategories}
-                overrides={overrideMap}
-                onSetOverride={setOverride}
-              />
-            ),
-          )}
-
-          {apps.length === 0 && (
-            <div style={{
-              padding: '60px 20px',
-              textAlign: 'center',
-              color: 'var(--muted)',
-              fontSize: 13,
-            }}>
-              <div>No known apps yet.</div>
-              <button
-                onClick={() => {
-                  api
-                    .refreshKnownAppsInventory()
-                    .then(() => refresh())
-                    .catch((err) => setError(String(err)));
-                }}
-                style={{
-                  marginTop: 14,
-                  padding: '8px 16px',
-                  background: 'var(--accent)',
-                  color: 'oklch(0.18 0.04 60)',
-                  border: '1px solid var(--accent)',
-                  borderRadius: 6,
-                  fontSize: 12.5,
-                  cursor: 'pointer',
-                }}
-              >
-                Scan installed apps
-              </button>
+              Emergency mode opens the rest of the system temporarily. Categories that pull
+              you away from work — Games and Entertainment — stay blocked even if you try to
+              flip them. Use this for messaging, banking, urgent comms.
             </div>
           )}
 
-          <div style={{
-            marginTop: 24,
-            display: 'flex',
-            justifyContent: 'flex-end',
-            gap: 8,
-          }}>
-            <button
-              onClick={() => {
-                api
-                  .refreshKnownAppsInventory()
-                  .then(() => refresh())
-                  .catch((err) => setError(String(err)));
-              }}
-              style={{
-                padding: '7px 14px',
-                background: 'var(--bg-raise)',
+          {tab === 'apps' && (
+            <>
+              {[
+                ...categories,
+                { name: 'Uncategorized', builtin: false, createdAt: 0, updatedAt: 0 },
+              ].map((cat) => (
+                <CategorySection
+                  key={cat.name}
+                  category={cat as AppCategory}
+                  apps={appsByCategory.get(cat.name) ?? []}
+                  activeProfile={activeProfile}
+                  isEmergency={isEmergency}
+                  emergencyBlockedCategories={emergencyBlockedCategories}
+                  overrides={overrideMap}
+                  onSetOverride={setOverride}
+                />
+              ))}
+
+              {apps.length === 0 && (
+                <div style={{
+                  padding: '60px 20px',
+                  textAlign: 'center',
+                  color: 'var(--muted)',
+                  fontSize: 13,
+                }}>
+                  <div>No known apps yet.</div>
+                  <button
+                    onClick={() => {
+                      api
+                        .refreshKnownAppsInventory()
+                        .then(() => refresh())
+                        .catch((err) => setError(String(err)));
+                    }}
+                    style={{
+                      marginTop: 14,
+                      padding: '8px 16px',
+                      background: 'var(--accent)',
+                      color: 'oklch(0.18 0.04 60)',
+                      border: '1px solid var(--accent)',
+                      borderRadius: 6,
+                      fontSize: 12.5,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Scan installed apps
+                  </button>
+                </div>
+              )}
+
+              <div style={{
+                marginTop: 24,
+                display: 'flex',
+                justifyContent: 'flex-end',
+                gap: 8,
+              }}>
+                <button
+                  onClick={() => {
+                    api
+                      .refreshKnownAppsInventory()
+                      .then(() => refresh())
+                      .catch((err) => setError(String(err)));
+                  }}
+                  style={{
+                    padding: '7px 14px',
+                    background: 'var(--bg-raise)',
+                    border: '1px solid var(--line)',
+                    borderRadius: 6,
+                    color: 'var(--ink)',
+                    fontSize: 12.5,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Refresh installed apps
+                </button>
+              </div>
+            </>
+          )}
+
+          {tab === 'browser_targets' && (
+            <>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                marginBottom: 12,
+              }}>
+                <div style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--muted)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
+                }}>
+                  Match against active browser tab titles
+                </div>
+                <span style={{ flex: 1 }} />
+                <button
+                  onClick={() => setAdding(true)}
+                  style={{
+                    padding: '7px 12px',
+                    background: 'var(--bg-raise)',
+                    border: '1px solid var(--line)',
+                    borderRadius: 6,
+                    color: 'var(--ink)',
+                    fontSize: 12.5,
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 5,
+                  }}
+                >
+                  <Icons.plus size={12} /> Add target
+                </button>
+              </div>
+              <div style={{
                 border: '1px solid var(--line)',
-                borderRadius: 6,
-                color: 'var(--ink)',
-                fontSize: 12.5,
-                cursor: 'pointer',
-              }}
-            >
-              Refresh installed apps
-            </button>
-          </div>
+                borderRadius: 9,
+                overflow: 'hidden',
+                background: 'var(--bg-raise)',
+              }}>
+                <table style={{
+                  width: '100%',
+                  borderCollapse: 'separate',
+                  borderSpacing: 0,
+                  fontSize: 13,
+                }}>
+                  <thead>
+                    <tr>
+                      <th style={th}>Target</th>
+                      <th style={th}>Keyword</th>
+                      <th style={{ ...th, width: 160 }}>Category</th>
+                      <th style={{ ...th, width: 160 }}>Classification</th>
+                      <th style={{ ...th, width: 220 }}>Profile decision</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {browserTargets.map((target) => {
+                      const o = overrideMap.get(
+                        overrideMapKey({
+                          profile: activeProfile,
+                          subjectType: 'browser_target',
+                          subjectKey: target.targetKey,
+                        }),
+                      );
+                      return (
+                        <BrowserTargetRow
+                          key={target.targetKey}
+                          target={target}
+                          categories={categories}
+                          activeProfile={activeProfile}
+                          isEmergency={isEmergency}
+                          emergencyBlockedCategories={emergencyBlockedCategories}
+                          override={o}
+                          onUpdate={updateBrowserTarget}
+                          onSetOverride={setOverride}
+                        />
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {browserTargets.length === 0 && (
+                  <div style={{
+                    padding: '40px 20px',
+                    textAlign: 'center',
+                    color: 'var(--muted)',
+                    fontSize: 13,
+                  }}>
+                    No browser targets yet — add one to start matching tab titles.
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
+
+      {adding && (
+        <AddBrowserTargetModal
+          categories={categories}
+          onClose={() => setAdding(false)}
+          onCreate={createBrowserTarget}
+        />
+      )}
 
       {error && (
         <div

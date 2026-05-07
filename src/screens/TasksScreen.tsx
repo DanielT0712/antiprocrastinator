@@ -7,7 +7,7 @@ import {
   useState,
 } from 'react';
 import { api } from '../api';
-import type { NewTask, Task, TaskGroup, TaskUpdate } from '../api/types';
+import type { NewTask, Task, TaskGroup, TaskUpdate, TimeBlock } from '../api/types';
 import { Icons } from '../components/Icons';
 import { formatDuration, formatHHMM, priorityLabel } from '../lib/format';
 
@@ -700,18 +700,226 @@ function FieldCell({
   );
 }
 
+type TasksTab = 'active' | 'library';
+
+function startOfDay(epoch: number): number {
+  const d = new Date(epoch);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function ActiveBlockRow({ block }: { block: TimeBlock }) {
+  const day = new Date(block.startTime).toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  });
+  const mins = Math.round((block.endTime - block.startTime) / 60_000);
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '140px 130px 70px minmax(0, 1fr)',
+        alignItems: 'center',
+        gap: 12,
+        padding: '6px 10px',
+        background: 'var(--bg)',
+        borderRadius: 5,
+        border: '1px solid var(--line)',
+        fontSize: 12,
+        color: 'var(--muted)',
+      }}
+    >
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>{day}</span>
+      <span style={{
+        fontFamily: 'var(--font-mono)',
+        fontSize: 11.5,
+        color: 'var(--ink)',
+      }}>
+        {formatHHMM(block.startTime)} – {formatHHMM(block.endTime)}
+      </span>
+      <span style={{
+        fontFamily: 'var(--font-mono)',
+        fontSize: 11,
+        color: 'var(--faint)',
+      }}>
+        {formatDuration(mins)}
+      </span>
+      <span style={{
+        fontSize: 11.5,
+        color: 'var(--muted)',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+      }}>
+        {block.title}
+      </span>
+    </div>
+  );
+}
+
+function ActiveTaskCard({
+  task,
+  group,
+  blocks,
+  onOpen,
+}: {
+  task: Task;
+  group: TaskGroup | undefined;
+  blocks: TimeBlock[];
+  onOpen: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const totalMin = blocks.reduce(
+    (acc, b) => acc + Math.round((b.endTime - b.startTime) / 60_000),
+    0,
+  );
+  const overdue = task.deadline != null && task.deadline < Date.now();
+  return (
+    <div
+      style={{
+        border: '1px solid var(--line)',
+        borderRadius: 9,
+        background: 'var(--bg-raise)',
+        marginBottom: 10,
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        onClick={onOpen}
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(220px, 1fr) 130px 110px 110px 80px 28px',
+          alignItems: 'center',
+          gap: 14,
+          padding: '12px 14px',
+          cursor: 'pointer',
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div style={{
+            color: 'var(--ink)',
+            fontSize: 13.5,
+            fontWeight: 500,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            {task.name}
+          </div>
+          <div style={{ marginTop: 4 }}>
+            <GroupChip group={group} />
+          </div>
+        </div>
+        <div style={{
+          fontFamily: 'var(--font-mono)',
+          fontSize: 12,
+          color: overdue ? 'var(--danger)' : 'var(--muted)',
+          whiteSpace: 'nowrap',
+        }}>
+          {formatDeadline(task.deadline, Date.now())}
+        </div>
+        <div style={{
+          fontFamily: 'var(--font-mono)',
+          fontSize: 12,
+          color: 'var(--ink)',
+          whiteSpace: 'nowrap',
+        }}>
+          {formatDuration(totalMin)}
+          <span style={{
+            color: 'var(--faint)',
+            fontSize: 10.5,
+            marginLeft: 4,
+          }}>
+            / {formatDuration(task.estimatedMinutes)}
+          </span>
+        </div>
+        <div style={{
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+          color: 'var(--muted)',
+        }}>
+          {blocks.length} {blocks.length === 1 ? 'block' : 'blocks'}
+        </div>
+        <PriorityChip p={task.priority} />
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpanded((v) => !v);
+          }}
+          title={expanded ? 'Hide blocks' : 'Show blocks'}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            color: 'var(--muted)',
+            cursor: 'pointer',
+            padding: 4,
+            justifySelf: 'center',
+            transform: expanded ? 'rotate(180deg)' : 'none',
+            transition: 'transform 140ms',
+          }}
+        >
+          <Icons.chevronD size={13} />
+        </button>
+      </div>
+      {expanded && (
+        <div
+          style={{
+            padding: '0 14px 14px 56px',
+            borderTop: '1px solid var(--line)',
+          }}
+        >
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'baseline',
+              justifyContent: 'space-between',
+              padding: '10px 0 6px',
+            }}
+          >
+            <span style={labelStyle}>Planner blocks</span>
+            <span style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 11,
+              color: 'var(--muted)',
+            }}>
+              {blocks.length} blocks · {formatDuration(totalMin)}
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {blocks.map((b) => (
+              <ActiveBlockRow key={b.id} block={b} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const ACTIVE_HORIZON_DAYS = 14;
+
 export function TasksScreen() {
+  const [tab, setTab] = useState<TasksTab>('active');
   const [tasks, setTasks] = useState<Task[]>([]);
   const [groups, setGroups] = useState<TaskGroup[]>([]);
+  const [scheduledBlocks, setScheduledBlocks] = useState<TimeBlock[]>([]);
   const [query, setQuery] = useState('');
   const [openTaskId, setOpenTaskId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [t, g] = await Promise.all([api.getTasks(), api.getTaskGroups()]);
+      const horizonStart = startOfDay(Date.now());
+      const horizonEnd = horizonStart + ACTIVE_HORIZON_DAYS * 86_400_000;
+      const [t, g, blocks] = await Promise.all([
+        api.getTasks(),
+        api.getTaskGroups(),
+        api.getScheduleRange(horizonStart, horizonEnd),
+      ]);
       setTasks(t);
       setGroups(g);
+      setScheduledBlocks(blocks);
     } catch (err) {
       setError(String(err));
     }
@@ -768,166 +976,349 @@ export function TasksScreen() {
 
   const openTask = openTaskId ? tasks.find((t) => t.id === openTaskId) ?? null : null;
 
+  const blocksByTaskId = useMemo(() => {
+    const map = new Map<number, TimeBlock[]>();
+    for (const b of scheduledBlocks) {
+      if (b.taskId == null) continue;
+      if (b.status !== 'scheduled' && b.status !== 'active' && b.status !== 'paused') {
+        continue;
+      }
+      const list = map.get(b.taskId) ?? [];
+      list.push(b);
+      map.set(b.taskId, list);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => a.startTime - b.startTime);
+    }
+    return map;
+  }, [scheduledBlocks]);
+
+  const activeTasks = useMemo(() => {
+    return tasks
+      .filter((t) => (blocksByTaskId.get(t.id) ?? []).length > 0)
+      .sort((a, b) => {
+        const ad = a.deadline ?? Number.POSITIVE_INFINITY;
+        const bd = b.deadline ?? Number.POSITIVE_INFINITY;
+        if (ad !== bd) return ad - bd;
+        return b.priority - a.priority;
+      });
+  }, [tasks, blocksByTaskId]);
+
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <div style={{
-        padding: '14px 24px 12px',
+        padding: '14px 24px 0',
         borderBottom: '1px solid var(--line)',
         display: 'flex',
+        flexDirection: 'column',
         gap: 12,
-        alignItems: 'center',
-        flexWrap: 'wrap',
       }}>
         <div style={{
           display: 'flex',
           alignItems: 'center',
           gap: 8,
-          padding: '7px 11px',
-          border: '1px solid var(--line)',
-          borderRadius: 6,
-          background: 'var(--bg-raise)',
-          minWidth: 320,
-          flex: '1 0 320px',
-          maxWidth: 540,
         }}>
-          <span style={{ color: 'var(--faint)' }}>
-            <Icons.search size={13} />
-          </span>
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search tasks…"
-            style={{
-              flex: 1,
-              background: 'transparent',
-              border: 'none',
-              outline: 'none',
-              color: 'var(--ink)',
-              fontSize: 12.5,
-              fontFamily: 'var(--font-mono)',
-            }}
-          />
-          {query && (
-            <button
-              onClick={() => setQuery('')}
-              style={{
-                background: 'transparent',
-                border: 'none',
-                color: 'var(--faint)',
-                cursor: 'pointer',
-                padding: 2,
-              }}
-            >
-              <Icons.x size={12} />
-            </button>
-          )}
-        </div>
-        <div style={{
-          fontSize: 11.5,
-          color: 'var(--muted)',
-          fontFamily: 'var(--font-mono)',
-          marginLeft: 'auto',
-        }}>
-          {filtered.length} of {tasks.length} tasks
-        </div>
-      </div>
-
-      <QuickAdd groups={groups} onAdd={create} />
-
-      <div style={{ flex: 1, overflow: 'auto' }}>
-        <table style={{
-          width: '100%',
-          borderCollapse: 'separate',
-          borderSpacing: 0,
-          fontSize: 13,
-        }}>
-          <thead>
-            <tr style={{
-              position: 'sticky',
-              top: 0,
-              zIndex: 1,
-              background: 'var(--bg)',
+          {(['active', 'library'] as TasksTab[]).map((id) => {
+            const sel = tab === id;
+            const count = id === 'active' ? activeTasks.length : tasks.length;
+            return (
+              <button
+                key={id}
+                onClick={() => setTab(id)}
+                style={{
+                  padding: '8px 14px',
+                  background: sel ? 'var(--bg-raise)' : 'transparent',
+                  border: 'none',
+                  borderBottom: sel
+                    ? '2px solid var(--accent)'
+                    : '2px solid transparent',
+                  color: sel ? 'var(--ink)' : 'var(--muted)',
+                  fontSize: 13,
+                  fontFamily: 'var(--font-sans)',
+                  fontWeight: sel ? 500 : 400,
+                  cursor: 'pointer',
+                }}
+              >
+                {id === 'active' ? 'Active' : 'Library'}
+                <span style={{
+                  marginLeft: 6,
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--faint)',
+                }}>
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+          <span style={{ flex: 1 }} />
+          {tab === 'library' && (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '7px 11px',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              background: 'var(--bg-raise)',
+              minWidth: 320,
+              maxWidth: 480,
+              flex: '1 0 280px',
             }}>
-              <th style={th}>Name</th>
-              <th style={{ ...th, width: 130 }}>Group</th>
-              <th style={{ ...th, width: 100 }}>Priority</th>
-              <th style={{ ...th, width: 110 }}>Estimate</th>
-              <th style={{ ...th, width: 130 }}>Deadline</th>
-              <th style={{ ...th, width: 110 }}>Profile</th>
-              <th style={{ ...th, width: 90 }}>Done×</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((t) => {
-              const overdue = t.deadline != null && t.deadline < Date.now();
-              return (
-                <tr
-                  key={t.id}
-                  onClick={() => setOpenTaskId(t.id)}
+              <span style={{ color: 'var(--faint)' }}>
+                <Icons.search size={13} />
+              </span>
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search tasks…"
+                style={{
+                  flex: 1,
+                  background: 'transparent',
+                  border: 'none',
+                  outline: 'none',
+                  color: 'var(--ink)',
+                  fontSize: 12.5,
+                  fontFamily: 'var(--font-mono)',
+                }}
+              />
+              {query && (
+                <button
+                  onClick={() => setQuery('')}
                   style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'var(--faint)',
                     cursor: 'pointer',
-                    borderBottom: '1px solid var(--line)',
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = 'var(--bg-raise)';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = 'transparent';
+                    padding: 2,
                   }}
                 >
-                  <td style={td}>
-                    <div style={{
-                      color: 'var(--ink)',
-                      fontWeight: 500,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      maxWidth: 380,
-                    }}>
-                      {t.name}
-                    </div>
-                  </td>
-                  <td style={td}>
-                    <GroupChip group={t.groupId ? groupById.get(t.groupId) : undefined} />
-                  </td>
-                  <td style={td}>
-                    <PriorityChip p={t.priority} />
-                  </td>
-                  <td style={{ ...td, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-                    {formatDuration(t.estimatedMinutes)}
-                  </td>
-                  <td style={{
-                    ...td,
-                    color: overdue ? 'var(--danger)' : 'var(--muted)',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 11.5,
-                  }}>
-                    {formatDeadline(t.deadline, Date.now())}
-                  </td>
-                  <td style={{ ...td, fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--muted)' }}>
-                    {PROFILE_OPTIONS.find((p) => p.v === t.enforcementProfile)?.l ??
-                      t.enforcementProfile ??
-                      '—'}
-                  </td>
-                  <td style={{ ...td, fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--muted)' }}>
-                    {t.completionCount}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        {filtered.length === 0 && (
+                  <Icons.x size={12} />
+                </button>
+              )}
+            </div>
+          )}
           <div style={{
-            padding: '60px 20px',
-            textAlign: 'center',
+            fontSize: 11.5,
             color: 'var(--muted)',
+            fontFamily: 'var(--font-mono)',
+          }}>
+            {tab === 'library'
+              ? `${filtered.length} of ${tasks.length}`
+              : `${ACTIVE_HORIZON_DAYS}d horizon`}
+          </div>
+        </div>
+        <div style={{ height: 8 }} />
+      </div>
+
+      {tab === 'library' && <QuickAdd groups={groups} onAdd={create} />}
+
+      {tab === 'active' ? (
+        <div style={{ flex: 1, overflow: 'auto', padding: '20px 28px 40px' }}>
+          {activeTasks.length === 0 ? (
+            <div style={{
+              flex: 1,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 40,
+            }}>
+              <div style={{
+                maxWidth: 440,
+                textAlign: 'center',
+                padding: '40px 30px',
+                border: '1px dashed var(--line)',
+                borderRadius: 12,
+                background: 'var(--bg-raise)',
+              }}>
+                <div style={{ ...labelStyle, marginBottom: 10 }}>
+                  Nothing on the plan
+                </div>
+                <div style={{
+                  fontFamily: 'var(--font-display)',
+                  fontSize: 22,
+                  color: 'var(--ink)',
+                  letterSpacing: '-0.015em',
+                  marginBottom: 6,
+                }}>
+                  The planner has no scheduled tasks
+                </div>
+                <div style={{
+                  fontSize: 13,
+                  color: 'var(--muted)',
+                  lineHeight: 1.5,
+                }}>
+                  Add a task in the Library tab, then run Rebuild on the Schedule
+                  screen to put it on the plan.
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(220px, 1fr) 130px 110px 110px 80px 28px',
+              gap: 14,
+              padding: '0 14px 8px',
+              borderBottom: '1px solid var(--line)',
+              marginBottom: 8,
+            }}>
+              <span style={labelStyle}>Task</span>
+              <span style={labelStyle}>Deadline</span>
+              <span style={labelStyle}>Planned</span>
+              <span style={labelStyle}>Blocks</span>
+              <span style={labelStyle}>Priority</span>
+              <span />
+            </div>
+          )}
+          {activeTasks.map((t) => (
+            <ActiveTaskCard
+              key={t.id}
+              task={t}
+              group={t.groupId ? groupById.get(t.groupId) : undefined}
+              blocks={blocksByTaskId.get(t.id) ?? []}
+              onOpen={() => setOpenTaskId(t.id)}
+            />
+          ))}
+        </div>
+      ) : (
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <table style={{
+            width: '100%',
+            borderCollapse: 'separate',
+            borderSpacing: 0,
             fontSize: 13,
           }}>
-            {query ? `No matches for "${query}".` : 'No tasks yet — use Quick add above.'}
-          </div>
-        )}
-      </div>
+            <thead>
+              <tr style={{
+                position: 'sticky',
+                top: 0,
+                zIndex: 1,
+                background: 'var(--bg)',
+              }}>
+                <th style={th}>Name</th>
+                <th style={{ ...th, width: 130 }}>Group</th>
+                <th style={{ ...th, width: 100 }}>Priority</th>
+                <th style={{ ...th, width: 110 }}>Estimate</th>
+                <th style={{ ...th, width: 130 }}>Deadline</th>
+                <th style={{ ...th, width: 110 }}>Profile</th>
+                <th style={{ ...th, width: 100 }}>Status</th>
+                <th style={{ ...th, width: 90 }}>Done×</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((t) => {
+                const overdue = t.deadline != null && t.deadline < Date.now();
+                const planned = (blocksByTaskId.get(t.id) ?? []).length > 0;
+                return (
+                  <tr
+                    key={t.id}
+                    onClick={() => setOpenTaskId(t.id)}
+                    style={{
+                      cursor: 'pointer',
+                      borderBottom: '1px solid var(--line)',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = 'var(--bg-raise)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = 'transparent';
+                    }}
+                  >
+                    <td style={td}>
+                      <div style={{
+                        color: 'var(--ink)',
+                        fontWeight: 500,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        maxWidth: 380,
+                      }}>
+                        {t.name}
+                      </div>
+                    </td>
+                    <td style={td}>
+                      <GroupChip group={t.groupId ? groupById.get(t.groupId) : undefined} />
+                    </td>
+                    <td style={td}>
+                      <PriorityChip p={t.priority} />
+                    </td>
+                    <td style={{ ...td, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                      {formatDuration(t.estimatedMinutes)}
+                    </td>
+                    <td style={{
+                      ...td,
+                      color: overdue ? 'var(--danger)' : 'var(--muted)',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 11.5,
+                    }}>
+                      {formatDeadline(t.deadline, Date.now())}
+                    </td>
+                    <td style={{
+                      ...td,
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 11.5,
+                      color: 'var(--muted)',
+                    }}>
+                      {PROFILE_OPTIONS.find((p) => p.v === t.enforcementProfile)?.l ??
+                        t.enforcementProfile ??
+                        '—'}
+                    </td>
+                    <td style={td}>
+                      {planned ? (
+                        <span style={{
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 10,
+                          color: 'var(--accent-ink)',
+                          background: 'var(--accent-soft)',
+                          padding: '2px 6px',
+                          borderRadius: 3,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.08em',
+                        }}>
+                          Planned
+                        </span>
+                      ) : (
+                        <span style={{
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 10,
+                          color: 'var(--muted)',
+                          border: '1px solid var(--line)',
+                          padding: '2px 6px',
+                          borderRadius: 3,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.08em',
+                        }}>
+                          Library
+                        </span>
+                      )}
+                    </td>
+                    <td style={{
+                      ...td,
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 11.5,
+                      color: 'var(--muted)',
+                    }}>
+                      {t.completionCount}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {filtered.length === 0 && (
+            <div style={{
+              padding: '60px 20px',
+              textAlign: 'center',
+              color: 'var(--muted)',
+              fontSize: 13,
+            }}>
+              {query
+                ? `No matches for "${query}".`
+                : 'No tasks yet — use Quick add above.'}
+            </div>
+          )}
+        </div>
+      )}
 
       {openTask && (
         <Drawer

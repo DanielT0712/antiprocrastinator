@@ -199,3 +199,30 @@ export interface EnforcementProfileOverride {
   createdAt: number;
   updatedAt: number;
 }
+
+export interface KnownBrowserTarget {
+  targetKey: string;
+  displayName: string;
+  keyword: string;
+  categoryName: string | null;
+  confidence: number;
+  classificationAction: ClassificationAction;
+  builtin: boolean;
+  firstSeenAt: number | null;
+  lastSeenAt: number | null;
+  updatedAt: number;
+}
+
+export interface KnownBrowserTargetUpdate {
+  displayName?: string;
+  keyword?: string;
+  categoryName?: string | null;
+  classificationAction?: ClassificationAction;
+}
+
+export interface KnownBrowserTargetInput {
+  displayName: string;
+  keyword: string;
+  categoryName?: string | null;
+  classificationAction: ClassificationAction;
+}

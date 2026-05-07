@@ -8,6 +8,9 @@ import type {
   EnforcementProfileOverride,
   GuardStatus,
   KnownApp,
+  KnownBrowserTarget,
+  KnownBrowserTargetInput,
+  KnownBrowserTargetUpdate,
   NewTask,
   ScheduleMutationResult,
   ScheduleWarning,
@@ -92,6 +95,18 @@ export const api = {
   getEmergencyAllowlist: () => invoke<KnownApp[]>('get_emergency_allowlist'),
   getEmergencyBlockedCategories: () =>
     invoke<string[]>('get_emergency_blocked_categories'),
+  getKnownBrowserTargets: () =>
+    invoke<KnownBrowserTarget[]>('get_known_browser_targets'),
+  updateKnownBrowserTarget: (
+    targetKey: string,
+    updates: KnownBrowserTargetUpdate,
+  ) =>
+    invoke<KnownBrowserTarget>('update_known_browser_target', {
+      targetKey,
+      updates,
+    }),
+  createKnownBrowserTarget: (target: KnownBrowserTargetInput) =>
+    invoke<KnownBrowserTarget>('create_known_browser_target', { target }),
   getAppCategories: () => invoke<AppCategory[]>('get_app_categories'),
   upsertAppCategory: (input: { name: string }) =>
     invoke<AppCategory>('upsert_app_category', { input }),
