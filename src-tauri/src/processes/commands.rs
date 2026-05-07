@@ -31,6 +31,22 @@ pub fn get_known_apps(database: State<'_, DatabaseState>) -> Result<Vec<KnownApp
 }
 
 #[tauri::command]
+pub fn get_emergency_allowlist(
+    database: State<'_, DatabaseState>,
+) -> Result<Vec<KnownApp>, String> {
+    let connection = database.connection()?;
+    monitor::get_emergency_allowlist(&connection)
+}
+
+#[tauri::command]
+pub fn get_emergency_blocked_categories() -> Result<Vec<String>, String> {
+    Ok(categories::EMERGENCY_BLOCKED_CATEGORIES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect())
+}
+
+#[tauri::command]
 pub fn refresh_known_apps_inventory(
     database: State<'_, DatabaseState>,
 ) -> Result<Vec<KnownApp>, String> {

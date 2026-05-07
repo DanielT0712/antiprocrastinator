@@ -29,6 +29,26 @@ pub fn get_next_block(
 }
 
 #[tauri::command]
+pub fn get_projected_finish(
+    task_id: i64,
+    database: State<'_, DatabaseState>,
+) -> Result<Option<i64>, String> {
+    let connection = database.connection()?;
+    engine::get_projected_finish(&connection, task_id)
+}
+
+#[tauri::command]
+pub fn get_pause_buffer_minutes(
+    database: State<'_, DatabaseState>,
+    schedule: State<'_, engine::ScheduleState>,
+    config: State<'_, ConfigState>,
+) -> Result<i64, String> {
+    let connection = database.connection()?;
+    let preferences = config.get_preferences()?;
+    engine::get_pause_buffer_minutes(&connection, &schedule, &preferences)
+}
+
+#[tauri::command]
 pub fn get_schedule_range(
     from: i64,
     to: i64,

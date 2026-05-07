@@ -89,8 +89,19 @@ pub fn built_in_profile_names() -> Vec<EnforcementProfile> {
             created_at: now,
             updated_at: now,
         },
+        EnforcementProfile {
+            name: "emergency".to_string(),
+            parent_name: None,
+            builtin: true,
+            created_at: now,
+            updated_at: now,
+        },
     ]
 }
+
+pub const EMERGENCY_PROFILE_NAME: &str = "emergency";
+
+pub const EMERGENCY_BLOCKED_CATEGORIES: &[&str] = &["Games", "Entertainment"];
 
 pub fn built_in_browser_targets() -> Vec<BrowserTargetSeed> {
     vec![

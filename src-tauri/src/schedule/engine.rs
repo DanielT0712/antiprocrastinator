@@ -200,6 +200,66 @@ pub fn get_current_block(
     refresh_schedule_status(connection)
 }
 
+pub fn get_projected_finish(
+    connection: &Connection,
+    task_id: i64,
+) -> Result<Option<i64>, String> {
+    connection
+        .query_row(
+            r#"
+            SELECT MAX(end_time)
+            FROM time_blocks
+            WHERE task_id = ?1
+              AND status IN ('scheduled', 'active', 'paused')
+            "#,
+            params![task_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .map(|outer| outer.flatten())
+        .map_err(|error| error.to_string())
+}
+
+pub fn get_pause_buffer_minutes(
+    connection: &Connection,
+    schedule: &ScheduleState,
+    preferences: &UserPreferences,
+) -> Result<i64, String> {
+    let Some(block) = refresh_schedule_status(connection)? else {
+        return Ok(0);
+    };
+    if block.status == BlockStatus::Paused {
+        if let Some(paused) = schedule
+            .runtime
+            .lock()
+            .map_err(|error| error.to_string())?
+            .paused
+            .as_ref()
+        {
+            return Ok((paused.available_pause_ms / 60_000).max(0));
+        }
+    }
+    if block.status != BlockStatus::Active {
+        return Ok(0);
+    }
+    let Some(plan) = build_rest_shrink_plan(
+        connection,
+        block.end_time,
+        preferences,
+        i64::MAX / 4,
+        ShrinkStrategy::ImmediateThenProportional,
+    )?
+    else {
+        return Ok(0);
+    };
+    let available_pause_ms: i64 = plan
+        .adjustments
+        .iter()
+        .map(|adjustment| -adjustment.delta_ms)
+        .sum();
+    Ok((available_pause_ms / 60_000).max(0))
+}
+
 pub fn get_next_block(
     connection: &Connection,
     schedule: &ScheduleState,
@@ -1066,7 +1126,7 @@ pub fn start_emergency_block(
             intensity: 5,
             source: Some(BlockSource::Emergency),
             is_protected: Some(true),
-            enforcement_profile: Some("rest".to_string()),
+            enforcement_profile: Some("emergency".to_string()),
         },
     )?;
 
@@ -1081,6 +1141,12 @@ pub fn start_emergency_block(
     }
 
     rebuild_schedule_internal(connection, now, preferences, None)?;
+    let reason_text = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string);
     record_schedule_event(
         connection,
         "schedule.emergency_block_started",
@@ -1088,6 +1154,7 @@ pub fn start_emergency_block(
         json!({
             "requestedMinutes": request.duration_minutes,
             "appliedMinutes": capped_minutes,
+            "reason": reason_text,
             "warningKinds": warnings.iter().map(|warning| warning.kind.clone()).collect::<Vec<_>>()
         }),
     );

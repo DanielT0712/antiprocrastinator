@@ -164,6 +164,8 @@ pub struct EmergencyBlockRequest {
     #[serde(default)]
     pub title: Option<String>,
     pub duration_minutes: i64,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

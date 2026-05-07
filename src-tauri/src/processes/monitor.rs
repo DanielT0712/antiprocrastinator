@@ -831,6 +831,24 @@ pub fn set_enforcement_profile_override(
     override_entry: EnforcementProfileOverrideInput,
 ) -> Result<EnforcementProfileOverride, String> {
     let profile_name = normalize_profile_name(&override_entry.profile_name)?;
+    let subject_type = normalize_subject_type(&override_entry.subject_type)?;
+    let subject_key = normalize_subject_key(&override_entry.subject_key);
+    if profile_name == categories::EMERGENCY_PROFILE_NAME
+        && override_entry.decision == EnforcementDecision::Allow
+    {
+        if let Some(category) =
+            resolve_subject_category(connection, &subject_type, &subject_key)?
+        {
+            if categories::EMERGENCY_BLOCKED_CATEGORIES
+                .iter()
+                .any(|blocked| blocked.eq_ignore_ascii_case(&category))
+            {
+                return Err(format!(
+                    "Apps in the {category} category cannot be allowed during an emergency block."
+                ));
+            }
+        }
+    }
     let now = timestamp_ms();
     connection
         .execute(
@@ -844,8 +862,8 @@ pub fn set_enforcement_profile_override(
             "#,
             params![
                 profile_name,
-                normalize_subject_type(&override_entry.subject_type)?,
-                normalize_subject_key(&override_entry.subject_key),
+                subject_type,
+                subject_key,
                 enforcement_decision_to_str(override_entry.decision),
                 now
             ],
@@ -854,12 +872,7 @@ pub fn set_enforcement_profile_override(
     record_enforcement_history(
         connection,
         "profile_override",
-        &format!(
-            "{}:{}:{}",
-            profile_name,
-            normalize_subject_type(&override_entry.subject_type)?,
-            normalize_subject_key(&override_entry.subject_key)
-        ),
+        &format!("{profile_name}:{subject_type}:{subject_key}"),
         "set",
         serde_json::json!({ "decision": enforcement_decision_to_str(override_entry.decision) }),
     );
@@ -870,11 +883,7 @@ pub fn set_enforcement_profile_override(
             FROM enforcement_profile_overrides
             WHERE profile_name = ?1 AND subject_type = ?2 AND subject_key = ?3
             "#,
-            params![
-                profile_name,
-                normalize_subject_type(&override_entry.subject_type)?,
-                normalize_subject_key(&override_entry.subject_key)
-            ],
+            params![profile_name, subject_type, subject_key],
             |row| {
                 Ok(EnforcementProfileOverride {
                     profile_name: row.get(0)?,
@@ -2418,6 +2427,59 @@ fn normalize_subject_type(subject_type: &str) -> Result<String, String> {
 
 fn normalize_subject_key(subject_key: &str) -> String {
     normalize_process_name(subject_key)
+}
+
+fn resolve_subject_category(
+    connection: &Connection,
+    subject_type: &str,
+    subject_key: &str,
+) -> Result<Option<String>, String> {
+    match subject_type {
+        "category" => Ok(Some(subject_key.to_string())),
+        "app" => connection
+            .query_row(
+                r#"
+                SELECT COALESCE(category_override, category_guess)
+                FROM known_apps
+                WHERE app_key = ?1
+                "#,
+                params![subject_key],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|outer| outer.flatten())
+            .map_err(|error| error.to_string()),
+        "browser_target" => connection
+            .query_row(
+                "SELECT category_name FROM known_browser_targets WHERE target_key = ?1",
+                params![subject_key],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|outer| outer.flatten())
+            .map_err(|error| error.to_string()),
+        _ => Ok(None),
+    }
+}
+
+pub fn get_emergency_allowlist(connection: &Connection) -> Result<Vec<KnownApp>, String> {
+    ensure_enforcement_defaults(connection)?;
+    let apps = get_known_apps(connection)?;
+    Ok(apps
+        .into_iter()
+        .filter(|app| {
+            let blocked = app
+                .effective_category
+                .as_deref()
+                .map(|category| {
+                    categories::EMERGENCY_BLOCKED_CATEGORIES
+                        .iter()
+                        .any(|forbidden| forbidden.eq_ignore_ascii_case(category))
+                })
+                .unwrap_or(false);
+            !blocked
+        })
+        .collect())
 }
 
 fn timestamp_ms() -> i64 {

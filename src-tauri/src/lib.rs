@@ -33,6 +33,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             schedule::commands::get_current_block,
             schedule::commands::get_next_block,
+            schedule::commands::get_projected_finish,
+            schedule::commands::get_pause_buffer_minutes,
             schedule::commands::get_schedule_range,
             schedule::commands::get_schedule_mutation_history,
             schedule::commands::add_time_block,
@@ -56,6 +58,8 @@ pub fn run() {
             processes::commands::get_running_processes,
             processes::commands::get_focused_window,
             processes::commands::get_known_apps,
+            processes::commands::get_emergency_allowlist,
+            processes::commands::get_emergency_blocked_categories,
             processes::commands::refresh_known_apps_inventory,
             processes::commands::update_known_app,
             processes::commands::create_known_app,
