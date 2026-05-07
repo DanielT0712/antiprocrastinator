@@ -45,6 +45,22 @@ export const api = {
   rebuildSchedule: (from?: number) =>
     invoke<ScheduleMutationResult>('rebuild_schedule', { from: from ?? null }),
 
+  addTimeBlock: (block: {
+    title: string;
+    blockType: 'work' | 'break' | 'sleep' | 'meal' | 'custom';
+    startTime: number;
+    endTime: number;
+    taskId?: number | null;
+    intensity?: number;
+    source?: 'manual' | 'template' | 'planner' | 'emergency';
+    isProtected?: boolean | null;
+    enforcementProfile?: string | null;
+  }) => invoke<ScheduleMutationResult>('add_time_block', { block }),
+  updateTimeBlock: (id: number, updates: Partial<TimeBlock>) =>
+    invoke<ScheduleMutationResult>('update_time_block', { id, updates }),
+  deleteTimeBlock: (id: number) =>
+    invoke<ScheduleMutationResult>('delete_time_block', { id }),
+
   // Tasks
   getTasks: () => invoke<Task[]>('get_tasks', { filter: null }),
   searchTasks: (query: string) => invoke<Task[]>('search_tasks', { query }),

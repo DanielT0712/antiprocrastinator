@@ -4,12 +4,10 @@ import { Sidebar, type Route } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { SuspendAppModal } from './components/Modals';
 import { HomeScreen } from './screens/HomeScreen';
-import {
-  AppsScreen,
-  ScheduleScreen,
-  SettingsScreen,
-  TasksScreen,
-} from './screens/StubScreen';
+import { ScheduleScreen } from './screens/ScheduleScreen';
+import { TasksScreen } from './screens/TasksScreen';
+import { AppsScreen } from './screens/AppsScreen';
+import { SettingsScreen } from './screens/SettingsScreen';
 
 const ROUTE_KEY = 'ap-route';
 const COLLAPSED_KEY = 'ap-sidebar-collapsed';
