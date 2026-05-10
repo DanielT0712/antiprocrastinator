@@ -111,6 +111,7 @@ function HeroBody({
       padding: '30px 32px 28px',
       background: 'var(--bg-raise)',
       overflow: 'hidden',
+      minWidth: 480,
     }}>
       <div style={{
         display: 'flex',
@@ -202,7 +203,12 @@ function HeroBody({
             {formatRemaining(remainingSecs)}
           </div>
         </div>
-        <div style={{ flex: 1, paddingBottom: 8, maxWidth: 260 }}>
+        <div style={{
+          flex: 1,
+          paddingBottom: 8,
+          maxWidth: 260,
+          minWidth: 220,
+        }}>
           <div style={{
             display: 'flex',
             justifyContent: 'space-between',
@@ -212,6 +218,7 @@ function HeroBody({
             marginBottom: 8,
             textTransform: 'uppercase',
             letterSpacing: '0.08em',
+            whiteSpace: 'nowrap',
           }}>
             <span>Block progress</span>
             <span>{Math.round(elapsed * 100)}%</span>
@@ -235,6 +242,7 @@ function HeroBody({
             fontFamily: 'var(--font-mono)',
             fontSize: 10.5,
             color: 'var(--muted)',
+            whiteSpace: 'nowrap',
           }}>
             <span>{formatRemaining(elapsedSecs)} elapsed</span>
             <span>{formatRemaining(remainingSecs)} left</span>

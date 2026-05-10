@@ -42,6 +42,13 @@ export function HomeScreen({ onError }: Props) {
   const [totalSecs, setTotalSecs] = useState(0);
   const [modal, setModal] = useState<ModalKind>(null);
   const [projectedFinishMs, setProjectedFinishMs] = useState<number | null>(null);
+  const [railOpen, setRailOpen] = useState<boolean>(
+    () => localStorage.getItem('ap-home-rail-open') !== '0',
+  );
+
+  useEffect(() => {
+    localStorage.setItem('ap-home-rail-open', railOpen ? '1' : '0');
+  }, [railOpen]);
 
   const refreshBlock = useCallback(async () => {
     try {
@@ -216,28 +223,73 @@ export function HomeScreen({ onError }: Props) {
 
   return (
     <>
-      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-        <main style={{ flex: 1, padding: '32px 36px', overflow: 'auto' }}>
-          <HeroCard
-            block={block}
-            task={currentTask}
-            group={currentGroup}
-            remainingSecs={remainingSecs}
-            totalSecs={totalSecs}
-            remainingOnTaskMinutes={remainingOnTaskMinutes}
-            blockedAttemptsToday={0}
-            onAction={handleAction}
-          />
+      <div style={{ flex: 1, display: 'flex', minHeight: 0, position: 'relative' }}>
+        <main style={{
+          flex: 1,
+          padding: '32px 36px',
+          overflow: 'auto',
+        }}>
+          <div style={{ minWidth: 520, maxWidth: 1080 }}>
+            <HeroCard
+              block={block}
+              task={currentTask}
+              group={currentGroup}
+              remainingSecs={remainingSecs}
+              totalSecs={totalSecs}
+              remainingOnTaskMinutes={remainingOnTaskMinutes}
+              blockedAttemptsToday={0}
+              onAction={handleAction}
+            />
+          </div>
         </main>
-        <TimelineRail
-          blocks={visibleBlocks}
-          currentBlock={block}
-          taskById={taskById}
-          projectedFinishMs={projectedFinishMs}
-          projectedTaskName={currentTask?.name ?? null}
-          endOfDayMs={endOfScheduleMs}
-          workBlockCount={workBlockCount}
-        />
+        <button
+          onClick={() => setRailOpen((v) => !v)}
+          title={railOpen ? 'Hide today' : 'Show today'}
+          style={{
+            position: 'absolute',
+            top: 18,
+            right: railOpen ? 332 : 12,
+            transition: 'right 180ms ease',
+            zIndex: 5,
+            width: 26,
+            height: 26,
+            display: 'grid',
+            placeItems: 'center',
+            background: 'var(--bg-raise)',
+            border: '1px solid var(--line)',
+            borderRadius: 6,
+            color: 'var(--muted)',
+            cursor: 'pointer',
+            padding: 0,
+            transform: railOpen ? 'none' : 'rotate(180deg)',
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--ink)')}
+          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--muted)')}
+        >
+          <svg
+            width={14}
+            height={14}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.6}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="m9 6 6 6-6 6" />
+          </svg>
+        </button>
+        {railOpen && (
+          <TimelineRail
+            blocks={visibleBlocks}
+            currentBlock={block}
+            taskById={taskById}
+            projectedFinishMs={projectedFinishMs}
+            projectedTaskName={currentTask?.name ?? null}
+            endOfDayMs={endOfScheduleMs}
+            workBlockCount={workBlockCount}
+          />
+        )}
       </div>
 
       <EmergencyDot onClick={() => setModal('emergency')} />

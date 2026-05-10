@@ -795,31 +795,49 @@ pub fn delete_enforcement_profile(connection: &Connection, name: &str) -> Result
 
 pub fn get_enforcement_profile_overrides(
     connection: &Connection,
-    profile_name: &str,
+    profile_name: Option<&str>,
 ) -> Result<Vec<EnforcementProfileOverride>, String> {
-    let profile_name = normalize_profile_name(profile_name)?;
+    let map_row = |row: &rusqlite::Row<'_>| {
+        Ok(EnforcementProfileOverride {
+            profile_name: row.get(0)?,
+            subject_type: row.get(1)?,
+            subject_key: row.get(2)?,
+            decision: enforcement_decision_from_str(&row.get::<_, String>(3)?)
+                .map_err(to_from_sql_error)?,
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
+        })
+    };
+    if let Some(raw) = profile_name {
+        let profile_name = normalize_profile_name(raw)?;
+        let mut statement = connection
+            .prepare(
+                r#"
+                SELECT profile_name, subject_type, subject_key, decision, created_at, updated_at
+                FROM enforcement_profile_overrides
+                WHERE profile_name = ?1
+                ORDER BY subject_type ASC, subject_key ASC
+                "#,
+            )
+            .map_err(|error| error.to_string())?;
+        let overrides = statement
+            .query_map(params![profile_name], map_row)
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        return Ok(overrides);
+    }
     let mut statement = connection
         .prepare(
             r#"
             SELECT profile_name, subject_type, subject_key, decision, created_at, updated_at
             FROM enforcement_profile_overrides
-            WHERE profile_name = ?1
-            ORDER BY subject_type ASC, subject_key ASC
+            ORDER BY profile_name ASC, subject_type ASC, subject_key ASC
             "#,
         )
         .map_err(|error| error.to_string())?;
     let overrides = statement
-        .query_map(params![profile_name], |row| {
-            Ok(EnforcementProfileOverride {
-                profile_name: row.get(0)?,
-                subject_type: row.get(1)?,
-                subject_key: row.get(2)?,
-                decision: enforcement_decision_from_str(&row.get::<_, String>(3)?)
-                    .map_err(to_from_sql_error)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
-            })
-        })
+        .query_map([], map_row)
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;

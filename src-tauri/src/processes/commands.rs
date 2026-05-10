@@ -187,11 +187,11 @@ pub fn delete_enforcement_profile(
 
 #[tauri::command]
 pub fn get_enforcement_profile_overrides(
-    profile_name: String,
+    profile_name: Option<String>,
     database: State<'_, DatabaseState>,
 ) -> Result<Vec<EnforcementProfileOverride>, String> {
     let connection = database.connection()?;
-    monitor::get_enforcement_profile_overrides(&connection, &profile_name)
+    monitor::get_enforcement_profile_overrides(&connection, profile_name.as_deref())
 }
 
 #[tauri::command]
