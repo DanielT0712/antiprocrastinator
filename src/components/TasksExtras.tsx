@@ -139,15 +139,24 @@ export function TasksGroupRail({
             style={{
               background: 'transparent',
               border: 'none',
-              color: 'var(--faint)',
+              color: 'var(--muted)',
               cursor: 'pointer',
-              padding: 2,
+              padding: 4,
+              borderRadius: 4,
               display: 'flex',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.color = 'var(--ink)';
+              e.currentTarget.style.background = 'var(--bg-raise)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.color = 'var(--muted)';
+              e.currentTarget.style.background = 'transparent';
             }}
           >
             <svg
-              width={11}
-              height={11}
+              width={13}
+              height={13}
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"

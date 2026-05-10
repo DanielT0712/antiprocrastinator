@@ -1132,8 +1132,9 @@ export function TasksScreen() {
                 key={id}
                 onClick={() => setTab(id)}
                 style={{
-                  padding: '8px 14px',
-                  background: sel ? 'var(--bg-raise)' : 'transparent',
+                  padding: '8px 4px',
+                  marginRight: 18,
+                  background: 'transparent',
                   border: 'none',
                   borderBottom: sel
                     ? '2px solid var(--accent)'
@@ -1143,6 +1144,12 @@ export function TasksScreen() {
                   fontFamily: 'var(--font-sans)',
                   fontWeight: sel ? 500 : 400,
                   cursor: 'pointer',
+                }}
+                onMouseEnter={(e) => {
+                  if (!sel) e.currentTarget.style.color = 'var(--ink)';
+                }}
+                onMouseLeave={(e) => {
+                  if (!sel) e.currentTarget.style.color = 'var(--muted)';
                 }}
               >
                 {id === 'active' ? 'Active' : 'Library'}
