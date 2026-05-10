@@ -78,8 +78,9 @@ export function HomeScreen({ onError }: Props) {
             ),
           );
         }
-      } catch {
-        // Browser preview / non-Tauri context — skip silently.
+      } catch (err) {
+        // Browser preview / capability-denied — surface so we can debug.
+        console.warn('[home] dynamic window resize failed:', err);
       }
       if (cancelled) return;
     })();
