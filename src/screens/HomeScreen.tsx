@@ -50,6 +50,44 @@ export function HomeScreen({ onError }: Props) {
     localStorage.setItem('ap-home-rail-open', railOpen ? '1' : '0');
   }, [railOpen]);
 
+  // Dynamic window minimum: when the Today rail is expanded the window
+  // needs room for it; when collapsed we can let the user shrink further.
+  // We also auto-extend the window if it's currently narrower than the
+  // new minimum so the rail never appears overlapping the hero.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getCurrentWebviewWindow } = await import(
+          '@tauri-apps/api/webviewWindow'
+        );
+        const { LogicalSize } = await import('@tauri-apps/api/dpi');
+        const win = getCurrentWebviewWindow();
+        const closedMin = 900;
+        const railWidth = 320;
+        const targetMin = railOpen ? closedMin + railWidth : closedMin;
+        await win.setMinSize(new LogicalSize(targetMin, 680));
+        const currentSize = await win.innerSize();
+        const factor = await win.scaleFactor();
+        const logicalWidth = currentSize.width / factor;
+        if (railOpen && logicalWidth < targetMin) {
+          await win.setSize(
+            new LogicalSize(
+              targetMin,
+              Math.max(680, currentSize.height / factor),
+            ),
+          );
+        }
+      } catch {
+        // Browser preview / non-Tauri context — skip silently.
+      }
+      if (cancelled) return;
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [railOpen]);
+
   const refreshBlock = useCallback(async () => {
     try {
       const cur = await api.getCurrentBlock();
@@ -226,7 +264,7 @@ export function HomeScreen({ onError }: Props) {
       <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
         <main style={{
           flex: 1,
-          minWidth: 520,
+          minWidth: 640,
           padding: '32px 36px',
           overflow: 'auto',
           position: 'relative',

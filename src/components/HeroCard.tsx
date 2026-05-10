@@ -111,7 +111,7 @@ function HeroBody({
       padding: '30px 32px 28px',
       background: 'var(--bg-raise)',
       overflow: 'hidden',
-      minWidth: 480,
+      minWidth: 600,
     }}>
       <div style={{
         display: 'flex',
