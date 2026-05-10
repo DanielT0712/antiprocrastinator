@@ -3,10 +3,14 @@
   "version": "1.0.0",
   "description": "should be evident from the name",
   "scripts": {
+    "predev": "npm run helper:build",
     "dev": "vite",
+    "prebuild": "npm run helper:build:release",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "helper:build": "cargo build --manifest-path src-tauri/Cargo.toml --bin guard_helper",
+    "helper:build:release": "cargo build --release --manifest-path src-tauri/Cargo.toml --bin guard_helper"
   },
   "type": "module",
   "dependencies": {
