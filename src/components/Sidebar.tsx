@@ -166,15 +166,6 @@ export function Sidebar({ current, onNav, collapsed, onToggleCollapse, onSuspend
         flexDirection: 'column',
         gap: 10,
       }}>
-        {!compact && (
-          <div style={{
-            fontSize: 11,
-            color: 'var(--muted)',
-            fontFamily: 'var(--font-mono)',
-            textTransform: 'uppercase',
-            letterSpacing: '0.08em',
-          }}>Quick</div>
-        )}
         <button
           onClick={onSuspendApp}
           title="Suspend the app — pauses all enforcement and the schedule"
@@ -196,7 +187,7 @@ export function Sidebar({ current, onNav, collapsed, onToggleCollapse, onSuspend
           onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--muted)')}
         >
           <Icons.clock size={15} />
-          {!compact && <span>Pause App</span>}
+          {!compact && <span>Suspend…</span>}
         </button>
       </div>
     </aside>

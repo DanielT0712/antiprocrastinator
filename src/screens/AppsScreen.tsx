@@ -49,6 +49,70 @@ function overrideMapKey(k: OverrideKey): string {
   return `${k.profile}::${k.subjectType}::${k.subjectKey}`;
 }
 
+type PresetId = 'always-allow' | 'block-work' | 'always-block' | 'custom';
+
+const PRESETS: { id: PresetId; label: string; hint: string }[] = [
+  { id: 'always-allow', label: 'Always allow', hint: 'Never blocked.' },
+  {
+    id: 'block-work',
+    label: 'Block for work',
+    hint: 'Allowed during rest, blocked during work and deep work.',
+  },
+  { id: 'always-block', label: 'Always block', hint: 'Blocked in every profile.' },
+  { id: 'custom', label: 'Custom', hint: 'Different per profile.' },
+];
+
+function presetColor(p: PresetId): string {
+  switch (p) {
+    case 'always-allow':
+      return 'var(--ok)';
+    case 'always-block':
+      return 'var(--danger)';
+    case 'block-work':
+      return 'var(--accent)';
+    case 'custom':
+      return 'var(--muted)';
+  }
+}
+
+// Build the per-profile decision a preset implies. `null` means inherit / no override.
+function presetDecisions(
+  preset: PresetId,
+  profileNames: string[],
+): Record<string, EnforcementDecision | null> {
+  const out: Record<string, EnforcementDecision | null> = {};
+  for (const name of profileNames) {
+    if (preset === 'always-allow') out[name] = 'allow';
+    else if (preset === 'always-block') out[name] = 'block';
+    else if (preset === 'block-work') {
+      out[name] = name === 'rest' || name === 'emergency' ? 'allow' : 'block';
+    } else {
+      // custom — leave whatever's there alone, signalled by null
+      out[name] = null;
+    }
+  }
+  return out;
+}
+
+// Detect which preset most closely matches the current per-profile override map.
+function detectPreset(
+  decisionsByProfile: Record<string, EnforcementDecision | null>,
+  profileNames: string[],
+): PresetId | null {
+  if (profileNames.length === 0) return null;
+  const values = profileNames.map((n) => decisionsByProfile[n] ?? null);
+  if (values.every((v) => v == null)) return null;
+  if (values.every((v) => v === 'allow')) return 'always-allow';
+  if (values.every((v) => v === 'block')) return 'always-block';
+  const blockWork = profileNames.every((n) => {
+    const d = decisionsByProfile[n] ?? null;
+    if (n === 'rest' || n === 'emergency') return d === 'allow';
+    return d === 'block';
+  });
+  if (blockWork) return 'block-work';
+  return 'custom';
+}
+
 function ProfileTabs({
   profiles,
   active,
@@ -151,55 +215,6 @@ function ProfileTabs({
   );
 }
 
-function decisionPill(decision: EnforcementDecision | null) {
-  if (decision === 'allow') {
-    return (
-      <span style={{
-        padding: '2px 8px',
-        borderRadius: 4,
-        background: 'color-mix(in oklch, var(--ok) 16%, transparent)',
-        color: 'var(--ok)',
-        fontFamily: 'var(--font-mono)',
-        fontSize: 10.5,
-        textTransform: 'uppercase',
-        letterSpacing: '0.08em',
-      }}>
-        Allow
-      </span>
-    );
-  }
-  if (decision === 'block') {
-    return (
-      <span style={{
-        padding: '2px 8px',
-        borderRadius: 4,
-        background: 'color-mix(in oklch, var(--danger) 16%, transparent)',
-        color: 'var(--danger)',
-        fontFamily: 'var(--font-mono)',
-        fontSize: 10.5,
-        textTransform: 'uppercase',
-        letterSpacing: '0.08em',
-      }}>
-        Block
-      </span>
-    );
-  }
-  return (
-    <span style={{
-      padding: '2px 8px',
-      borderRadius: 4,
-      border: '1px solid var(--line)',
-      color: 'var(--muted)',
-      fontFamily: 'var(--font-mono)',
-      fontSize: 10.5,
-      textTransform: 'uppercase',
-      letterSpacing: '0.08em',
-    }}>
-      Inherit
-    </span>
-  );
-}
-
 function DecisionToggle({
   current,
   onChange,
@@ -254,116 +269,281 @@ function DecisionToggle({
   );
 }
 
+function presetChip(active: boolean, color: string): CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '5px 9px',
+    borderRadius: 5,
+    border: '1px solid ' + (active ? color : 'var(--line)'),
+    background: active
+      ? `color-mix(in oklch, ${color} 16%, transparent)`
+      : 'transparent',
+    color: active ? color : 'var(--muted)',
+    fontSize: 11.5,
+    cursor: 'pointer',
+    fontFamily: 'var(--font-sans)',
+    whiteSpace: 'nowrap',
+  };
+}
+
+function appmgmtChip(active: boolean, color: string): CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '4px 9px',
+    borderRadius: 4,
+    border: '1px solid ' + color,
+    background: `color-mix(in oklch, ${color} 18%, transparent)`,
+    color,
+    fontSize: 11,
+    fontFamily: 'var(--font-mono)',
+    textTransform: 'uppercase',
+    letterSpacing: '0.08em',
+    pointerEvents: active ? 'auto' : 'none',
+    opacity: active ? 1 : 0.5,
+  };
+}
+
 interface CategorySectionProps {
   category: AppCategory;
   apps: KnownApp[];
   activeProfile: string;
+  profileNames: string[];
   isEmergency: boolean;
   emergencyBlockedCategories: string[];
   overrides: Map<string, EnforcementProfileOverride>;
-  onSetOverride: (key: OverrideKey, decision: EnforcementDecision | null) => void;
+  onApplyPreset: (
+    subjectType: 'app' | 'category',
+    subjectKey: string,
+    preset: PresetId,
+  ) => void;
   onOpenApp: (app: KnownApp) => void;
+}
+
+function decisionsFor(
+  subjectType: 'app' | 'category' | 'browser_target',
+  subjectKey: string,
+  profileNames: string[],
+  overrides: Map<string, EnforcementProfileOverride>,
+): Record<string, EnforcementDecision | null> {
+  const out: Record<string, EnforcementDecision | null> = {};
+  for (const name of profileNames) {
+    out[name] =
+      overrides.get(
+        overrideMapKey({ profile: name, subjectType, subjectKey }),
+      )?.decision ?? null;
+  }
+  return out;
 }
 
 function CategorySection({
   category,
   apps,
   activeProfile,
+  profileNames,
   isEmergency,
   emergencyBlockedCategories,
   overrides,
-  onSetOverride,
+  onApplyPreset,
   onOpenApp,
 }: CategorySectionProps) {
   const [open, setOpen] = useState(false);
-  const categoryHardLocked =
+  const hardLocked =
     isEmergency &&
-    emergencyBlockedCategories.some((c) => c.toLowerCase() === category.name.toLowerCase());
-  const categoryOverrideKey: OverrideKey = {
-    profile: activeProfile,
-    subjectType: 'category',
-    subjectKey: category.name,
-  };
-  const categoryDecision =
-    overrides.get(overrideMapKey(categoryOverrideKey))?.decision ?? null;
-  const effectiveCategoryDecision = categoryHardLocked ? 'block' : categoryDecision;
+    emergencyBlockedCategories.some(
+      (c) => c.toLowerCase() === category.name.toLowerCase(),
+    );
+
+  const categoryDecisions = decisionsFor(
+    'category',
+    category.name,
+    profileNames,
+    overrides,
+  );
+  const categoryPreset = hardLocked
+    ? 'always-block'
+    : detectPreset(categoryDecisions, profileNames) ?? 'custom';
+  const overriddenCount = apps.filter((app) => {
+    return profileNames.some(
+      (n) =>
+        overrides.get(
+          overrideMapKey({
+            profile: n,
+            subjectType: 'app',
+            subjectKey: app.appKey,
+          }),
+        ) != null,
+    );
+  }).length;
+
+  const verdictForActive: EnforcementDecision = hardLocked
+    ? 'block'
+    : categoryDecisions[activeProfile] ??
+      (categoryPreset === 'always-allow' ||
+      (categoryPreset === 'block-work' &&
+        (activeProfile === 'rest' || activeProfile === 'emergency'))
+        ? 'allow'
+        : 'block');
 
   return (
     <div style={{
       border: '1px solid var(--line)',
       borderRadius: 9,
-      marginBottom: 10,
-      overflow: 'hidden',
       background: 'var(--bg-raise)',
+      overflow: 'hidden',
+      marginBottom: 10,
     }}>
-      <div
+      <button
         onClick={() => setOpen((v) => !v)}
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 12,
-          padding: '12px 16px',
+          width: '100%',
+          padding: '14px 16px',
+          background: 'transparent',
+          border: 'none',
           cursor: 'pointer',
+          textAlign: 'left',
+          gap: 14,
+          color: 'var(--ink)',
+          fontFamily: 'var(--font-sans)',
         }}
       >
-        <span style={{ color: 'var(--muted)', transform: open ? 'rotate(180deg)' : 'none' }}>
-          <Icons.chevronD size={13} />
+        <span style={{
+          color: 'var(--muted)',
+          transform: open ? 'rotate(90deg)' : 'none',
+          transition: 'transform 120ms ease',
+        }}>
+          <Icons.chevron size={14} />
         </span>
-        <div style={{ flex: 1 }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{
-            fontSize: 13.5,
+            fontSize: 14,
             color: 'var(--ink)',
             fontWeight: 500,
+            marginBottom: 3,
             display: 'flex',
-            alignItems: 'center',
-            gap: 8,
+            alignItems: 'baseline',
+            gap: 10,
           }}>
             {category.name}
-            {category.builtin && (
-              <span style={{
-                fontFamily: 'var(--font-mono)',
-                fontSize: 10,
-                color: 'var(--faint)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.08em',
-                padding: '1px 5px',
-                border: '1px solid var(--line)',
-                borderRadius: 3,
-              }}>
-                builtin
-              </span>
-            )}
+            <span style={{
+              fontSize: 11,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+            }}>
+              {apps.length} {apps.length === 1 ? 'item' : 'items'}
+              {overriddenCount > 0 && (
+                <span style={{ marginLeft: 8 }}>
+                  · {overriddenCount} overridden
+                </span>
+              )}
+            </span>
           </div>
-          <div style={{
-            fontSize: 11.5,
-            color: 'var(--muted)',
-            fontFamily: 'var(--font-mono)',
-            marginTop: 2,
-          }}>
-            {apps.length} {apps.length === 1 ? 'app' : 'apps'}
+          {!open && apps.length > 0 && (
+            <div style={{
+              fontSize: 11.5,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}>
+              {apps.slice(0, 4).map((a) => a.displayName).join(' · ')}
+              {apps.length > 4 && ' · +' + (apps.length - 4) + ' more'}
+            </div>
+          )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ ...labelStyle, fontSize: 10 }}>
+            {PROFILE_DISPLAY[activeProfile] ?? activeProfile}
+          </div>
+          <div style={appmgmtChip(
+            true,
+            verdictForActive === 'block' ? 'var(--danger)' : 'var(--ok)',
+          )}>
+            {verdictForActive === 'block' ? '✕ Blocked' : '✓ Allowed'}
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          {decisionPill(effectiveCategoryDecision)}
-          <div onClick={(e) => e.stopPropagation()}>
-            <DecisionToggle
-              current={categoryDecision}
-              hardLock={
-                categoryHardLocked
-                  ? {
-                      lockedTo: 'block',
-                      reason: `${category.name} apps cannot be allowed during emergency.`,
-                    }
-                  : undefined
-              }
-              onChange={(next) => onSetOverride(categoryOverrideKey, next)}
-            />
-          </div>
-        </div>
-      </div>
+      </button>
 
       {open && (
         <div style={{ borderTop: '1px solid var(--line)' }}>
+          <div style={{
+            padding: '12px 16px',
+            background: 'color-mix(in oklch, var(--ink) 3%, transparent)',
+            borderBottom: '1px solid var(--line)',
+          }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              flexWrap: 'wrap',
+            }}>
+              <div style={{ ...labelStyle, color: 'var(--muted)' }}>Category rule</div>
+              {PRESETS.map((p) => {
+                const active = categoryPreset === p.id;
+                const blockedByEmergency =
+                  hardLocked && p.id !== 'always-block';
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => {
+                      if (blockedByEmergency) return;
+                      onApplyPreset('category', category.name, p.id);
+                    }}
+                    title={
+                      blockedByEmergency
+                        ? `${category.name} apps must stay blocked during emergency.`
+                        : p.hint
+                    }
+                    disabled={blockedByEmergency}
+                    style={{
+                      ...presetChip(active, presetColor(p.id)),
+                      opacity: blockedByEmergency ? 0.4 : 1,
+                      cursor: blockedByEmergency ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{
+              marginTop: 8,
+              fontSize: 11.5,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+              display: 'flex',
+              gap: 12,
+              flexWrap: 'wrap',
+            }}>
+              <span>Resolved:</span>
+              {profileNames.map((n) => {
+                const d = hardLocked
+                  ? 'block'
+                  : categoryDecisions[n] ??
+                    (categoryPreset === 'always-allow' ||
+                    (categoryPreset === 'block-work' &&
+                      (n === 'rest' || n === 'emergency'))
+                      ? 'allow'
+                      : 'block');
+                return (
+                  <span key={n}>
+                    {(PROFILE_DISPLAY[n] ?? n).toLowerCase()} →{' '}
+                    <span style={{
+                      color: d === 'block' ? 'var(--danger)' : 'var(--ok)',
+                    }}>
+                      {d}
+                    </span>
+                  </span>
+                );
+              })}
+            </div>
+          </div>
           {apps.length === 0 ? (
             <div style={{
               padding: '14px 18px',
@@ -374,75 +554,119 @@ function CategorySection({
               No apps tagged in this category yet.
             </div>
           ) : (
-            apps.map((app) => {
-              const appKey: OverrideKey = {
-                profile: activeProfile,
-                subjectType: 'app',
-                subjectKey: app.appKey,
-              };
-              const appDecision = overrides.get(overrideMapKey(appKey))?.decision ?? null;
-              return (
-                <div
-                  key={app.appKey}
-                  onClick={() => onOpenApp(app)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 12,
-                    padding: '10px 16px 10px 40px',
-                    borderTop: '1px solid var(--line)',
-                    cursor: 'pointer',
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = 'var(--bg)';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = 'transparent';
-                  }}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{
-                      fontSize: 13,
-                      color: 'var(--ink)',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}>
-                      {app.displayName}
-                    </div>
-                    <div style={{
-                      fontSize: 11,
-                      color: 'var(--muted)',
-                      fontFamily: 'var(--font-mono)',
-                      marginTop: 2,
-                    }}>
-                      {app.executableName ?? app.appKey} ·{' '}
-                      {app.classificationStatus}
-                    </div>
-                  </div>
-                  {decisionPill(
-                    categoryHardLocked ? 'block' : appDecision ?? effectiveCategoryDecision,
-                  )}
-                  <div onClick={(e) => e.stopPropagation()}>
-                    <DecisionToggle
-                      current={appDecision}
-                      hardLock={
-                        categoryHardLocked
-                          ? {
-                              lockedTo: 'block',
-                              reason: `${category.name} apps cannot be allowed during emergency.`,
-                            }
-                          : undefined
-                      }
-                      onChange={(next) => onSetOverride(appKey, next)}
-                    />
-                  </div>
-                </div>
-              );
-            })
+            apps.map((app) => (
+              <AppRow
+                key={app.appKey}
+                app={app}
+                profileNames={profileNames}
+                activeProfile={activeProfile}
+                hardLocked={hardLocked}
+                overrides={overrides}
+                categoryPreset={categoryPreset}
+                onClick={() => onOpenApp(app)}
+              />
+            ))
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function AppRow({
+  app,
+  profileNames,
+  activeProfile,
+  hardLocked,
+  overrides,
+  categoryPreset,
+  onClick,
+}: {
+  app: KnownApp;
+  profileNames: string[];
+  activeProfile: string;
+  hardLocked: boolean;
+  overrides: Map<string, EnforcementProfileOverride>;
+  categoryPreset: PresetId;
+  onClick: () => void;
+}) {
+  const appDecisions = decisionsFor(
+    'app',
+    app.appKey,
+    profileNames,
+    overrides,
+  );
+  const appPreset = detectPreset(appDecisions, profileNames);
+  const inherited = appPreset == null;
+  const effectivePreset: PresetId = appPreset ?? categoryPreset;
+  const presetText = inherited
+    ? 'Follows category'
+    : PRESETS.find((p) => p.id === effectivePreset)?.label ?? effectivePreset;
+  const verdict: EnforcementDecision = hardLocked
+    ? 'block'
+    : appDecisions[activeProfile] ??
+      (effectivePreset === 'always-allow' ||
+      (effectivePreset === 'block-work' &&
+        (activeProfile === 'rest' || activeProfile === 'emergency'))
+        ? 'allow'
+        : 'block');
+
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr auto auto 16px',
+        alignItems: 'center',
+        gap: 12,
+        padding: '11px 16px',
+        borderBottom: '1px solid var(--line)',
+        cursor: 'pointer',
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background =
+          'color-mix(in oklch, var(--ink) 3%, transparent)';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = 'transparent';
+      }}
+    >
+      <div style={{ minWidth: 0 }}>
+        <div style={{
+          fontSize: 13,
+          color: 'var(--ink)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {app.displayName}
+        </div>
+        <div style={{
+          fontSize: 11,
+          color: 'var(--muted)',
+          fontFamily: 'var(--font-mono)',
+          marginTop: 2,
+        }}>
+          {app.executableName ?? app.appKey} · {app.classificationStatus}
+        </div>
+      </div>
+      <div style={{
+        fontSize: 11.5,
+        color: inherited ? 'var(--muted)' : presetColor(effectivePreset),
+        fontFamily: 'var(--font-mono)',
+        fontStyle: inherited ? 'italic' : 'normal',
+      }}>
+        {presetText}
+      </div>
+      <div style={appmgmtChip(
+        true,
+        verdict === 'block' ? 'var(--danger)' : 'var(--ok)',
+      )}>
+        {verdict === 'block' ? 'Blocked' : 'Allowed'}
+      </div>
+      <span style={{ color: 'var(--faint)' }}>
+        <Icons.chevron size={13} />
+      </span>
     </div>
   );
 }
@@ -922,6 +1146,43 @@ export function AppsScreen() {
     }
   };
 
+  const profileNames = useMemo(() => profiles.map((p) => p.name), [profiles]);
+
+  const applyPreset = async (
+    subjectType: 'app' | 'category' | 'browser_target',
+    subjectKey: string,
+    preset: PresetId,
+  ) => {
+    try {
+      if (preset === 'custom') {
+        // Custom = preserve existing per-profile decisions; no-op.
+        // User edits per profile via the AppDrawer or per-profile toggles.
+        return;
+      }
+      const decisions = presetDecisions(preset, profileNames);
+      for (const profile of profileNames) {
+        const dec = decisions[profile];
+        if (dec == null) {
+          await api.deleteEnforcementProfileOverride(
+            profile,
+            subjectType,
+            subjectKey,
+          );
+        } else {
+          await api.setEnforcementProfileOverride({
+            profileName: profile,
+            subjectType,
+            subjectKey,
+            decision: dec,
+          });
+        }
+      }
+      refresh();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const isEmergency = activeProfile === 'emergency';
 
   const updateBrowserTarget = async (
@@ -1110,10 +1371,11 @@ export function AppsScreen() {
                   category={cat as AppCategory}
                   apps={appsByCategory.get(cat.name) ?? []}
                   activeProfile={activeProfile}
+                  profileNames={profileNames}
                   isEmergency={isEmergency}
                   emergencyBlockedCategories={emergencyBlockedCategories}
                   overrides={overrideMap}
-                  onSetOverride={setOverride}
+                  onApplyPreset={(t, k, p) => applyPreset(t, k, p)}
                   onOpenApp={(app) => setDrawerAppKey(app.appKey)}
                 />
               ))}

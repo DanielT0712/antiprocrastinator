@@ -640,8 +640,21 @@ function HourLines(): ReactNode {
   return out;
 }
 
-const DEFAULT_DAYS = 5;
-type ViewMode = 'day' | 'week';
+type ViewMode = 'day' | '3day' | '5day' | 'week';
+
+const VIEW_DAYS: Record<ViewMode, number> = {
+  day: 1,
+  '3day': 3,
+  '5day': 5,
+  week: 7,
+};
+
+const VIEW_LABELS: Record<ViewMode, string> = {
+  day: 'Day',
+  '3day': '3-Day',
+  '5day': '5-Day',
+  week: 'Week',
+};
 
 function Stat({
   n,
@@ -782,7 +795,7 @@ interface MutationHistoryEntry {
 }
 
 export function ScheduleScreen() {
-  const [view, setView] = useState<ViewMode>('week');
+  const [view, setView] = useState<ViewMode>('5day');
   const [blocks, setBlocks] = useState<TimeBlock[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
@@ -791,7 +804,7 @@ export function ScheduleScreen() {
   const [showHistory, setShowHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const daysToShow = view === 'day' ? 1 : DEFAULT_DAYS;
+  const daysToShow = VIEW_DAYS[view];
 
   const refresh = useCallback(async () => {
     try {
@@ -964,22 +977,23 @@ export function ScheduleScreen() {
               borderRadius: 6,
               overflow: 'hidden',
             }}>
-              {(['day', 'week'] as ViewMode[]).map((v) => (
+              {(['day', '3day', '5day', 'week'] as ViewMode[]).map((v) => (
                 <button
                   key={v}
                   onClick={() => setView(v)}
                   style={{
-                    padding: '6px 14px',
+                    padding: '6px 12px',
                     background: view === v ? 'var(--ink-soft)' : 'transparent',
                     color: view === v ? 'var(--ink)' : 'var(--muted)',
                     border: 'none',
+                    borderRight: v === 'week' ? 'none' : '1px solid var(--line)',
                     fontSize: 12,
                     fontFamily: 'var(--font-sans)',
                     cursor: 'pointer',
                     fontWeight: view === v ? 500 : 400,
                   }}
                 >
-                  {v === 'day' ? 'Day' : 'Week'}
+                  {VIEW_LABELS[v]}
                 </button>
               ))}
             </div>
