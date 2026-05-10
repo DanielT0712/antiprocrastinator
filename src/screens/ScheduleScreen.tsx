@@ -640,19 +640,17 @@ function HourLines(): ReactNode {
   return out;
 }
 
-type ViewMode = 'day' | '3day' | '5day' | 'week';
+type ViewMode = 'day' | '5d' | 'week';
 
 const VIEW_DAYS: Record<ViewMode, number> = {
   day: 1,
-  '3day': 3,
-  '5day': 5,
+  '5d': 5,
   week: 7,
 };
 
 const VIEW_LABELS: Record<ViewMode, string> = {
   day: 'Day',
-  '3day': '3-Day',
-  '5day': '5-Day',
+  '5d': '5d',
   week: 'Week',
 };
 
@@ -795,7 +793,7 @@ interface MutationHistoryEntry {
 }
 
 export function ScheduleScreen() {
-  const [view, setView] = useState<ViewMode>('5day');
+  const [view, setView] = useState<ViewMode>('5d');
   const [blocks, setBlocks] = useState<TimeBlock[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
@@ -977,7 +975,7 @@ export function ScheduleScreen() {
               borderRadius: 6,
               overflow: 'hidden',
             }}>
-              {(['day', '3day', '5day', 'week'] as ViewMode[]).map((v) => (
+              {(['day', '5d', 'week'] as ViewMode[]).map((v) => (
                 <button
                   key={v}
                   onClick={() => setView(v)}
