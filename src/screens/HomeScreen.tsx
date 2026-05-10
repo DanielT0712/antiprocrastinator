@@ -223,62 +223,61 @@ export function HomeScreen({ onError }: Props) {
 
   return (
     <>
-      <div style={{ flex: 1, display: 'flex', minHeight: 0, position: 'relative' }}>
+      <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
         <main style={{
           flex: 1,
+          minWidth: 520,
           padding: '32px 36px',
           overflow: 'auto',
+          position: 'relative',
         }}>
-          <div style={{ minWidth: 520, maxWidth: 1080 }}>
-            <HeroCard
-              block={block}
-              task={currentTask}
-              group={currentGroup}
-              remainingSecs={remainingSecs}
-              totalSecs={totalSecs}
-              remainingOnTaskMinutes={remainingOnTaskMinutes}
-              blockedAttemptsToday={0}
-              onAction={handleAction}
-            />
-          </div>
-        </main>
-        <button
-          onClick={() => setRailOpen((v) => !v)}
-          title={railOpen ? 'Hide today' : 'Show today'}
-          style={{
-            position: 'absolute',
-            top: 18,
-            right: railOpen ? 332 : 12,
-            transition: 'right 180ms ease',
-            zIndex: 5,
-            width: 26,
-            height: 26,
-            display: 'grid',
-            placeItems: 'center',
-            background: 'var(--bg-raise)',
-            border: '1px solid var(--line)',
-            borderRadius: 6,
-            color: 'var(--muted)',
-            cursor: 'pointer',
-            padding: 0,
-            transform: railOpen ? 'none' : 'rotate(180deg)',
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--ink)')}
-          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--muted)')}
-        >
-          <svg
-            width={14}
-            height={14}
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={1.6}
-            strokeLinecap="round"
-            strokeLinejoin="round"
+          <button
+            onClick={() => setRailOpen((v) => !v)}
+            title={railOpen ? 'Hide today' : 'Show today'}
+            style={{
+              position: 'absolute',
+              top: 18,
+              right: 12,
+              zIndex: 5,
+              width: 26,
+              height: 26,
+              display: 'grid',
+              placeItems: 'center',
+              background: 'var(--bg-raise)',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              color: 'var(--muted)',
+              cursor: 'pointer',
+              padding: 0,
+              transform: railOpen ? 'none' : 'rotate(180deg)',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--ink)')}
+            onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--muted)')}
           >
-            <path d="m9 6 6 6-6 6" />
-          </svg>
-        </button>
+            <svg
+              width={14}
+              height={14}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.6}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="m9 6 6 6-6 6" />
+            </svg>
+          </button>
+          <HeroCard
+            block={block}
+            task={currentTask}
+            group={currentGroup}
+            remainingSecs={remainingSecs}
+            totalSecs={totalSecs}
+            remainingOnTaskMinutes={remainingOnTaskMinutes}
+            blockedAttemptsToday={0}
+            onAction={handleAction}
+          />
+        </main>
         {railOpen && (
           <TimelineRail
             blocks={visibleBlocks}
