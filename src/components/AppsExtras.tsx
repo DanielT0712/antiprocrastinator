@@ -434,22 +434,49 @@ export function AppDrawer({
             </select>
           </div>
 
-          <div style={{ marginBottom: 22 }}>
-            <div style={{ ...labelStyle, marginBottom: 10 }}>
-              Rule for this app
+          {preset !== 'custom' ? (
+            <div style={{ marginBottom: 22 }}>
+              <div style={{ ...labelStyle, marginBottom: 10 }}>
+                Rule for this app
+              </div>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {DRAWER_PRESETS.map((p) => (
+                  <PresetOption
+                    key={p.id}
+                    label={p.label}
+                    hint={p.hint}
+                    selected={preset === p.id}
+                    onClick={() => choosePreset(p.id)}
+                  />
+                ))}
+              </div>
             </div>
-            <div style={{ display: 'grid', gap: 8 }}>
-              {DRAWER_PRESETS.map((p) => (
-                <PresetOption
-                  key={p.id}
-                  label={p.label}
-                  hint={p.hint}
-                  selected={preset === p.id}
-                  onClick={() => choosePreset(p.id)}
-                />
-              ))}
+          ) : (
+            <div style={{
+              marginBottom: 14,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 10,
+            }}>
+              <div style={labelStyle}>Custom rule</div>
+              <button
+                onClick={() => choosePreset('inherit')}
+                style={{
+                  padding: '5px 10px',
+                  borderRadius: 5,
+                  border: '1px solid var(--line)',
+                  background: 'transparent',
+                  color: 'var(--muted)',
+                  fontSize: 11.5,
+                  cursor: 'pointer',
+                  fontFamily: 'var(--font-sans)',
+                }}
+              >
+                Use a preset instead…
+              </button>
             </div>
-          </div>
+          )}
 
           <div style={{ marginBottom: 22 }}>
             <div style={{ ...labelStyle, marginBottom: 10 }}>
@@ -576,6 +603,31 @@ export function CategoryManagerModal({
 }: CategoryManagerProps) {
   const [draftName, setDraftName] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [dragOverCategory, setDragOverCategory] = useState<string | null>(null);
+
+  const appsByCategory = useMemo(() => {
+    const map = new Map<string, KnownApp[]>();
+    for (const c of categories) map.set(c.name, []);
+    map.set('Uncategorized', []);
+    for (const a of apps) {
+      const bucket = a.effectiveCategory ?? 'Uncategorized';
+      const list = map.get(bucket) ?? [];
+      list.push(a);
+      map.set(bucket, list);
+    }
+    return map;
+  }, [apps, categories]);
+
+  const reassign = async (appKey: string, targetCategory: string | null) => {
+    try {
+      await api.updateKnownApp(appKey, {
+        categoryOverride: { value: targetCategory },
+      });
+      onRefresh();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -584,16 +636,6 @@ export function CategoryManagerModal({
     document.addEventListener('keydown', h);
     return () => document.removeEventListener('keydown', h);
   }, [onClose]);
-
-  const counts = useMemo(() => {
-    const c: Record<string, number> = {};
-    for (const cat of categories) c[cat.name] = 0;
-    for (const a of apps) {
-      const cat = a.effectiveCategory;
-      if (cat) c[cat] = (c[cat] ?? 0) + 1;
-    }
-    return c;
-  }, [categories, apps]);
 
   const create = async () => {
     const name = draftName.trim();
@@ -682,86 +724,175 @@ export function CategoryManagerModal({
           </button>
         </div>
 
-        <div style={{ flex: 1, overflow: 'auto', padding: '14px 18px' }}>
-          {categories.map((c) => (
-            <div
-              key={c.name}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 12,
-                padding: '10px 14px',
-                border: '1px solid var(--line)',
-                borderRadius: 8,
-                marginBottom: 8,
-                background: 'var(--bg)',
-              }}
-            >
-              <div style={{ flex: 1 }}>
+        <div style={{
+          padding: '6px 18px 10px',
+          fontSize: 12,
+          color: 'var(--muted)',
+          lineHeight: 1.55,
+        }}>
+          Drag app chips between categories to re-classify. Drop on
+          <em style={{ color: 'var(--ink)', fontStyle: 'normal' }}> Uncategorized </em>
+          to clear an override.
+        </div>
+
+        <div style={{ flex: 1, overflow: 'auto', padding: '8px 18px 14px' }}>
+          {[
+            ...categories,
+            { name: 'Uncategorized', builtin: true, createdAt: 0, updatedAt: 0 } as AppCategory,
+          ].map((c) => {
+            const items = appsByCategory.get(c.name) ?? [];
+            const isDropTarget = dragOverCategory === c.name;
+            return (
+              <div
+                key={c.name}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  if (dragOverCategory !== c.name) setDragOverCategory(c.name);
+                }}
+                onDragLeave={() => {
+                  if (dragOverCategory === c.name) setDragOverCategory(null);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const appKey = e.dataTransfer.getData('text/app-key');
+                  setDragOverCategory(null);
+                  if (!appKey) return;
+                  reassign(
+                    appKey,
+                    c.name === 'Uncategorized' ? null : c.name,
+                  );
+                }}
+                style={{
+                  padding: '11px 14px',
+                  border:
+                    '1px solid ' +
+                    (isDropTarget ? 'var(--accent)' : 'var(--line)'),
+                  borderRadius: 8,
+                  marginBottom: 8,
+                  background: isDropTarget
+                    ? 'color-mix(in oklch, var(--accent) 8%, var(--bg))'
+                    : 'var(--bg)',
+                  transition: 'background 80ms ease, border-color 80ms ease',
+                }}
+              >
                 <div style={{
-                  color: 'var(--ink)',
-                  fontSize: 13.5,
-                  fontWeight: 500,
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 8,
+                  gap: 10,
+                  marginBottom: items.length > 0 ? 10 : 0,
                 }}>
-                  {c.name}
-                  {c.builtin && (
-                    <span style={{
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: 10,
-                      color: 'var(--faint)',
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.08em',
-                      padding: '1px 5px',
-                      border: '1px solid var(--line)',
-                      borderRadius: 3,
-                    }}>
-                      builtin
-                    </span>
+                  <div style={{
+                    color: 'var(--ink)',
+                    fontSize: 13.5,
+                    fontWeight: 500,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                  }}>
+                    {c.name}
+                    {c.builtin && c.name !== 'Uncategorized' && (
+                      <span style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 10,
+                        color: 'var(--faint)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.08em',
+                        padding: '1px 5px',
+                        border: '1px solid var(--line)',
+                        borderRadius: 3,
+                      }}>
+                        builtin
+                      </span>
+                    )}
+                  </div>
+                  <div style={{
+                    fontSize: 11,
+                    color: 'var(--muted)',
+                    fontFamily: 'var(--font-mono)',
+                  }}>
+                    {items.length} {items.length === 1 ? 'app' : 'apps'}
+                  </div>
+                  <div style={{ flex: 1 }} />
+                  {!c.builtin && (
+                    <button
+                      onClick={() => {
+                        if (
+                          confirm(
+                            `Delete category "${c.name}"? Apps will become uncategorized.`,
+                          )
+                        ) {
+                          remove(c.name);
+                        }
+                      }}
+                      style={{
+                        padding: '5px 10px',
+                        background: 'transparent',
+                        border:
+                          '1px solid color-mix(in oklch, var(--danger) 50%, var(--line))',
+                        borderRadius: 5,
+                        color: 'var(--danger)',
+                        fontSize: 11.5,
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                      }}
+                    >
+                      <Icons.trash size={11} /> Delete
+                    </button>
                   )}
                 </div>
-                <div style={{
-                  fontSize: 11,
-                  color: 'var(--muted)',
-                  fontFamily: 'var(--font-mono)',
-                  marginTop: 3,
-                }}>
-                  {counts[c.name] ?? 0}{' '}
-                  {(counts[c.name] ?? 0) === 1 ? 'app' : 'apps'}
-                </div>
+                {items.length > 0 && (
+                  <div style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 6,
+                  }}>
+                    {items.map((a) => (
+                      <div
+                        key={a.appKey}
+                        draggable
+                        onDragStart={(e) => {
+                          e.dataTransfer.setData('text/app-key', a.appKey);
+                          e.dataTransfer.effectAllowed = 'move';
+                        }}
+                        title={`Drag to move ${a.displayName} to another category`}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          padding: '5px 10px 5px 6px',
+                          background: 'var(--bg-raise)',
+                          border: '1px solid var(--line)',
+                          borderRadius: 20,
+                          fontSize: 11.5,
+                          color: 'var(--ink)',
+                          cursor: 'grab',
+                          userSelect: 'none',
+                        }}
+                      >
+                        <span style={{
+                          width: 18,
+                          height: 18,
+                          borderRadius: 4,
+                          background:
+                            'color-mix(in oklch, var(--ink) 8%, transparent)',
+                          color: 'var(--muted)',
+                          display: 'inline-grid',
+                          placeItems: 'center',
+                          fontSize: 10,
+                          fontFamily: 'var(--font-mono)',
+                        }}>
+                          {(a.displayName || a.appKey).charAt(0).toUpperCase()}
+                        </span>
+                        {a.displayName}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-              {!c.builtin && (
-                <button
-                  onClick={() => {
-                    if (
-                      confirm(
-                        `Delete category "${c.name}"? Apps will become uncategorized.`,
-                      )
-                    ) {
-                      remove(c.name);
-                    }
-                  }}
-                  style={{
-                    padding: '5px 10px',
-                    background: 'transparent',
-                    border:
-                      '1px solid color-mix(in oklch, var(--danger) 50%, var(--line))',
-                    borderRadius: 5,
-                    color: 'var(--danger)',
-                    fontSize: 11.5,
-                    cursor: 'pointer',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 4,
-                  }}
-                >
-                  <Icons.trash size={11} /> Delete
-                </button>
-              )}
-            </div>
-          ))}
+            );
+          })}
 
           <div style={{
             border: '1px dashed var(--line)',
@@ -1348,38 +1479,65 @@ export function CategoryDrawer({
 
         {/* body */}
         <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 80px' }}>
-          <div style={{ marginBottom: 22 }}>
-            <div style={{ ...labelStyle, marginBottom: 10 }}>
-              Rule for this category
+          {preset !== 'custom' ? (
+            <div style={{ marginBottom: 22 }}>
+              <div style={{ ...labelStyle, marginBottom: 10 }}>
+                Rule for this category
+              </div>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {DRAWER_PRESETS.filter((p) => p.id !== 'inherit').map((p) => {
+                  const disabled = hardLocked && p.id !== 'always-block';
+                  return (
+                    <PresetOption
+                      key={p.id}
+                      label={p.label}
+                      hint={
+                        disabled
+                          ? 'Emergency profile keeps this category blocked.'
+                          : p.hint
+                      }
+                      selected={preset === p.id}
+                      onClick={() => {
+                        if (disabled) return;
+                        choosePreset(p.id);
+                      }}
+                    />
+                  );
+                })}
+                <PresetOption
+                  label="Clear all overrides"
+                  hint="Stop enforcing any per-profile rule for this category."
+                  selected={preset === 'inherit'}
+                  onClick={() => choosePreset('inherit')}
+                />
+              </div>
             </div>
-            <div style={{ display: 'grid', gap: 8 }}>
-              {DRAWER_PRESETS.filter((p) => p.id !== 'inherit').map((p) => {
-                const disabled = hardLocked && p.id !== 'always-block';
-                return (
-                  <PresetOption
-                    key={p.id}
-                    label={p.label}
-                    hint={
-                      disabled
-                        ? 'Emergency profile keeps this category blocked.'
-                        : p.hint
-                    }
-                    selected={preset === p.id}
-                    onClick={() => {
-                      if (disabled) return;
-                      choosePreset(p.id);
-                    }}
-                  />
-                );
-              })}
-              <PresetOption
-                label="Clear all overrides"
-                hint="Stop enforcing any per-profile rule for this category."
-                selected={preset === 'inherit'}
+          ) : (
+            <div style={{
+              marginBottom: 14,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 10,
+            }}>
+              <div style={labelStyle}>Custom rule</div>
+              <button
                 onClick={() => choosePreset('inherit')}
-              />
+                style={{
+                  padding: '5px 10px',
+                  borderRadius: 5,
+                  border: '1px solid var(--line)',
+                  background: 'transparent',
+                  color: 'var(--muted)',
+                  fontSize: 11.5,
+                  cursor: 'pointer',
+                  fontFamily: 'var(--font-sans)',
+                }}
+              >
+                Use a preset instead…
+              </button>
             </div>
-          </div>
+          )}
 
           <div style={{ marginBottom: 22 }}>
             <div style={{ ...labelStyle, marginBottom: 10 }}>
