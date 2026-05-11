@@ -960,6 +960,61 @@ export function SettingsScreen() {
               />
               <SettingsCard title="Warnings">
                 <SettingsRow
+                  title="When blocked"
+                  help="Close the app/site immediately, or show a countdown first so the user can save work."
+                  control={
+                    <div style={{
+                      display: 'inline-flex',
+                      border: '1px solid var(--line)',
+                      borderRadius: 6,
+                      overflow: 'hidden',
+                      background: 'var(--bg)',
+                    }}>
+                      {(
+                        [
+                          { v: 'kill', l: 'Close immediately' },
+                          { v: 'warn', l: 'Warn, then close' },
+                        ] as const
+                      ).map((o, i) => {
+                        const sel =
+                          o.v === 'kill'
+                            ? (prefs.processWarningSeconds ?? 0) === 0
+                            : (prefs.processWarningSeconds ?? 0) > 0;
+                        return (
+                          <button
+                            key={o.v}
+                            onClick={() => {
+                              if (o.v === 'kill') {
+                                update({ processWarningSeconds: 0 });
+                              } else if (
+                                (prefs.processWarningSeconds ?? 0) === 0
+                              ) {
+                                update({ processWarningSeconds: 30 });
+                              }
+                            }}
+                            style={{
+                              padding: '7px 12px',
+                              fontSize: 12.5,
+                              background: sel
+                                ? 'var(--accent-soft)'
+                                : 'transparent',
+                              color: sel ? 'var(--accent-ink)' : 'var(--muted)',
+                              border: 'none',
+                              borderLeft:
+                                i === 0 ? 'none' : '1px solid var(--line)',
+                              cursor: 'pointer',
+                              fontFamily: 'var(--font-sans)',
+                              fontWeight: sel ? 500 : 400,
+                            }}
+                          >
+                            {o.l}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  }
+                />
+                <SettingsRow
                   title="Warn for"
                   help="Time before the countdown starts."
                   control={
