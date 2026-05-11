@@ -1973,6 +1973,14 @@ fn normalized_path_token(path: &str) -> Option<String> {
 }
 
 fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<String>, f64) {
+    if let Some(path_str) = path {
+        if categories::MACOS_SYSTEM_PATH_PREFIXES
+            .iter()
+            .any(|prefix| path_str.starts_with(prefix))
+        {
+            return (Some("System".to_string()), 0.98);
+        }
+    }
     let normalized = normalize_process_name(display_name);
     for category in categories::built_in_categories() {
         if category

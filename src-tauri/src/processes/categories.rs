@@ -8,8 +8,84 @@ pub struct BrowserTargetSeed {
     pub confidence: f64,
 }
 
+/// macOS system / Apple bundled apps that should be demoted to the System
+/// category by default so the inventory doesn't drown the user in noise.
+pub const SYSTEM_APP_NAMES: &[&str] = &[
+    "finder",
+    "system settings",
+    "system preferences",
+    "activity monitor",
+    "console",
+    "disk utility",
+    "keychain access",
+    "screenshot",
+    "screen sharing",
+    "screencaptureui",
+    "stocks",
+    "weather",
+    "maps",
+    "freeform",
+    "image capture",
+    "preview",
+    "photo booth",
+    "automator",
+    "shortcuts",
+    "time machine",
+    "voiceover utility",
+    "audio midi setup",
+    "directory utility",
+    "migration assistant",
+    "boot camp assistant",
+    "airport utility",
+    "bluetooth file exchange",
+    "feedback assistant",
+    "font book",
+    "raycast",
+    "spotlight",
+    "siri",
+    "loginwindow",
+    "dock",
+    "windowserver",
+    "controlcenter",
+    "notificationcenter",
+    "talagent",
+    "coreservicesuiagent",
+    "cfprefsd",
+    "powerd",
+    "configd",
+    "syslogd",
+    "wifiagent",
+    "mdworker",
+    "mds",
+    "spotlightnetworkhelper",
+    "bird",
+    "cloudd",
+    "rapportd",
+    "useventagent",
+    "trustd",
+    "appleidauthagent",
+    "secd",
+    "tccd",
+];
+
+/// Path prefixes that mark a discovered bundle as a built-in / vendor system
+/// app on macOS. Anything under these gets the System category guess.
+pub const MACOS_SYSTEM_PATH_PREFIXES: &[&str] = &[
+    "/System/Applications/",
+    "/System/Library/CoreServices/",
+    "/Applications/Utilities/",
+];
+
 pub fn built_in_categories() -> Vec<ProcessCategory> {
     vec![
+        ProcessCategory {
+            name: "System".to_string(),
+            process_names: SYSTEM_APP_NAMES
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+            default_action: ProcessAction::AlwaysAllow,
+        },
         ProcessCategory {
             name: "Games".to_string(),
             process_names: vec![

@@ -154,7 +154,7 @@ export const api = {
     invoke<KnownBrowserTarget>('create_known_browser_target', { target }),
   getAppCategories: () => invoke<AppCategory[]>('get_app_categories'),
   upsertAppCategory: (input: { name: string }) =>
-    invoke<AppCategory>('upsert_app_category', { input }),
+    invoke<AppCategory>('upsert_app_category', { category: input }),
   deleteAppCategory: (name: string) =>
     invoke<void>('delete_app_category', { name }),
   getEnforcementProfiles: () =>
@@ -162,7 +162,10 @@ export const api = {
   upsertEnforcementProfile: (input: {
     name: string;
     parentName?: string | null;
-  }) => invoke<EnforcementProfile>('upsert_enforcement_profile', { input }),
+  }) =>
+    invoke<EnforcementProfile>('upsert_enforcement_profile', {
+      profile: input,
+    }),
   deleteEnforcementProfile: (name: string) =>
     invoke<void>('delete_enforcement_profile', { name }),
   getEnforcementProfileOverrides: () =>
@@ -174,7 +177,7 @@ export const api = {
     decision: 'allow' | 'block';
   }) =>
     invoke<EnforcementProfileOverride>('set_enforcement_profile_override', {
-      override: input,
+      overrideEntry: input,
     }),
   deleteEnforcementProfileOverride: (
     profileName: string,
