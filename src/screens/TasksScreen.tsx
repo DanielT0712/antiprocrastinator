@@ -155,6 +155,22 @@ function dateInputFromEpoch(epoch: number | null): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function minutesToTime(minutes: number | null | undefined): string {
+  if (minutes == null || minutes < 0) return '';
+  const hh = Math.floor(minutes / 60) % 24;
+  const mm = minutes % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
+function timeToMinutes(value: string): number | null {
+  const m = value.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+  return hh * 60 + mm;
+}
+
 interface QuickAddProps {
   groups: TaskGroup[];
   onAdd: (task: NewTask) => Promise<void>;
@@ -340,6 +356,22 @@ function Drawer({
     if (draft.enforcementProfile !== task.enforcementProfile) {
       updates.enforcementProfile = draft.enforcementProfile;
     }
+    if (draft.kind !== task.kind) updates.kind = draft.kind;
+    if (draft.fixedWindowStartMinute !== task.fixedWindowStartMinute) {
+      updates.fixedWindowStartMinute = draft.fixedWindowStartMinute;
+    }
+    if (draft.fixedWindowEndMinute !== task.fixedWindowEndMinute) {
+      updates.fixedWindowEndMinute = draft.fixedWindowEndMinute;
+    }
+    if (draft.recurrenceKind !== task.recurrenceKind) {
+      updates.recurrenceKind = draft.recurrenceKind;
+    }
+    if (draft.recurrenceDaysMask !== task.recurrenceDaysMask) {
+      updates.recurrenceDaysMask = draft.recurrenceDaysMask;
+    }
+    if (draft.recurrenceAnchorDate !== task.recurrenceAnchorDate) {
+      updates.recurrenceAnchorDate = draft.recurrenceAnchorDate;
+    }
     if (Object.keys(updates).length > 0) {
       await onUpdate(task.id, updates);
     }
@@ -488,6 +520,199 @@ function Drawer({
               </select>
             </FieldCell>
           </FieldRow>
+
+          <div style={{
+            marginTop: 4,
+            marginBottom: 14,
+            padding: 14,
+            borderRadius: 8,
+            border: '1px solid var(--line)',
+            background: 'var(--bg-raise)',
+          }}>
+            <div style={{ ...labelStyle, marginBottom: 8 }}>Kind</div>
+            <div style={{
+              display: 'flex',
+              border: '1px solid var(--line)',
+              borderRadius: 5,
+              overflow: 'hidden',
+              width: 'fit-content',
+              marginBottom: 14,
+            }}>
+              {(
+                [
+                  { v: 'flexible' as const, l: 'Flexible', hint: 'planner picks slots' },
+                  { v: 'fixed' as const, l: 'Fixed', hint: 'pinned to your window' },
+                ]
+              ).map((opt) => (
+                <button
+                  key={opt.v}
+                  onClick={() =>
+                    set({
+                      kind: opt.v,
+                      fixedWindowStartMinute:
+                        opt.v === 'fixed'
+                          ? draft.fixedWindowStartMinute ?? 9 * 60
+                          : draft.fixedWindowStartMinute,
+                      fixedWindowEndMinute:
+                        opt.v === 'fixed'
+                          ? draft.fixedWindowEndMinute ?? 10 * 60
+                          : draft.fixedWindowEndMinute,
+                    })
+                  }
+                  style={{
+                    padding: '7px 14px',
+                    fontSize: 12.5,
+                    background: draft.kind === opt.v ? 'var(--ink-soft)' : 'transparent',
+                    color: draft.kind === opt.v ? 'var(--ink)' : 'var(--muted)',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontFamily: 'var(--font-sans)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'flex-start',
+                    gap: 2,
+                  }}
+                >
+                  <span>{opt.l}</span>
+                  <span style={{
+                    fontSize: 9.5,
+                    color: 'var(--faint)',
+                    fontFamily: 'var(--font-mono)',
+                  }}>
+                    {opt.hint}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {draft.kind === 'fixed' && (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ ...labelStyle, marginBottom: 6 }}>Window</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    type="time"
+                    value={minutesToTime(draft.fixedWindowStartMinute)}
+                    onChange={(e) =>
+                      set({
+                        fixedWindowStartMinute: timeToMinutes(e.target.value),
+                      })
+                    }
+                    style={{ ...drawerInp, width: 120, fontFamily: 'var(--font-mono)' }}
+                  />
+                  <span style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)' }}>
+                    –
+                  </span>
+                  <input
+                    type="time"
+                    value={minutesToTime(draft.fixedWindowEndMinute)}
+                    onChange={(e) =>
+                      set({
+                        fixedWindowEndMinute: timeToMinutes(e.target.value),
+                      })
+                    }
+                    style={{ ...drawerInp, width: 120, fontFamily: 'var(--font-mono)' }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <div style={{ ...labelStyle, marginBottom: 6 }}>
+              {draft.kind === 'fixed' ? 'When' : 'Repeat'}
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {(draft.kind === 'fixed'
+                ? ([
+                    { v: 'once' as const, l: 'Once' },
+                    { v: 'weekdays' as const, l: 'Weekdays' },
+                    { v: 'weekly' as const, l: 'Custom days' },
+                  ])
+                : ([
+                    { v: 'none' as const, l: 'No repeat' },
+                    { v: 'daily' as const, l: 'Daily' },
+                    { v: 'weekdays' as const, l: 'Weekdays' },
+                    { v: 'weekly' as const, l: 'Custom days' },
+                  ])
+              ).map((opt) => (
+                <button
+                  key={opt.v}
+                  onClick={() => set({ recurrenceKind: opt.v })}
+                  style={{
+                    padding: '6px 11px',
+                    fontSize: 12,
+                    background:
+                      draft.recurrenceKind === opt.v
+                        ? 'var(--accent-soft)'
+                        : 'transparent',
+                    color:
+                      draft.recurrenceKind === opt.v
+                        ? 'var(--accent-ink)'
+                        : 'var(--ink)',
+                    border:
+                      '1px solid ' +
+                      (draft.recurrenceKind === opt.v
+                        ? 'var(--accent)'
+                        : 'var(--line)'),
+                    borderRadius: 5,
+                    cursor: 'pointer',
+                    fontFamily: 'var(--font-sans)',
+                  }}
+                >
+                  {opt.l}
+                </button>
+              ))}
+            </div>
+
+            {draft.recurrenceKind === 'weekly' && (
+              <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((label, idx) => {
+                  const bit = 1 << idx;
+                  const selected = (draft.recurrenceDaysMask & bit) !== 0;
+                  return (
+                    <button
+                      key={label}
+                      onClick={() =>
+                        set({
+                          recurrenceDaysMask: selected
+                            ? draft.recurrenceDaysMask & ~bit
+                            : draft.recurrenceDaysMask | bit,
+                        })
+                      }
+                      style={{
+                        width: 36,
+                        padding: '5px 0',
+                        fontSize: 11,
+                        background: selected ? 'var(--accent-soft)' : 'transparent',
+                        color: selected ? 'var(--accent-ink)' : 'var(--muted)',
+                        border:
+                          '1px solid ' + (selected ? 'var(--accent)' : 'var(--line)'),
+                        borderRadius: 4,
+                        cursor: 'pointer',
+                        fontFamily: 'var(--font-mono)',
+                      }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {draft.recurrenceKind === 'once' && (
+              <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>On</span>
+                <input
+                  type="date"
+                  value={dateInputFromEpoch(draft.recurrenceAnchorDate)}
+                  onChange={(e) =>
+                    set({
+                      recurrenceAnchorDate: epochFromDateInput(e.target.value),
+                    })
+                  }
+                  style={{ ...drawerInp, width: 160 }}
+                />
+              </div>
+            )}
+          </div>
 
           <div style={{
             marginTop: 14,

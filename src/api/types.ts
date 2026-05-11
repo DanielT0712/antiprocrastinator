@@ -56,6 +56,14 @@ export interface EmergencyBlockRequest {
   reason?: string | null;
 }
 
+export type TaskKind = 'flexible' | 'fixed';
+export type RecurrenceKind =
+  | 'none'
+  | 'daily'
+  | 'weekdays'
+  | 'weekly'
+  | 'once';
+
 export interface Task {
   id: number;
   name: string;
@@ -70,6 +78,12 @@ export interface Task {
   restRatio: number | null;
   protectGeneratedBlocks: boolean;
   enforcementProfile: string | null;
+  kind: TaskKind;
+  fixedWindowStartMinute: number | null;
+  fixedWindowEndMinute: number | null;
+  recurrenceKind: RecurrenceKind;
+  recurrenceDaysMask: number;
+  recurrenceAnchorDate: number | null;
   averagePriority: number;
   averageActualMinutes: number | null;
   completionCount: number;
@@ -97,6 +111,12 @@ export interface NewTask {
   restRatio?: number | null;
   protectGeneratedBlocks?: boolean | null;
   enforcementProfile?: string | null;
+  kind?: TaskKind | null;
+  fixedWindowStartMinute?: number | null;
+  fixedWindowEndMinute?: number | null;
+  recurrenceKind?: RecurrenceKind | null;
+  recurrenceDaysMask?: number | null;
+  recurrenceAnchorDate?: number | null;
 }
 
 export interface TaskUpdate {
@@ -112,6 +132,12 @@ export interface TaskUpdate {
   restRatio?: number | null;
   protectGeneratedBlocks?: boolean;
   enforcementProfile?: string | null;
+  kind?: TaskKind;
+  fixedWindowStartMinute?: number | null;
+  fixedWindowEndMinute?: number | null;
+  recurrenceKind?: RecurrenceKind;
+  recurrenceDaysMask?: number;
+  recurrenceAnchorDate?: number | null;
 }
 
 export interface UserPreferences {
