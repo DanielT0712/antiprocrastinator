@@ -72,9 +72,35 @@ pub const SYSTEM_APP_NAMES: &[&str] = &[
 /// app on macOS. Anything under these gets the System category guess.
 pub const MACOS_SYSTEM_PATH_PREFIXES: &[&str] = &[
     "/System/Applications/",
-    "/System/Library/CoreServices/",
+    "/System/Library/",
+    "/Library/Apple/",
+    "/Library/Frameworks/",
+    "/Library/PrivilegedHelperTools/",
     "/Applications/Utilities/",
+    "/usr/libexec/",
+    "/usr/sbin/",
+    "/usr/bin/",
 ];
+
+/// Path fragments that mark an item discovered inside another .app bundle as
+/// an internal helper, plugin, XPC service or framework component — those
+/// should never surface to the user as a top-level app.
+pub const MACOS_EMBEDDED_HELPER_FRAGMENTS: &[&str] = &[
+    ".app/Contents/Frameworks/",
+    ".app/Contents/Helpers/",
+    ".app/Contents/PlugIns/",
+    ".app/Contents/XPCServices/",
+    ".app/Contents/Resources/",
+    ".app/Contents/Library/",
+    ".appex/",
+    ".xpc/",
+];
+
+pub fn is_macos_embedded_helper_path(path: &str) -> bool {
+    MACOS_EMBEDDED_HELPER_FRAGMENTS
+        .iter()
+        .any(|fragment| path.contains(fragment))
+}
 
 pub fn built_in_categories() -> Vec<ProcessCategory> {
     vec![

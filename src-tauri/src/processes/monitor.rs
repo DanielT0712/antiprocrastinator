@@ -279,9 +279,9 @@ fn is_user_facing_app(exe: Option<&Path>) -> bool {
         // require the path to live inside a .app bundle OR a well-known
         // launcher root.
         if display.contains(".app/Contents/MacOS/") {
-            // skip XPC services / Login Items / framework helpers — those
-            // live under .app/Contents/Frameworks/.../XPCServices.
-            if display.contains(".xpc/") || display.contains("/Frameworks/") {
+            // skip XPC services / Login Items / framework helpers / plugins —
+            // those live under .app/Contents/{Frameworks,PlugIns,Helpers,...}.
+            if categories::is_macos_embedded_helper_path(&display) {
                 return false;
             }
             return true;
@@ -292,6 +292,11 @@ fn is_user_facing_app(exe: Option<&Path>) -> bool {
             "/Applications/Setapp/",
         ] {
             if display.starts_with(root) {
+                // raw binaries that live directly under /Applications/<App>.app/Contents/Helpers/
+                // etc. are still helpers — drop them.
+                if categories::is_macos_embedded_helper_path(&display) {
+                    return false;
+                }
                 return true;
             }
         }
@@ -605,9 +610,87 @@ pub fn create_known_app(connection: &Connection, app: KnownAppInput) -> Result<K
 
 pub fn refresh_known_apps_inventory(connection: &Connection) -> Result<(), String> {
     ensure_enforcement_defaults(connection)?;
+    purge_embedded_helper_rows(connection)?;
     let discovered = discover_installed_apps();
     for app in discovered {
         upsert_known_app(connection, &app, None)?;
+    }
+    reclassify_uncategorized_apps(connection)?;
+    Ok(())
+}
+
+/// Drop rows that were previously stored but now look like embedded helpers
+/// (paths under `.app/Contents/Frameworks/`, `.appex/`, etc). Lets a refresh
+/// clean up earlier polluted inventory without manual SQL.
+fn purge_embedded_helper_rows(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare("SELECT app_key, app_path FROM known_apps WHERE app_path IS NOT NULL")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<(String, String)>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+    let mut purged = 0usize;
+    for (app_key, path) in rows {
+        if categories::is_macos_embedded_helper_path(&path) {
+            connection
+                .execute(
+                    "DELETE FROM known_apps WHERE app_key = ?1",
+                    rusqlite::params![app_key],
+                )
+                .map_err(|error| error.to_string())?;
+            purged += 1;
+        }
+    }
+    if purged > 0 {
+        log::info!("purged {} embedded helper rows from known_apps", purged);
+    }
+    Ok(())
+}
+
+/// Re-run the classifier over rows still missing a category guess. Catches
+/// apps that pre-date a keyword-list expansion.
+fn reclassify_uncategorized_apps(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT app_key, display_name, app_path
+            FROM known_apps
+            WHERE category_guess IS NULL OR category_guess = ''
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<(String, String, Option<String>)>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+    let mut updated = 0usize;
+    for (app_key, display_name, path) in rows {
+        let (guess, confidence) = classify_app_candidate(&display_name, path.as_deref());
+        if let Some(name) = guess {
+            connection
+                .execute(
+                    "UPDATE known_apps SET category_guess = ?1, confidence = ?2, updated_at = ?3 WHERE app_key = ?4",
+                    rusqlite::params![name, confidence, timestamp_ms(), app_key],
+                )
+                .map_err(|error| error.to_string())?;
+            updated += 1;
+        }
+    }
+    if updated > 0 {
+        log::info!("reclassified {} previously uncategorized apps", updated);
     }
     Ok(())
 }
@@ -1658,7 +1741,11 @@ fn discover_installed_apps_for_platform() -> Vec<DiscoveredApp> {
                     continue;
                 }
                 let display = path.display().to_string();
-                // Skip embedded helper / framework bundles.
+                // Skip embedded helper / framework bundles, plugins, XPC
+                // services, app extensions, etc.
+                if categories::is_macos_embedded_helper_path(&display) {
+                    continue;
+                }
                 if display.contains(".app/Contents/") {
                     continue;
                 }
@@ -1875,13 +1962,16 @@ fn collect_app_bundles(root: &Path, apps: &mut Vec<DiscoveredApp>) {
             if path.extension().and_then(|value| value.to_str()) != Some("app") {
                 continue;
             }
+            let path_str = path.display().to_string();
+            if categories::is_macos_embedded_helper_path(&path_str) {
+                continue;
+            }
             let Some(display_name) = path
                 .file_stem()
                 .map(|name| name.to_string_lossy().to_string())
             else {
                 continue;
             };
-            let path_str = path.display().to_string();
             let (category_guess, confidence) =
                 classify_app_candidate(&display_name, Some(&path_str));
             apps.push(DiscoveredApp {
@@ -1974,6 +2064,9 @@ fn normalized_path_token(path: &str) -> Option<String> {
 
 fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<String>, f64) {
     if let Some(path_str) = path {
+        if categories::is_macos_embedded_helper_path(path_str) {
+            return (Some("System".to_string()), 0.97);
+        }
         if categories::MACOS_SYSTEM_PATH_PREFIXES
             .iter()
             .any(|prefix| path_str.starts_with(prefix))
@@ -2005,6 +2098,9 @@ fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<Str
                 "valorant", "fortnite", "league", "blizzard", "playstation",
                 "xbox", "nintendo", "emulator", "rpcs", "dolphin", "retroarch",
                 "gameloop", "gog", "ubisoft", "rockstar",
+                "geometrydash", "slaythespire", "stellaris", "turingcomplete",
+                "paradoxlauncher", "paradox", "mumuplayer", "mumu", "nox",
+                "bluestacks", "ldplayer", "memuplay", "examnet",
             ][..],
         ),
         (
@@ -2023,6 +2119,8 @@ fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<Str
                 "twitch", "plex", "infuse", "hulu", "primevideo", "disney",
                 "appletv", "mpv", "quicktime", "audible", "soundcloud",
                 "tidal", "deezer", "kindle", "comic",
+                "bilibili", "哔哩哔哩", "youku", "iqiyi", "tencentvideo",
+                "douyin", "wetv", "viu",
             ][..],
         ),
         (
@@ -2054,6 +2152,8 @@ fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<Str
                 "bruno", "tableplus", "dbeaver", "pgadmin", "mongodb compass",
                 "redis", "tinypng", "transmit", "cyberduck", "filezilla",
                 "tunnelblick", "wireshark", "proxyman", "charles",
+                "lmstudio", "lm studio", "ollama", "anythingllm", "msty",
+                "jan", "openwebui", "claudedesktop", "claude",
             ][..],
         ),
         (
@@ -2067,6 +2167,11 @@ fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<Str
                 "raycast", "alfred", "rectangle", "magnet", "shottr",
                 "cleanshot", "1password", "bitwarden", "lastpass", "dashlane",
                 "calendar", "fantastical", "cron", "amie", "vimcal", "sunsama",
+                "microsoftexcel", "microsoftword", "microsoftpowerpoint",
+                "microsoftoutlook", "microsoftonenote", "microsoftteams",
+                "excel", "word", "powerpoint", "keynote", "pages", "numbers",
+                "googledocs", "googlesheets", "googleslides", "googledrive",
+                "dropbox", "onedrive", "icloud", "box drive", "googlechat",
             ][..],
         ),
         (
@@ -2077,6 +2182,12 @@ fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<Str
                 "unzip", "keka", "betterzip", "iina", "iina", "vmware", "parallels",
                 "virtualbox", "utm", "homebrew", "cleanmymac", "macdiskpart",
                 "carbon copy", "time machine", "battery", "stats", "istat",
+                "betterdisplay", "grandperspective", "logioptionsplus",
+                "logi options", "macsfancontrol", "fanscontrol",
+                "freedownloadmanager", "baidunetdisk", "letsvpn", "quickfox",
+                "expressvpn", "nordvpn", "surfshark", "protonvpn", "tunnelblick",
+                "wireguard", "openvpn", "shadowrocket", "clash", "clashx",
+                "v2ray", "v2rayu", "outline", "tailscale",
             ][..],
         ),
         (
@@ -2088,6 +2199,10 @@ fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<Str
                 "davinci", "final cut", "imovie", "obs", "screenflow", "procreate",
                 "affinity", "pixelmator", "capture one", "rawtherapee",
                 "darktable", "krita",
+                "gimp", "inkscape", "handbrake", "mainstage", "musescore",
+                "musehub", "muse hub", "metronome", "reaper", "studio one",
+                "cubase", "protools", "pro tools", "bitwig", "renoise",
+                "imslp",
             ][..],
         ),
     ] {
