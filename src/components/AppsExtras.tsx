@@ -1152,3 +1152,346 @@ export function ProfileMenu({
     </div>
   );
 }
+
+interface CategoryDrawerProps {
+  category: AppCategory;
+  profiles: EnforcementProfile[];
+  overrides: EnforcementProfileOverride[];
+  emergencyBlockedCategories: string[];
+  initialPreset?: DrawerPreset;
+  onClose: () => void;
+  onSetOverride: (
+    profileName: string,
+    decision: EnforcementDecision | null,
+  ) => Promise<void>;
+  onApplyPreset: (
+    preset: 'always-allow' | 'block-work' | 'always-block',
+  ) => Promise<void>;
+  onClearAllOverrides: () => Promise<void>;
+}
+
+function detectCategoryDrawerPreset(
+  category: AppCategory,
+  profiles: EnforcementProfile[],
+  overrides: EnforcementProfileOverride[],
+): DrawerPreset {
+  const direct = profiles
+    .map((p) =>
+      overrides.find(
+        (o) =>
+          o.profileName === p.name &&
+          o.subjectType === 'category' &&
+          o.subjectKey === category.name,
+      ),
+    )
+    .filter(Boolean) as EnforcementProfileOverride[];
+  if (direct.length === 0) return 'inherit';
+  const map: Record<string, EnforcementDecision | null> = {};
+  profiles.forEach((p) => {
+    map[p.name] =
+      overrides.find(
+        (o) =>
+          o.profileName === p.name &&
+          o.subjectType === 'category' &&
+          o.subjectKey === category.name,
+      )?.decision ?? null;
+  });
+  const vals = profiles.map((p) => map[p.name]);
+  if (vals.every((v) => v === 'allow')) return 'always-allow';
+  if (vals.every((v) => v === 'block')) return 'always-block';
+  if (
+    profiles.every((p) => {
+      const d = map[p.name];
+      if (p.name === 'rest' || p.name === 'emergency') return d === 'allow';
+      return d === 'block';
+    })
+  )
+    return 'block-work';
+  return 'custom';
+}
+
+export function CategoryDrawer({
+  category,
+  profiles,
+  overrides,
+  emergencyBlockedCategories,
+  initialPreset,
+  onClose,
+  onSetOverride,
+  onApplyPreset,
+  onClearAllOverrides,
+}: CategoryDrawerProps) {
+  const detected = useMemo(
+    () => detectCategoryDrawerPreset(category, profiles, overrides),
+    [category, profiles, overrides],
+  );
+  const [preset, setPreset] = useState<DrawerPreset>(
+    initialPreset ?? detected,
+  );
+  useEffect(() => setPreset(initialPreset ?? detected), [
+    initialPreset,
+    detected,
+  ]);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', h);
+    return () => document.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  const hardLocked = emergencyBlockedCategories.some(
+    (c) => c.toLowerCase() === category.name.toLowerCase(),
+  );
+
+  const choosePreset = async (p: DrawerPreset) => {
+    setPreset(p);
+    if (p === 'custom') return;
+    if (p === 'inherit') {
+      await onClearAllOverrides();
+      return;
+    }
+    await onApplyPreset(p);
+  };
+
+  // Resolve the displayed verdict for each profile under the current
+  // preset choice (mirrors design's resolvePreset helper).
+  function resolved(profileName: string): EnforcementDecision {
+    if (hardLocked && profileName === 'emergency') return 'block';
+    if (preset === 'always-allow') return 'allow';
+    if (preset === 'always-block') return 'block';
+    if (preset === 'block-work') {
+      if (profileName === 'rest' || profileName === 'emergency') return 'allow';
+      return 'block';
+    }
+    if (preset === 'custom') {
+      const o = overrides.find(
+        (x) =>
+          x.profileName === profileName &&
+          x.subjectType === 'category' &&
+          x.subjectKey === category.name,
+      );
+      return o?.decision ?? 'allow';
+    }
+    // inherit — no per-profile override stored; show neutral "allow" baseline.
+    return 'allow';
+  }
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 70,
+        background: 'rgba(0,0,0,0.38)',
+        display: 'flex',
+        justifyContent: 'flex-end',
+        animation: 'ap-fade 150ms ease-out',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 520,
+          height: '100%',
+          background: 'var(--bg)',
+          borderLeft: '1px solid var(--line)',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        {/* header */}
+        <div style={{
+          padding: '22px 24px 18px',
+          borderBottom: '1px solid var(--line)',
+        }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: 14,
+          }}>
+            <div style={labelStyle}>Category</div>
+            <button
+              onClick={onClose}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--muted)',
+                cursor: 'pointer',
+                padding: 4,
+              }}
+              aria-label="Close"
+            >
+              <Icons.x size={16} />
+            </button>
+          </div>
+          <div style={{
+            fontFamily: 'var(--font-display)',
+            fontSize: 22,
+            color: 'var(--ink)',
+            letterSpacing: '-0.01em',
+          }}>
+            {category.name}
+          </div>
+          <div style={{
+            fontSize: 12,
+            color: 'var(--muted)',
+            marginTop: 4,
+            fontFamily: 'var(--font-mono)',
+          }}>
+            Applies to every app tagged in this category.
+          </div>
+        </div>
+
+        {/* body */}
+        <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 80px' }}>
+          <div style={{ marginBottom: 22 }}>
+            <div style={{ ...labelStyle, marginBottom: 10 }}>
+              Rule for this category
+            </div>
+            <div style={{ display: 'grid', gap: 8 }}>
+              {DRAWER_PRESETS.filter((p) => p.id !== 'inherit').map((p) => {
+                const disabled = hardLocked && p.id !== 'always-block';
+                return (
+                  <PresetOption
+                    key={p.id}
+                    label={p.label}
+                    hint={
+                      disabled
+                        ? 'Emergency profile keeps this category blocked.'
+                        : p.hint
+                    }
+                    selected={preset === p.id}
+                    onClick={() => {
+                      if (disabled) return;
+                      choosePreset(p.id);
+                    }}
+                  />
+                );
+              })}
+              <PresetOption
+                label="Clear all overrides"
+                hint="Stop enforcing any per-profile rule for this category."
+                selected={preset === 'inherit'}
+                onClick={() => choosePreset('inherit')}
+              />
+            </div>
+          </div>
+
+          <div style={{ marginBottom: 22 }}>
+            <div style={{ ...labelStyle, marginBottom: 10 }}>
+              Per-profile behavior
+            </div>
+            <div style={{
+              border: '1px solid var(--line)',
+              borderRadius: 8,
+              background: 'var(--bg-raise)',
+            }}>
+              {profiles.map((p, i) => {
+                const blocked = hardLocked && p.name === 'emergency';
+                const value = resolved(p.name);
+                const isCustom = preset === 'custom';
+                const labelDisplay =
+                  p.name === 'deep_work'
+                    ? 'Deep Work'
+                    : p.name.charAt(0).toUpperCase() + p.name.slice(1);
+                return (
+                  <div key={p.name} style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr auto',
+                    alignItems: 'center',
+                    padding: '13px 14px',
+                    borderBottom:
+                      i < profiles.length - 1
+                        ? '1px solid var(--line)'
+                        : 'none',
+                  }}>
+                    <div>
+                      <div style={{ fontSize: 13, color: 'var(--ink)' }}>
+                        {labelDisplay}
+                      </div>
+                      <div style={{
+                        fontSize: 11,
+                        color: 'var(--muted)',
+                        marginTop: 2,
+                        fontFamily: 'var(--font-mono)',
+                      }}>
+                        {p.parentName && (
+                          <span>inherits from {p.parentName} · </span>
+                        )}
+                        {isCustom ? 'per-profile rule' : 'auto from preset'}
+                      </div>
+                    </div>
+                    {isCustom ? (
+                      <AllowBlockToggle
+                        value={value}
+                        onChange={(v) => onSetOverride(p.name, v)}
+                        blocked={blocked}
+                        blockedReason={
+                          blocked
+                            ? `${category.name} stays blocked during emergency.`
+                            : undefined
+                        }
+                      />
+                    ) : (
+                      <div style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        padding: '4px 9px',
+                        borderRadius: 5,
+                        border:
+                          '1px solid ' +
+                          (value === 'block' ? 'var(--danger)' : 'var(--ok)'),
+                        background:
+                          value === 'block'
+                            ? 'color-mix(in oklch, var(--danger) 16%, transparent)'
+                            : 'color-mix(in oklch, var(--ok) 16%, transparent)',
+                        color: value === 'block' ? 'var(--danger)' : 'var(--ok)',
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 11,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.08em',
+                      }}>
+                        {value === 'block' ? '✕ Blocked' : '✓ Allowed'}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* footer */}
+        <div style={{
+          borderTop: '1px solid var(--line)',
+          padding: '14px 24px',
+          display: 'flex',
+          justifyContent: 'flex-end',
+          gap: 10,
+          background: 'var(--bg)',
+        }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '8px 14px',
+              background: 'transparent',
+              color: 'var(--ink)',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              fontSize: 12.5,
+              cursor: 'pointer',
+              fontFamily: 'var(--font-sans)',
+            }}
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
