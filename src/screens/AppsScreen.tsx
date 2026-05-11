@@ -468,11 +468,9 @@ interface CategorySectionProps {
     subjectKey: string,
     preset: PresetId,
   ) => void;
-  onOpenCategoryDrawer: (
-    category: AppCategory,
-    presetIntent?: 'custom',
-  ) => void;
-  onOpenApp: (app: KnownApp) => void;
+  onClearAppOverrides: (appKey: string) => void;
+  onOpenCategoryManager: () => void;
+  onOpenApp: (appKey: string, mode: AppRowMode) => void;
 }
 
 function decisionsFor(
@@ -500,7 +498,8 @@ function CategorySection({
   emergencyBlockedCategories,
   overrides,
   onApplyPreset,
-  onOpenCategoryDrawer,
+  onClearAppOverrides,
+  onOpenCategoryManager,
   onOpenApp,
 }: CategorySectionProps) {
   const [open, setOpen] = useState(false);
@@ -646,10 +645,6 @@ function CategorySection({
                     key={p.id}
                     onClick={() => {
                       if (blockedByEmergency) return;
-                      if (p.id === 'custom') {
-                        onOpenCategoryDrawer(category, 'custom');
-                        return;
-                      }
                       onApplyPreset('category', category.name, p.id);
                     }}
                     title={
@@ -670,20 +665,23 @@ function CategorySection({
               })}
               <div style={{ flex: 1 }} />
               <button
-                onClick={() => onOpenCategoryDrawer(category)}
+                onClick={onOpenCategoryManager}
                 style={{
-                  padding: '5px 9px',
-                  borderRadius: 5,
-                  border: '1px solid var(--line)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '7px 11px',
                   background: 'transparent',
-                  color: 'var(--muted)',
-                  fontSize: 11.5,
+                  color: 'var(--ink)',
+                  border: '1px solid var(--line)',
+                  borderRadius: 6,
+                  fontSize: 12.5,
                   cursor: 'pointer',
                   fontFamily: 'var(--font-sans)',
                 }}
-                title="Open category rule editor"
+                title="Open category manager"
               >
-                Edit rule…
+                <Icons.settings size={13} /> Manage…
               </button>
             </div>
             <div style={{
@@ -737,7 +735,11 @@ function CategorySection({
                 hardLocked={hardLocked}
                 overrides={overrides}
                 categoryPreset={categoryPreset}
-                onClick={() => onOpenApp(app)}
+                onApplyAppPreset={(p) =>
+                  onApplyPreset('app', app.appKey, p)
+                }
+                onClearAppOverrides={() => onClearAppOverrides(app.appKey)}
+                onOpenApp={(mode) => onOpenApp(app.appKey, mode)}
               />
             ))
           )}
@@ -773,6 +775,8 @@ function CategorySection({
   );
 }
 
+type AppRowMode = 'edit' | 'edit-custom';
+
 function AppRow({
   app,
   profileNames,
@@ -780,7 +784,9 @@ function AppRow({
   hardLocked,
   overrides,
   categoryPreset,
-  onClick,
+  onApplyAppPreset,
+  onClearAppOverrides,
+  onOpenApp,
 }: {
   app: KnownApp;
   profileNames: string[];
@@ -788,8 +794,11 @@ function AppRow({
   hardLocked: boolean;
   overrides: Map<string, EnforcementProfileOverride>;
   categoryPreset: PresetId;
-  onClick: () => void;
+  onApplyAppPreset: (preset: PresetId) => void;
+  onClearAppOverrides: () => void;
+  onOpenApp: (mode: AppRowMode) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const appDecisions = decisionsFor(
     'app',
     app.appKey,
@@ -852,91 +861,196 @@ function AppRow({
     };
   }, [app.appKey, shouldFetchIcon]);
 
+  const quickPresets: { id: PresetId | 'inherit'; label: string; hint: string }[] = [
+    {
+      id: 'inherit',
+      label: 'Follow category',
+      hint: `Inherits "${PRESETS.find((x) => x.id === categoryPreset)?.label ?? categoryPreset}" from the category`,
+    },
+    { id: 'always-allow', label: 'Always allow', hint: 'Never blocked, any profile' },
+    { id: 'block-work', label: 'Block for work', hint: 'Blocked during Work and Deep Work' },
+    { id: 'always-block', label: 'Always block', hint: 'Blocked in every profile' },
+  ];
+
   return (
     <div
       ref={rowRef}
-      onClick={onClick}
-      style={{
-        display: 'grid',
-        gridTemplateColumns: '28px 1fr auto auto 16px',
-        alignItems: 'center',
-        gap: 12,
-        padding: '11px 16px',
-        borderBottom: '1px solid var(--line)',
-        cursor: 'pointer',
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.background =
-          'color-mix(in oklch, var(--ink) 3%, transparent)';
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = 'transparent';
-      }}
+      style={{ borderBottom: '1px solid var(--line)' }}
     >
+      {/* main row */}
       <div
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData('text/app-key', app.appKey);
+          e.dataTransfer.effectAllowed = 'move';
+        }}
+        onClick={() => setExpanded((v) => !v)}
         style={{
-          width: 28,
-          height: 28,
-          display: 'flex',
+          display: 'grid',
+          gridTemplateColumns: '28px 1fr auto auto 16px',
           alignItems: 'center',
-          justifyContent: 'center',
-          borderRadius: 6,
-          background: iconData
-            ? 'transparent'
-            : 'color-mix(in oklch, var(--ink) 6%, transparent)',
-          color: 'var(--muted)',
-          fontSize: 11,
-          fontFamily: 'var(--font-mono)',
-          overflow: 'hidden',
-          flexShrink: 0,
+          gap: 12,
+          padding: '11px 16px',
+          cursor: 'pointer',
+          background: expanded
+            ? 'color-mix(in oklch, var(--ink) 3%, transparent)'
+            : 'transparent',
+        }}
+        onMouseEnter={(e) => {
+          if (!expanded)
+            e.currentTarget.style.background =
+              'color-mix(in oklch, var(--ink) 3%, transparent)';
+        }}
+        onMouseLeave={(e) => {
+          if (!expanded) e.currentTarget.style.background = 'transparent';
         }}
       >
-        {iconData ? (
-          <img
-            src={iconData}
-            alt=""
-            style={{ width: 28, height: 28, objectFit: 'contain' }}
-          />
-        ) : (
-          (app.displayName || app.appKey).charAt(0).toUpperCase()
-        )}
-      </div>
-      <div style={{ minWidth: 0 }}>
-        <div style={{
-          fontSize: 13,
-          color: 'var(--ink)',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}>
-          {app.displayName}
+        <div
+          style={{
+            width: 28,
+            height: 28,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: 6,
+            background: iconData
+              ? 'transparent'
+              : 'color-mix(in oklch, var(--ink) 6%, transparent)',
+            color: 'var(--muted)',
+            fontSize: 11,
+            fontFamily: 'var(--font-mono)',
+            overflow: 'hidden',
+            flexShrink: 0,
+          }}
+        >
+          {iconData ? (
+            <img
+              src={iconData}
+              alt=""
+              style={{ width: 28, height: 28, objectFit: 'contain' }}
+            />
+          ) : (
+            (app.displayName || app.appKey).charAt(0).toUpperCase()
+          )}
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{
+            fontSize: 13,
+            color: 'var(--ink)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            {app.displayName}
+          </div>
+          <div style={{
+            fontSize: 11,
+            color: 'var(--muted)',
+            fontFamily: 'var(--font-mono)',
+            marginTop: 2,
+          }}>
+            {app.executableName ?? app.appKey} · {app.classificationStatus}
+          </div>
         </div>
         <div style={{
-          fontSize: 11,
-          color: 'var(--muted)',
+          fontSize: 11.5,
+          color: inherited ? 'var(--muted)' : presetColor(effectivePreset),
           fontFamily: 'var(--font-mono)',
-          marginTop: 2,
+          fontStyle: inherited ? 'italic' : 'normal',
         }}>
-          {app.executableName ?? app.appKey} · {app.classificationStatus}
+          {presetText}
         </div>
+        <div style={appmgmtChip(
+          true,
+          verdict === 'block' ? 'var(--danger)' : 'var(--ok)',
+        )}>
+          {verdict === 'block' ? 'Blocked' : 'Allowed'}
+        </div>
+        <span style={{
+          color: 'var(--faint)',
+          display: 'inline-block',
+          transform: expanded ? 'rotate(90deg)' : 'none',
+          transition: 'transform 140ms ease',
+        }}>
+          <Icons.chevron size={13} />
+        </span>
       </div>
-      <div style={{
-        fontSize: 11.5,
-        color: inherited ? 'var(--muted)' : presetColor(effectivePreset),
-        fontFamily: 'var(--font-mono)',
-        fontStyle: inherited ? 'italic' : 'normal',
-      }}>
-        {presetText}
-      </div>
-      <div style={appmgmtChip(
-        true,
-        verdict === 'block' ? 'var(--danger)' : 'var(--ok)',
-      )}>
-        {verdict === 'block' ? 'Blocked' : 'Allowed'}
-      </div>
-      <span style={{ color: 'var(--faint)' }}>
-        <Icons.chevron size={13} />
-      </span>
+
+      {/* expanded panel */}
+      {expanded && (
+        <div style={{
+          padding: '12px 16px 14px 54px',
+          background: 'color-mix(in oklch, var(--ink) 4%, transparent)',
+          borderTop: '1px solid var(--line)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          flexWrap: 'wrap',
+        }}>
+          <span style={{ ...labelStyle, marginRight: 2 }}>Rule</span>
+          {quickPresets.map((p) => {
+            const isActive =
+              p.id === 'inherit' ? inherited : appPreset === p.id;
+            const color =
+              p.id === 'inherit'
+                ? 'var(--muted)'
+                : p.id === 'always-allow'
+                ? 'var(--ok)'
+                : p.id === 'block-work'
+                ? 'var(--accent)'
+                : 'var(--danger)';
+            return (
+              <button
+                key={p.id}
+                title={p.hint}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (p.id === 'inherit') {
+                    onClearAppOverrides();
+                    return;
+                  }
+                  onApplyAppPreset(p.id);
+                }}
+                style={presetChip(isActive, color)}
+              >
+                {p.label}
+              </button>
+            );
+          })}
+          <button
+            title="Set different rules per profile"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenApp('edit-custom');
+            }}
+            style={{
+              ...presetChip(appPreset === 'custom', 'var(--muted)'),
+              borderStyle: 'dashed',
+            }}
+          >
+            Custom…
+          </button>
+          <div style={{ flex: 1 }} />
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenApp('edit');
+            }}
+            style={{
+              padding: '5px 10px',
+              borderRadius: 5,
+              border: '1px solid var(--line)',
+              background: 'transparent',
+              color: 'var(--muted)',
+              fontSize: 11.5,
+              cursor: 'pointer',
+              fontFamily: 'var(--font-sans)',
+            }}
+          >
+            Edit settings →
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1332,7 +1446,10 @@ export function AppsScreen() {
   const [pendingApps, setPendingApps] = useState<KnownApp[]>([]);
   const [pendingTargets, setPendingTargets] = useState<KnownBrowserTarget[]>([]);
   const [adding, setAdding] = useState(false);
-  const [drawerAppKey, setDrawerAppKey] = useState<string | null>(null);
+  const [openApp, setOpenApp] = useState<{
+    appKey: string;
+    mode: AppRowMode;
+  } | null>(null);
   const [drawerCategory, setDrawerCategory] = useState<{
     category: AppCategory;
     presetIntent?: 'custom';
@@ -1451,6 +1568,17 @@ export function AppsScreen() {
             decision: dec,
           });
         }
+      }
+      refresh();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const clearAppOverrides = async (appKey: string) => {
+    try {
+      for (const profile of profileNames) {
+        await api.deleteEnforcementProfileOverride(profile, 'app', appKey);
       }
       refresh();
     } catch (err) {
@@ -1608,7 +1736,9 @@ export function AppsScreen() {
               <PendingBanner
                 apps={pendingApps}
                 browserTargets={pendingTargets}
-                onOpenApp={(app) => setDrawerAppKey(app.appKey)}
+                onOpenApp={(app) =>
+                  setOpenApp({ appKey: app.appKey, mode: 'edit' })
+                }
                 onOpenBrowserTab={() => setTab('browser_targets')}
               />
               <div style={{
@@ -1655,10 +1785,11 @@ export function AppsScreen() {
                   emergencyBlockedCategories={emergencyBlockedCategories}
                   overrides={overrideMap}
                   onApplyPreset={(t, k, p) => applyPreset(t, k, p)}
-                  onOpenCategoryDrawer={(category, presetIntent) =>
-                    setDrawerCategory({ category, presetIntent })
+                  onClearAppOverrides={(appKey) => clearAppOverrides(appKey)}
+                  onOpenCategoryManager={() => setCategoryManagerOpen(true)}
+                  onOpenApp={(appKey, mode) =>
+                    setOpenApp({ appKey, mode })
                   }
-                  onOpenApp={(app) => setDrawerAppKey(app.appKey)}
                 />
               ))}
 
@@ -1692,6 +1823,59 @@ export function AppsScreen() {
                   </button>
                 </div>
               )}
+
+              {/* legend */}
+              <div style={{
+                marginTop: 24,
+                padding: '12px 16px',
+                border: '1px solid var(--line)',
+                borderRadius: 8,
+                background: 'var(--bg-raise)',
+                fontSize: 11.5,
+                color: 'var(--muted)',
+                fontFamily: 'var(--font-mono)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 14,
+                flexWrap: 'wrap',
+              }}>
+                <span style={{
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.12em',
+                  color: 'var(--faint)',
+                }}>
+                  Legend
+                </span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{
+                    width: 8, height: 8, borderRadius: 2,
+                    background: 'var(--accent)',
+                  }} />
+                  Block for work
+                </span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{
+                    width: 8, height: 8, borderRadius: 2,
+                    background: 'var(--danger)',
+                  }} />
+                  Always block
+                </span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{
+                    width: 8, height: 8, borderRadius: 2,
+                    background: 'var(--ok)',
+                  }} />
+                  Always allow
+                </span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{
+                    width: 8, height: 8, borderRadius: 2,
+                    background: 'var(--muted)',
+                  }} />
+                  Custom
+                </span>
+                <span>· click any row to edit per-profile.</span>
+              </div>
 
               <div style={{
                 marginTop: 24,
@@ -1827,27 +2011,28 @@ export function AppsScreen() {
         />
       )}
 
-      {drawerAppKey && (
+      {openApp && (
         <AppDrawer
-          app={apps.find((a) => a.appKey === drawerAppKey)!}
+          app={apps.find((a) => a.appKey === openApp.appKey)!}
           profiles={profiles}
           overrides={overrides}
           emergencyBlockedCategories={emergencyBlockedCategories}
           categories={categories}
-          onClose={() => setDrawerAppKey(null)}
+          initialPreset={openApp.mode === 'edit-custom' ? 'custom' : undefined}
+          onClose={() => setOpenApp(null)}
           onSetOverride={async (profileName, decision) => {
             try {
               if (decision == null) {
                 await api.deleteEnforcementProfileOverride(
                   profileName,
                   'app',
-                  drawerAppKey,
+                  openApp.appKey,
                 );
               } else {
                 await api.setEnforcementProfileOverride({
                   profileName,
                   subjectType: 'app',
-                  subjectKey: drawerAppKey,
+                  subjectKey: openApp.appKey,
                   decision,
                 });
               }
@@ -1863,11 +2048,11 @@ export function AppsScreen() {
                   await api.deleteEnforcementProfileOverride(
                     profileName,
                     'app',
-                    drawerAppKey,
+                    openApp.appKey,
                   );
                 }
               } else {
-                await applyPreset('app', drawerAppKey, preset);
+                await applyPreset('app', openApp.appKey, preset);
                 return;
               }
               refresh();

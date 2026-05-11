@@ -67,6 +67,7 @@ interface AppDrawerProps {
   profiles: EnforcementProfile[];
   overrides: EnforcementProfileOverride[];
   emergencyBlockedCategories: string[];
+  initialPreset?: DrawerPreset;
   onClose: () => void;
   onSetOverride: (
     profileName: string,
@@ -239,6 +240,7 @@ export function AppDrawer({
   profiles,
   overrides,
   emergencyBlockedCategories,
+  initialPreset,
   onClose,
   onSetOverride,
   onApplyPreset,
@@ -246,8 +248,13 @@ export function AppDrawer({
   categories,
 }: AppDrawerProps) {
   const detected = detectDrawerPreset(app, profiles, overrides);
-  const [preset, setPreset] = useState<DrawerPreset>(detected);
-  useEffect(() => setPreset(detected), [detected]);
+  const [preset, setPreset] = useState<DrawerPreset>(
+    initialPreset ?? detected,
+  );
+  useEffect(() => setPreset(initialPreset ?? detected), [
+    initialPreset,
+    detected,
+  ]);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
