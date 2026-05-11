@@ -809,56 +809,246 @@ function ActiveBlockRow({ block }: { block: TimeBlock }) {
   );
 }
 
+// Pressure: how much remaining work this task needs vs. days left to deadline.
+// Rough capacity = 8 hours / day (mirrors the design's tasksPressure).
+function tasksPressure(task: Task, blocks: TimeBlock[]): number {
+  if (task.deadline == null) return 0.05;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(task.deadline);
+  target.setHours(0, 0, 0, 0);
+  const dayDiff = Math.round(
+    (target.getTime() - today.getTime()) / 86_400_000,
+  );
+  const days = Math.max(0.25, dayDiff + 1);
+  const capMin = days * 8 * 60;
+  // remaining = estimatedMinutes minus consumed time on planned blocks
+  const consumedMs = blocks.reduce((acc, b) => {
+    if (b.status === 'completed') return acc + (b.endTime - b.startTime);
+    if (b.status === 'active' || b.status === 'paused') {
+      return acc + Math.max(0, Math.min(Date.now(), b.endTime) - b.startTime);
+    }
+    return acc;
+  }, 0);
+  const remaining = Math.max(
+    0,
+    (task.estimatedMinutes ?? 0) - Math.round(consumedMs / 60_000),
+  );
+  return Math.min(1.4, remaining / capMin);
+}
+
+function pressureLabel(p: number): string {
+  if (p < 0.15) return 'low';
+  if (p < 0.45) return 'med';
+  if (p < 0.85) return 'high';
+  if (p < 1.0) return 'crit';
+  return 'over';
+}
+
+function pressureColor(p: number): string {
+  if (p < 0.15) return 'oklch(0.70 0.07 150)';
+  if (p < 0.45) return 'oklch(0.72 0.06 90)';
+  if (p < 0.85) return 'oklch(0.72 0.10 75)';
+  if (p < 1.0) return 'oklch(0.65 0.16 35)';
+  return 'var(--danger)';
+}
+
+function PressureBar({ value }: { value: number }) {
+  const v = Math.min(1.05, Math.max(0.02, value));
+  const color = pressureColor(value);
+  return (
+    <span style={{
+      width: 56,
+      height: 4,
+      borderRadius: 2,
+      background: 'color-mix(in oklch, var(--ink) 8%, transparent)',
+      display: 'inline-block',
+      position: 'relative',
+      overflow: 'hidden',
+    }}>
+      <span style={{
+        position: 'absolute',
+        left: 0,
+        top: 0,
+        bottom: 0,
+        width: Math.min(1, v) * 100 + '%',
+        background: color,
+        borderRadius: 2,
+      }} />
+      {value > 1 && (
+        <span style={{
+          position: 'absolute',
+          right: -2,
+          top: -2,
+          bottom: -2,
+          width: 4,
+          background: 'var(--danger)',
+          borderRadius: 1,
+        }} />
+      )}
+    </span>
+  );
+}
+
+const ACTIVE_COLS =
+  '20px minmax(200px, 1fr) 110px 120px 140px 78px 28px 28px';
+
+function ActiveRowMenu({
+  hover,
+  onRemoveFromPlan,
+}: {
+  hover: boolean;
+  onRemoveFromPlan: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest('[data-row-menu]')) setOpen(false);
+    };
+    setTimeout(() => document.addEventListener('click', h), 0);
+    return () => document.removeEventListener('click', h);
+  }, [open]);
+  return (
+    <div
+      data-row-menu
+      style={{ position: 'relative', justifySelf: 'end' }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          background: 'transparent',
+          border: 'none',
+          color: 'var(--faint)',
+          cursor: 'pointer',
+          padding: 4,
+          borderRadius: 4,
+          opacity: hover || open ? 1 : 0.4,
+          fontFamily: 'var(--font-mono)',
+          fontSize: 16,
+          lineHeight: 1,
+        }}
+      >
+        ⋯
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute',
+          right: 0,
+          top: 'calc(100% + 4px)',
+          zIndex: 30,
+          background: 'var(--bg-raise)',
+          border: '1px solid var(--line)',
+          borderRadius: 6,
+          padding: 4,
+          minWidth: 180,
+          boxShadow: '0 12px 24px rgba(0,0,0,0.35)',
+        }}>
+          <div
+            onClick={() => {
+              onRemoveFromPlan();
+              setOpen(false);
+            }}
+            style={{
+              padding: '6px 10px',
+              fontSize: 12,
+              cursor: 'pointer',
+              borderRadius: 4,
+              color: 'var(--danger)',
+            }}
+          >
+            Remove from plan…
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ActiveTaskCard({
   task,
   group,
   blocks,
   onOpen,
+  onRemoveFromPlan,
 }: {
   task: Task;
   group: TaskGroup | undefined;
   blocks: TimeBlock[];
   onOpen: () => void;
+  onRemoveFromPlan: () => void;
 }) {
+  const [hover, setHover] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const totalMin = blocks.reduce(
+  const pressure = tasksPressure(task, blocks);
+  const overdue = task.deadline != null && task.deadline < Date.now();
+  const totalPlannedMin = blocks.reduce(
     (acc, b) => acc + Math.round((b.endTime - b.startTime) / 60_000),
     0,
   );
-  const overdue = task.deadline != null && task.deadline < Date.now();
+  const consumedMs = blocks.reduce((acc, b) => {
+    if (b.status === 'completed') return acc + (b.endTime - b.startTime);
+    if (b.status === 'active' || b.status === 'paused') {
+      return acc + Math.max(0, Math.min(Date.now(), b.endTime) - b.startTime);
+    }
+    return acc;
+  }, 0);
+  const remainingMin = Math.max(
+    0,
+    (task.estimatedMinutes ?? 0) - Math.round(consumedMs / 60_000),
+  );
+
   return (
     <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
-        border: '1px solid var(--line)',
-        borderRadius: 9,
-        background: 'var(--bg-raise)',
-        marginBottom: 10,
-        overflow: 'hidden',
+        background: hover || expanded ? 'var(--bg-raise)' : 'transparent',
+        borderBottom: '1px solid var(--line)',
+        transition: 'background 80ms',
       }}
     >
       <div
         onClick={onOpen}
         style={{
           display: 'grid',
-          gridTemplateColumns: 'minmax(220px, 1fr) 130px 110px 110px 80px 28px',
+          gridTemplateColumns: ACTIVE_COLS,
           alignItems: 'center',
           gap: 14,
           padding: '12px 14px',
           cursor: 'pointer',
         }}
       >
-        <div style={{ minWidth: 0 }}>
-          <div style={{
-            color: 'var(--ink)',
-            fontSize: 13.5,
-            fontWeight: 500,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}>
+        <span style={{
+          width: 3,
+          height: 28,
+          borderRadius: 2,
+          background: overdue ? 'var(--danger)' : pressureColor(pressure),
+          justifySelf: 'start',
+        }} />
+        <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div
+            title={task.name}
+            style={{
+              color: 'var(--ink)',
+              fontSize: 13.5,
+              fontWeight: 500,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              maxWidth: '100%',
+            }}
+          >
             {task.name}
           </div>
-          <div style={{ marginTop: 4 }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            overflow: 'hidden',
+            minWidth: 0,
+          }}>
             <GroupChip group={group} />
           </div>
         </div>
@@ -867,6 +1057,8 @@ function ActiveTaskCard({
           fontSize: 12,
           color: overdue ? 'var(--danger)' : 'var(--muted)',
           whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
         }}>
           {formatDeadline(task.deadline, Date.now())}
         </div>
@@ -876,7 +1068,7 @@ function ActiveTaskCard({
           color: 'var(--ink)',
           whiteSpace: 'nowrap',
         }}>
-          {formatDuration(totalMin)}
+          {formatDuration(remainingMin)}
           <span style={{
             color: 'var(--faint)',
             fontSize: 10.5,
@@ -886,11 +1078,22 @@ function ActiveTaskCard({
           </span>
         </div>
         <div style={{
-          fontFamily: 'var(--font-mono)',
-          fontSize: 11,
-          color: 'var(--muted)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          minWidth: 0,
         }}>
-          {blocks.length} {blocks.length === 1 ? 'block' : 'blocks'}
+          <PressureBar value={pressure} />
+          <span style={{
+            fontSize: 11,
+            color: 'var(--muted)',
+            fontFamily: 'var(--font-mono)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}>
+            {pressureLabel(pressure)}
+          </span>
         </div>
         <PriorityChip p={task.priority} />
         <button
@@ -912,29 +1115,26 @@ function ActiveTaskCard({
         >
           <Icons.chevronD size={13} />
         </button>
+        <ActiveRowMenu hover={hover} onRemoveFromPlan={onRemoveFromPlan} />
       </div>
       {expanded && (
-        <div
-          style={{
-            padding: '0 14px 14px 56px',
-            borderTop: '1px solid var(--line)',
-          }}
-        >
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'baseline',
-              justifyContent: 'space-between',
-              padding: '10px 0 6px',
-            }}
-          >
+        <div style={{
+          padding: '0 14px 14px 56px',
+          borderTop: '1px solid var(--line)',
+        }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            justifyContent: 'space-between',
+            padding: '10px 0 6px',
+          }}>
             <span style={labelStyle}>Planner blocks</span>
             <span style={{
               fontFamily: 'var(--font-mono)',
               fontSize: 11,
               color: 'var(--muted)',
             }}>
-              {blocks.length} blocks · {formatDuration(totalMin)}
+              {blocks.length} blocks · {formatDuration(totalPlannedMin)}
             </span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -964,6 +1164,9 @@ export function TasksScreen() {
   >(null);
   const [planModalTaskId, setPlanModalTaskId] = useState<number | null>(null);
   const [removeModalTaskId, setRemoveModalTaskId] = useState<number | null>(null);
+  const [activeSort, setActiveSort] = useState<
+    'pressure' | 'deadline' | 'priority' | 'next-block'
+  >('pressure');
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -993,6 +1196,23 @@ export function TasksScreen() {
     return map;
   }, [groups]);
 
+  const blocksByTaskId = useMemo(() => {
+    const map = new Map<number, TimeBlock[]>();
+    for (const b of scheduledBlocks) {
+      if (b.taskId == null) continue;
+      if (b.status !== 'scheduled' && b.status !== 'active' && b.status !== 'paused') {
+        continue;
+      }
+      const list = map.get(b.taskId) ?? [];
+      list.push(b);
+      map.set(b.taskId, list);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => a.startTime - b.startTime);
+    }
+    return map;
+  }, [scheduledBlocks]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     let out = tasks;
@@ -1003,15 +1223,62 @@ export function TasksScreen() {
       });
     }
     if (q) {
+      const ops: Record<string, string> = {};
+      const text: string[] = [];
+      for (const token of q.split(/\s+/)) {
+        const m = token.match(/^(\w+):(.+)$/);
+        if (m) ops[m[1]] = m[2];
+        else text.push(token);
+      }
       out = out.filter((t) => {
-        if (t.name.toLowerCase().includes(q)) return true;
-        const group = t.groupId ? groupById.get(t.groupId) : undefined;
-        if (group?.name.toLowerCase().includes(q)) return true;
-        return false;
+        if (ops.group) {
+          const g = t.groupId ? groupById.get(t.groupId) : undefined;
+          if (!g || g.name.toLowerCase() !== ops.group) return false;
+        }
+        if (ops.planned != null) {
+          const want = ops.planned === 'true' || ops.planned === '1';
+          const planned = (blocksByTaskId.get(t.id) ?? []).length > 0;
+          if (planned !== want) return false;
+        }
+        if (ops.p) {
+          const m2 = ops.p.match(/^(>=|<=|>|<|=)?(\d)$/);
+          if (m2) {
+            const op = m2[1] || '=';
+            const n = Number(m2[2]);
+            const ok =
+              op === '='
+                ? t.priority === n
+                : op === '>'
+                  ? t.priority > n
+                  : op === '<'
+                    ? t.priority < n
+                    : op === '>='
+                      ? t.priority >= n
+                      : op === '<='
+                        ? t.priority <= n
+                        : true;
+            if (!ok) return false;
+          }
+        }
+        if (ops.deadline === 'none' && t.deadline) return false;
+        if (
+          ops.deadline === 'overdue' &&
+          !(t.deadline && t.deadline < Date.now())
+        ) {
+          return false;
+        }
+        if (text.length) {
+          const groupName = t.groupId
+            ? groupById.get(t.groupId)?.name ?? ''
+            : '';
+          const hay = (t.name + ' ' + groupName).toLowerCase();
+          if (!text.every((w) => hay.includes(w))) return false;
+        }
+        return true;
       });
     }
     return out;
-  }, [tasks, query, groupFilter, groupById]);
+  }, [tasks, query, groupFilter, groupById, blocksByTaskId]);
 
   const create = async (task: NewTask) => {
     try {
@@ -1082,33 +1349,36 @@ export function TasksScreen() {
 
   const openTask = openTaskId ? tasks.find((t) => t.id === openTaskId) ?? null : null;
 
-  const blocksByTaskId = useMemo(() => {
-    const map = new Map<number, TimeBlock[]>();
-    for (const b of scheduledBlocks) {
-      if (b.taskId == null) continue;
-      if (b.status !== 'scheduled' && b.status !== 'active' && b.status !== 'paused') {
-        continue;
-      }
-      const list = map.get(b.taskId) ?? [];
-      list.push(b);
-      map.set(b.taskId, list);
-    }
-    for (const list of map.values()) {
-      list.sort((a, b) => a.startTime - b.startTime);
-    }
-    return map;
-  }, [scheduledBlocks]);
-
   const activeTasks = useMemo(() => {
-    return tasks
-      .filter((t) => (blocksByTaskId.get(t.id) ?? []).length > 0)
-      .sort((a, b) => {
+    const planned = tasks.filter(
+      (t) => (blocksByTaskId.get(t.id) ?? []).length > 0,
+    );
+    if (activeSort === 'pressure') {
+      planned.sort(
+        (a, b) =>
+          tasksPressure(b, blocksByTaskId.get(b.id) ?? []) -
+          tasksPressure(a, blocksByTaskId.get(a.id) ?? []),
+      );
+    } else if (activeSort === 'deadline') {
+      planned.sort((a, b) => {
         const ad = a.deadline ?? Number.POSITIVE_INFINITY;
         const bd = b.deadline ?? Number.POSITIVE_INFINITY;
-        if (ad !== bd) return ad - bd;
-        return b.priority - a.priority;
+        return ad - bd;
       });
-  }, [tasks, blocksByTaskId]);
+    } else if (activeSort === 'priority') {
+      planned.sort((a, b) => b.priority - a.priority);
+    } else if (activeSort === 'next-block') {
+      const nextOf = (t: Task) => {
+        const list = blocksByTaskId.get(t.id) ?? [];
+        if (list.length === 0) return Number.POSITIVE_INFINITY;
+        return list
+          .slice()
+          .sort((x, y) => x.startTime - y.startTime)[0].startTime;
+      };
+      planned.sort((a, b) => nextOf(a) - nextOf(b));
+    }
+    return planned;
+  }, [tasks, blocksByTaskId, activeSort]);
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -1184,7 +1454,7 @@ export function TasksScreen() {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search tasks…"
+                placeholder="Search… try group:work  planned:true  p:>=4  deadline:overdue"
                 style={{
                   flex: 1,
                   background: 'transparent',
@@ -1267,21 +1537,86 @@ export function TasksScreen() {
               </div>
             </div>
           ) : (
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: 'minmax(220px, 1fr) 130px 110px 110px 80px 28px',
-              gap: 14,
-              padding: '0 14px 8px',
-              borderBottom: '1px solid var(--line)',
-              marginBottom: 8,
-            }}>
-              <span style={labelStyle}>Task</span>
-              <span style={labelStyle}>Deadline</span>
-              <span style={labelStyle}>Planned</span>
-              <span style={labelStyle}>Blocks</span>
-              <span style={labelStyle}>Priority</span>
-              <span />
-            </div>
+            <>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 14,
+                paddingBottom: 10,
+              }}>
+                <span style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.14em',
+                  color: 'var(--ink)',
+                  fontWeight: 500,
+                }}>
+                  Scheduled
+                </span>
+                <span style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--faint)',
+                }}>
+                  {activeTasks.length}{' '}
+                  {activeTasks.length === 1 ? 'task' : 'tasks'}
+                </span>
+                <span style={{ flex: 1 }} />
+                <span style={{
+                  fontSize: 11,
+                  color: 'var(--faint)',
+                  fontFamily: 'var(--font-mono)',
+                }}>
+                  Sort
+                </span>
+                <select
+                  value={activeSort}
+                  onChange={(e) =>
+                    setActiveSort(
+                      e.target.value as
+                        | 'pressure'
+                        | 'deadline'
+                        | 'priority'
+                        | 'next-block',
+                    )
+                  }
+                  style={{
+                    background: 'var(--bg)',
+                    border: '1px solid var(--line)',
+                    borderRadius: 6,
+                    color: 'var(--ink)',
+                    fontSize: 12.5,
+                    padding: '6px 10px',
+                    fontFamily: 'var(--font-sans)',
+                    outline: 'none',
+                  }}
+                >
+                  <option value="pressure">Pressure</option>
+                  <option value="deadline">Deadline</option>
+                  <option value="priority">Priority</option>
+                  <option value="next-block">Next block</option>
+                </select>
+              </div>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: ACTIVE_COLS,
+                alignItems: 'center',
+                gap: 14,
+                padding: '8px 14px',
+                borderTop: '1px solid var(--line)',
+                borderBottom: '1px solid var(--line)',
+              }}>
+                <span />
+                <span style={labelStyle}>Task</span>
+                <span style={labelStyle}>Deadline</span>
+                <span style={labelStyle}>Remaining</span>
+                <span style={labelStyle}>Pressure</span>
+                <span style={labelStyle}>Priority</span>
+                <span />
+                <span />
+              </div>
+            </>
           )}
           {activeTasks.map((t) => (
             <ActiveTaskCard
@@ -1290,6 +1625,7 @@ export function TasksScreen() {
               group={t.groupId ? groupById.get(t.groupId) : undefined}
               blocks={blocksByTaskId.get(t.id) ?? []}
               onOpen={() => setOpenTaskId(t.id)}
+              onRemoveFromPlan={() => setRemoveModalTaskId(t.id)}
             />
           ))}
         </div>

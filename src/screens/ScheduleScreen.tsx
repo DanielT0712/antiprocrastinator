@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { api } from '../api';
@@ -640,6 +641,137 @@ function HourLines(): ReactNode {
   return out;
 }
 
+const SCHED_TEMPLATES = [
+  {
+    id: 'maker',
+    name: 'Maker week',
+    desc: 'No meetings before 13:00 · deep windows 09–12 · PR review 17:00.',
+  },
+  {
+    id: 'manager',
+    name: 'Manager week',
+    desc: '1:1s Tue/Thu · standup daily 09:00 · lunch held 12:00–12:45.',
+  },
+  {
+    id: 'thesis',
+    name: 'Thesis sprint',
+    desc: 'Two 2h deep blocks daily · lit-review only · gym moved to 19:00.',
+  },
+  {
+    id: 'recover',
+    name: 'Recovery',
+    desc: 'No deep work · max 3h task time/day · long lunch · hard stop 18:00.',
+  },
+];
+
+function TemplatesButton() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          padding: '7px 12px',
+          background: 'var(--bg-raise)',
+          border: '1px solid var(--line)',
+          borderRadius: 6,
+          color: 'var(--ink)',
+          fontSize: 12.5,
+          cursor: 'pointer',
+          fontFamily: 'var(--font-sans)',
+        }}
+      >
+        Templates
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute',
+          top: 'calc(100% + 6px)',
+          right: 0,
+          width: 320,
+          zIndex: 50,
+          background: 'var(--bg-raise)',
+          border: '1px solid var(--line)',
+          borderRadius: 8,
+          boxShadow: '0 16px 32px rgba(0,0,0,0.45)',
+          overflow: 'hidden',
+        }}>
+          <div style={{
+            padding: '10px 14px',
+            borderBottom: '1px solid var(--line)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10.5,
+            textTransform: 'uppercase',
+            letterSpacing: '0.13em',
+            color: 'var(--faint)',
+          }}>
+            Apply weekly template
+          </div>
+          <div style={{ padding: '6px 0' }}>
+            {SCHED_TEMPLATES.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setOpen(false)}
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '10px 14px',
+                  background: 'transparent',
+                  border: 'none',
+                  color: 'var(--ink)',
+                  cursor: 'pointer',
+                  fontFamily: 'var(--font-sans)',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = 'var(--ink-soft)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'transparent';
+                }}
+              >
+                <div style={{ fontSize: 13, color: 'var(--ink)' }}>{t.name}</div>
+                <div style={{
+                  fontSize: 11.5,
+                  color: 'var(--muted)',
+                  marginTop: 3,
+                  lineHeight: 1.4,
+                }}>
+                  {t.desc}
+                </div>
+              </button>
+            ))}
+          </div>
+          <div style={{
+            padding: '8px 14px',
+            borderTop: '1px solid var(--line)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10.5,
+            color: 'var(--faint)',
+            display: 'flex',
+            justifyContent: 'space-between',
+          }}>
+            <span>Edit templates…</span>
+            <span>Save current week as template</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 type ViewMode = 'day' | '5d' | 'week';
 
 const VIEW_DAYS: Record<ViewMode, number> = {
@@ -995,6 +1127,7 @@ export function ScheduleScreen() {
                 </button>
               ))}
             </div>
+            <TemplatesButton />
             <button
               onClick={() => setShowHistory((v) => !v)}
               style={{
@@ -1010,12 +1143,12 @@ export function ScheduleScreen() {
                 gap: 5,
               }}
             >
-              {showHistory ? 'Hide' : 'Show'} replan log
+              {showHistory ? 'Hide log' : 'Replan log'}
             </button>
             <button
               onClick={() => setAdding(true)}
               style={{
-                padding: '7px 14px',
+                padding: '7px 12px',
                 background: 'var(--bg-raise)',
                 border: '1px solid var(--line)',
                 borderRadius: 6,
