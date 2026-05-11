@@ -365,6 +365,23 @@ fn run_guard_helper(config: HelperConfig) -> Result<(), String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| config.main_executable.clone());
 
+            if is_development_binary(&executable) {
+                // The supervised binary lives in `cargo`'s build output dir
+                // (target/debug or target/release). It was started by
+                // `tauri dev` or `cargo run`, so its death means the
+                // developer Ctrl+C'd the dev session — not that the user
+                // tried to escape the guard. Stop polling and let the
+                // helper exit cleanly. Mode stays Enforced so the next
+                // real launch resumes supervision automatically.
+                state.helper_pid = None;
+                write_supervisor_state(&config.identifier, &state)?;
+                log::info!(
+                    "guard helper exiting: supervised binary is a development build ({})",
+                    executable.display()
+                );
+                return Ok(());
+            }
+
             if executable.exists() {
                 spawn_process(&executable, &[])?;
                 state.last_launch_at_epoch_secs = Some(now);
@@ -518,6 +535,21 @@ fn spawn_process(executable: &Path, args: &[OsString]) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+/// Heuristic: the supervised binary belongs to a developer build when it
+/// lives under cargo's `target/` directory. We never respawn those because
+/// they are launched by `tauri dev` / `cargo run` and dying simply means
+/// the developer stopped the dev session (their Vite server is also gone).
+/// Code itself is identical between debug and release; only the file path
+/// of the supervised binary changes between dev workflows and packaged
+/// installs.
+fn is_development_binary(executable: &Path) -> bool {
+    let display = executable.to_string_lossy();
+    display.contains("/target/debug/")
+        || display.contains("/target/release/")
+        || display.contains("\\target\\debug\\")
+        || display.contains("\\target\\release\\")
 }
 
 fn helper_args(identifier: &str, main_executable: &Path) -> Vec<OsString> {
