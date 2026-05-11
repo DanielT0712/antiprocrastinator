@@ -147,73 +147,6 @@ function detectDrawerPreset(
   return 'custom';
 }
 
-function PresetOption({
-  label,
-  hint,
-  selected,
-  onClick,
-}: {
-  label: string;
-  hint: string;
-  selected: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: 11,
-        padding: '11px 13px',
-        background: selected ? 'var(--accent-soft)' : 'transparent',
-        border: '1px solid ' + (selected ? 'var(--accent)' : 'var(--line)'),
-        borderRadius: 7,
-        textAlign: 'left',
-        cursor: 'pointer',
-        fontFamily: 'var(--font-sans)',
-        color: 'var(--ink)',
-      }}
-    >
-      <span style={{
-        marginTop: 2,
-        width: 14,
-        height: 14,
-        borderRadius: '50%',
-        border:
-          '1.5px solid ' + (selected ? 'var(--accent)' : 'var(--line)'),
-        display: 'grid',
-        placeItems: 'center',
-        flexShrink: 0,
-      }}>
-        {selected && (
-          <span style={{
-            width: 6,
-            height: 6,
-            borderRadius: '50%',
-            background: 'var(--accent)',
-          }} />
-        )}
-      </span>
-      <div style={{ minWidth: 0 }}>
-        <div style={{
-          fontSize: 13,
-          color: 'var(--ink)',
-          fontWeight: selected ? 500 : 400,
-        }}>
-          {label}
-        </div>
-        <div style={{
-          fontSize: 11.5,
-          color: 'var(--muted)',
-          marginTop: 2,
-        }}>
-          {hint}
-        </div>
-      </div>
-    </button>
-  );
-}
 
 function AllowBlockToggle({
   value,
@@ -334,6 +267,26 @@ export function AppDrawer({
     await onApplyPreset(p);
   };
 
+  // Description text per profile (matches design copy).
+  const profileDesc = (name: string): string => {
+    switch (name) {
+      case 'rest':
+        return 'No work enforcement.';
+      case 'work':
+        return 'Standard work blocking.';
+      case 'deep_work':
+        return 'Inherits from Work, plus stricter rules.';
+      case 'emergency':
+        return 'Emergency mode — most apps blocked.';
+      default:
+        return '';
+    }
+  };
+
+  const isRunning =
+    app.lastSeenRunningAt != null &&
+    Date.now() - app.lastSeenRunningAt < 60_000;
+
   return (
     <div
       onClick={onClose}
@@ -341,81 +294,86 @@ export function AppDrawer({
         position: 'fixed',
         inset: 0,
         zIndex: 70,
-        background: 'rgba(0,0,0,0.38)',
-        display: 'flex',
-        justifyContent: 'flex-end',
+        background: 'rgba(0,0,0,0.55)',
+        display: 'grid',
+        placeItems: 'center',
         animation: 'ap-fade 150ms ease-out',
       }}
     >
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: 520,
-          height: '100%',
-          background: 'var(--bg)',
-          borderLeft: '1px solid var(--line)',
+          width: 500,
+          maxHeight: '88vh',
+          background: 'var(--bg-raise)',
+          border: '1px solid var(--line)',
+          borderRadius: 12,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+          overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
         }}
       >
+        {/* header */}
         <div style={{
-          padding: '22px 24px 18px',
+          padding: '20px 24px 16px',
           borderBottom: '1px solid var(--line)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 14,
         }}>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            marginBottom: 14,
-          }}>
-            <div style={labelStyle}>
-              {app.effectiveCategory ?? 'Uncategorized'}
+          <AppGlyph name={app.displayName} size={36} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontFamily: 'var(--font-display)',
+              fontSize: 20,
+              color: 'var(--ink)',
+              letterSpacing: '-0.01em',
+            }}>
+              {app.displayName}
             </div>
-            <button
-              onClick={onClose}
-              style={{
-                background: 'transparent',
-                border: 'none',
-                color: 'var(--muted)',
-                cursor: 'pointer',
-                padding: 4,
-              }}
-            >
-              <Icons.x size={16} />
-            </button>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-            <AppGlyph name={app.displayName} size={44} />
-            <div>
-              <div style={{
-                fontFamily: 'var(--font-display)',
-                fontSize: 22,
-                color: 'var(--ink)',
-                letterSpacing: '-0.01em',
-              }}>
-                {app.displayName}
-              </div>
-              <div style={{
-                fontSize: 12,
-                color: 'var(--muted)',
-                marginTop: 3,
-                fontFamily: 'var(--font-mono)',
-              }}>
-                {app.executableName ?? app.appKey} · {app.classificationStatus}
-                {app.lastSeenRunningAt && (
-                  <>
-                    {' '}· last seen{' '}
-                    {new Date(app.lastSeenRunningAt).toLocaleDateString()}
-                  </>
-                )}
-              </div>
+            <div style={{
+              fontSize: 11.5,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+              marginTop: 2,
+            }}>
+              {isRunning ? (
+                <span style={{ color: 'var(--accent-ink)' }}>● Running now</span>
+              ) : (
+                'Not running'
+              )}
             </div>
           </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--muted)',
+              cursor: 'pointer',
+              padding: 4,
+            }}
+            aria-label="Close"
+          >
+            <Icons.x size={16} />
+          </button>
         </div>
 
-        <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 80px' }}>
-          <div style={{ marginBottom: 22 }}>
-            <div style={{ ...labelStyle, marginBottom: 10 }}>Category</div>
+        {/* body */}
+        <div style={{
+          flex: 1,
+          overflow: 'auto',
+          padding: '18px 24px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 18,
+        }}>
+          {/* category */}
+          <div>
+            <label style={{ ...labelStyle, marginBottom: 7, display: 'block' }}>
+              Category
+            </label>
             <select
               value={app.categoryOverride ?? app.effectiveCategory ?? ''}
               onChange={(e) =>
@@ -434,58 +392,61 @@ export function AppDrawer({
             </select>
           </div>
 
-          {preset !== 'custom' ? (
-            <div style={{ marginBottom: 22 }}>
-              <div style={{ ...labelStyle, marginBottom: 10 }}>
-                Rule for this app
-              </div>
-              <div style={{ display: 'grid', gap: 8 }}>
-                {DRAWER_PRESETS.map((p) => (
-                  <PresetOption
+          {/* rule */}
+          <div>
+            <label style={{ ...labelStyle, marginBottom: 7, display: 'block' }}>
+              Rule
+            </label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {DRAWER_PRESETS.filter((p) => p.id !== 'inherit').map((p) => {
+                const isActive = preset === p.id;
+                const color =
+                  p.id === 'always-allow'
+                    ? 'var(--ok)'
+                    : p.id === 'block-work'
+                    ? 'var(--accent)'
+                    : p.id === 'always-block'
+                    ? 'var(--danger)'
+                    : 'var(--muted)';
+                return (
+                  <button
                     key={p.id}
-                    label={p.label}
-                    hint={p.hint}
-                    selected={preset === p.id}
+                    type="button"
+                    title={p.hint}
                     onClick={() => choosePreset(p.id)}
-                  />
-                ))}
-              </div>
+                    style={{
+                      flex: 1,
+                      padding: '9px 6px',
+                      borderRadius: 7,
+                      textAlign: 'center',
+                      border:
+                        '1px solid ' +
+                        (isActive ? color : 'var(--line)'),
+                      background: isActive
+                        ? `color-mix(in oklch, ${color} 14%, transparent)`
+                        : 'var(--bg)',
+                      color: isActive ? color : 'var(--muted)',
+                      fontSize: 12,
+                      fontFamily: 'var(--font-sans)',
+                      fontWeight: isActive ? 500 : 400,
+                      cursor: 'pointer',
+                      transition: 'border-color 80ms, background 80ms, color 80ms',
+                    }}
+                  >
+                    {p.id === 'custom' ? 'Custom' : p.label}
+                  </button>
+                );
+              })}
             </div>
-          ) : (
-            <div style={{
-              marginBottom: 14,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 10,
-            }}>
-              <div style={labelStyle}>Custom rule</div>
-              <button
-                onClick={() => choosePreset('inherit')}
-                style={{
-                  padding: '5px 10px',
-                  borderRadius: 5,
-                  border: '1px solid var(--line)',
-                  background: 'transparent',
-                  color: 'var(--muted)',
-                  fontSize: 11.5,
-                  cursor: 'pointer',
-                  fontFamily: 'var(--font-sans)',
-                }}
-              >
-                Use a preset instead…
-              </button>
-            </div>
-          )}
+          </div>
 
-          <div style={{ marginBottom: 22 }}>
-            <div style={{ ...labelStyle, marginBottom: 10 }}>
-              Per-profile behavior
-            </div>
+          {/* per-profile matrix — only when Custom */}
+          {preset === 'custom' && (
             <div style={{
               border: '1px solid var(--line)',
               borderRadius: 8,
-              background: 'var(--bg-raise)',
+              background: 'var(--bg)',
+              overflow: 'hidden',
             }}>
               {profiles.map((p, i) => {
                 const direct = overrides.find(
@@ -510,78 +471,101 @@ export function AppDrawer({
                   <div
                     key={p.name}
                     style={{
-                      display: 'grid',
-                      gridTemplateColumns: '1fr auto',
+                      display: 'flex',
                       alignItems: 'center',
-                      padding: '13px 14px',
+                      padding: '11px 13px',
                       borderBottom:
                         i < profiles.length - 1
                           ? '1px solid var(--line)'
                           : 'none',
                     }}
                   >
-                    <div>
-                      <div style={{ fontSize: 13, color: 'var(--ink)' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        fontSize: 13,
+                        color: 'var(--ink)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 7,
+                      }}>
                         {p.name === 'deep_work'
                           ? 'Deep Work'
                           : p.name.charAt(0).toUpperCase() + p.name.slice(1)}
+                        {p.parentName && (
+                          <span style={{
+                            fontSize: 10.5,
+                            color: 'var(--faint)',
+                            fontFamily: 'var(--font-mono)',
+                          }}>
+                            ← {p.parentName}
+                          </span>
+                        )}
                       </div>
                       <div style={{
                         fontSize: 11,
                         color: 'var(--muted)',
-                        marginTop: 2,
                         fontFamily: 'var(--font-mono)',
+                        marginTop: 2,
                       }}>
-                        {p.parentName && (
-                          <span>inherits from {p.parentName} · </span>
-                        )}
-                        {direct
-                          ? `override: ${direct.decision}`
-                          : 'follows category'}
+                        {profileDesc(p.name)}
                       </div>
                     </div>
-                    {preset === 'custom' ? (
-                      <AllowBlockToggle
-                        value={resolved}
-                        onChange={(v) => onSetOverride(p.name, v)}
-                        blocked={blocked}
-                        blockedReason={
-                          blocked
-                            ? `${app.effectiveCategory} apps cannot be allowed during emergency.`
-                            : undefined
-                        }
-                      />
-                    ) : (
-                      <div style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 6,
-                        padding: '4px 9px',
-                        borderRadius: 5,
-                        border:
-                          '1px solid ' +
-                          (resolved === 'block'
-                            ? 'var(--danger)'
-                            : 'var(--ok)'),
-                        background:
-                          resolved === 'block'
-                            ? 'color-mix(in oklch, var(--danger) 16%, transparent)'
-                            : 'color-mix(in oklch, var(--ok) 16%, transparent)',
-                        color:
-                          resolved === 'block' ? 'var(--danger)' : 'var(--ok)',
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 11,
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.08em',
-                      }}>
-                        {resolved === 'block' ? '✕ Blocked' : '✓ Allowed'}
-                      </div>
-                    )}
+                    <AllowBlockToggle
+                      value={resolved}
+                      onChange={(v) => onSetOverride(p.name, v)}
+                      blocked={blocked}
+                      blockedReason={
+                        blocked
+                          ? `${app.effectiveCategory} apps cannot be allowed during emergency.`
+                          : undefined
+                      }
+                    />
                   </div>
                 );
               })}
             </div>
-          </div>
+          )}
+        </div>
+
+        {/* footer */}
+        <div style={{
+          padding: '14px 24px',
+          borderTop: '1px solid var(--line)',
+          display: 'flex',
+          justifyContent: 'flex-end',
+          gap: 8,
+        }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '8px 14px',
+              background: 'transparent',
+              color: 'var(--ink)',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              fontSize: 12.5,
+              cursor: 'pointer',
+              fontFamily: 'var(--font-sans)',
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '8px 14px',
+              background: 'var(--ink)',
+              color: 'var(--bg)',
+              border: 'none',
+              borderRadius: 6,
+              fontSize: 12.5,
+              fontWeight: 500,
+              cursor: 'pointer',
+              fontFamily: 'var(--font-sans)',
+            }}
+          >
+            Save changes
+          </button>
         </div>
       </div>
     </div>
@@ -1409,6 +1393,21 @@ export function CategoryDrawer({
     return 'allow';
   }
 
+  const profileDesc = (name: string): string => {
+    switch (name) {
+      case 'rest':
+        return 'No work enforcement.';
+      case 'work':
+        return 'Standard work blocking.';
+      case 'deep_work':
+        return 'Inherits from Work, plus stricter rules.';
+      case 'emergency':
+        return 'Emergency mode — most apps blocked.';
+      default:
+        return '';
+    }
+  };
+
   return (
     <div
       onClick={onClose}
@@ -1416,222 +1415,215 @@ export function CategoryDrawer({
         position: 'fixed',
         inset: 0,
         zIndex: 70,
-        background: 'rgba(0,0,0,0.38)',
-        display: 'flex',
-        justifyContent: 'flex-end',
+        background: 'rgba(0,0,0,0.55)',
+        display: 'grid',
+        placeItems: 'center',
         animation: 'ap-fade 150ms ease-out',
       }}
     >
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: 520,
-          height: '100%',
-          background: 'var(--bg)',
-          borderLeft: '1px solid var(--line)',
+          width: 500,
+          maxHeight: '88vh',
+          background: 'var(--bg-raise)',
+          border: '1px solid var(--line)',
+          borderRadius: 12,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+          overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
         }}
       >
         {/* header */}
         <div style={{
-          padding: '22px 24px 18px',
+          padding: '20px 24px 16px',
           borderBottom: '1px solid var(--line)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 14,
         }}>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            marginBottom: 14,
-          }}>
-            <div style={labelStyle}>Category</div>
-            <button
-              onClick={onClose}
-              style={{
-                background: 'transparent',
-                border: 'none',
-                color: 'var(--muted)',
-                cursor: 'pointer',
-                padding: 4,
-              }}
-              aria-label="Close"
-            >
-              <Icons.x size={16} />
-            </button>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontFamily: 'var(--font-display)',
+              fontSize: 20,
+              color: 'var(--ink)',
+              letterSpacing: '-0.01em',
+            }}>
+              {category.name}
+            </div>
+            <div style={{
+              fontSize: 11.5,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+              marginTop: 2,
+            }}>
+              Applies to every app in this category.
+            </div>
           </div>
-          <div style={{
-            fontFamily: 'var(--font-display)',
-            fontSize: 22,
-            color: 'var(--ink)',
-            letterSpacing: '-0.01em',
-          }}>
-            {category.name}
-          </div>
-          <div style={{
-            fontSize: 12,
-            color: 'var(--muted)',
-            marginTop: 4,
-            fontFamily: 'var(--font-mono)',
-          }}>
-            Applies to every app tagged in this category.
-          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--muted)',
+              cursor: 'pointer',
+              padding: 4,
+            }}
+            aria-label="Close"
+          >
+            <Icons.x size={16} />
+          </button>
         </div>
 
         {/* body */}
-        <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 80px' }}>
-          {preset !== 'custom' ? (
-            <div style={{ marginBottom: 22 }}>
-              <div style={{ ...labelStyle, marginBottom: 10 }}>
-                Rule for this category
-              </div>
-              <div style={{ display: 'grid', gap: 8 }}>
-                {DRAWER_PRESETS.filter((p) => p.id !== 'inherit').map((p) => {
-                  const disabled = hardLocked && p.id !== 'always-block';
-                  return (
-                    <PresetOption
-                      key={p.id}
-                      label={p.label}
-                      hint={
-                        disabled
-                          ? 'Emergency profile keeps this category blocked.'
-                          : p.hint
-                      }
-                      selected={preset === p.id}
-                      onClick={() => {
-                        if (disabled) return;
-                        choosePreset(p.id);
-                      }}
-                    />
-                  );
-                })}
-                <PresetOption
-                  label="Clear all overrides"
-                  hint="Stop enforcing any per-profile rule for this category."
-                  selected={preset === 'inherit'}
-                  onClick={() => choosePreset('inherit')}
-                />
-              </div>
+        <div style={{
+          flex: 1,
+          overflow: 'auto',
+          padding: '18px 24px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 18,
+        }}>
+          {/* rule */}
+          <div>
+            <label style={{ ...labelStyle, marginBottom: 7, display: 'block' }}>
+              Rule
+            </label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {DRAWER_PRESETS.filter((p) => p.id !== 'inherit').map((p) => {
+                const disabled = hardLocked && p.id !== 'always-block';
+                const isActive = preset === p.id;
+                const color =
+                  p.id === 'always-allow'
+                    ? 'var(--ok)'
+                    : p.id === 'block-work'
+                    ? 'var(--accent)'
+                    : p.id === 'always-block'
+                    ? 'var(--danger)'
+                    : 'var(--muted)';
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    title={
+                      disabled
+                        ? 'Emergency profile keeps this category blocked.'
+                        : p.hint
+                    }
+                    onClick={() => {
+                      if (disabled) return;
+                      choosePreset(p.id);
+                    }}
+                    disabled={disabled}
+                    style={{
+                      flex: 1,
+                      padding: '9px 6px',
+                      borderRadius: 7,
+                      textAlign: 'center',
+                      border:
+                        '1px solid ' +
+                        (isActive ? color : 'var(--line)'),
+                      background: isActive
+                        ? `color-mix(in oklch, ${color} 14%, transparent)`
+                        : 'var(--bg)',
+                      color: isActive ? color : 'var(--muted)',
+                      fontSize: 12,
+                      fontFamily: 'var(--font-sans)',
+                      fontWeight: isActive ? 500 : 400,
+                      cursor: disabled ? 'not-allowed' : 'pointer',
+                      opacity: disabled ? 0.4 : 1,
+                      transition:
+                        'border-color 80ms, background 80ms, color 80ms',
+                    }}
+                  >
+                    {p.id === 'custom' ? 'Custom' : p.label}
+                  </button>
+                );
+              })}
             </div>
-          ) : (
-            <div style={{
-              marginBottom: 14,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 10,
-            }}>
-              <div style={labelStyle}>Custom rule</div>
-              <button
-                onClick={() => choosePreset('inherit')}
-                style={{
-                  padding: '5px 10px',
-                  borderRadius: 5,
-                  border: '1px solid var(--line)',
-                  background: 'transparent',
-                  color: 'var(--muted)',
-                  fontSize: 11.5,
-                  cursor: 'pointer',
-                  fontFamily: 'var(--font-sans)',
-                }}
-              >
-                Use a preset instead…
-              </button>
-            </div>
-          )}
+          </div>
 
-          <div style={{ marginBottom: 22 }}>
-            <div style={{ ...labelStyle, marginBottom: 10 }}>
-              Per-profile behavior
-            </div>
+          {/* per-profile matrix — only when Custom */}
+          {preset === 'custom' && (
             <div style={{
               border: '1px solid var(--line)',
               borderRadius: 8,
-              background: 'var(--bg-raise)',
+              background: 'var(--bg)',
+              overflow: 'hidden',
             }}>
               {profiles.map((p, i) => {
                 const blocked = hardLocked && p.name === 'emergency';
                 const value = resolved(p.name);
-                const isCustom = preset === 'custom';
                 const labelDisplay =
                   p.name === 'deep_work'
                     ? 'Deep Work'
                     : p.name.charAt(0).toUpperCase() + p.name.slice(1);
                 return (
-                  <div key={p.name} style={{
-                    display: 'grid',
-                    gridTemplateColumns: '1fr auto',
-                    alignItems: 'center',
-                    padding: '13px 14px',
-                    borderBottom:
-                      i < profiles.length - 1
-                        ? '1px solid var(--line)'
-                        : 'none',
-                  }}>
-                    <div>
-                      <div style={{ fontSize: 13, color: 'var(--ink)' }}>
+                  <div
+                    key={p.name}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      padding: '11px 13px',
+                      borderBottom:
+                        i < profiles.length - 1
+                          ? '1px solid var(--line)'
+                          : 'none',
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        fontSize: 13,
+                        color: 'var(--ink)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 7,
+                      }}>
                         {labelDisplay}
+                        {p.parentName && (
+                          <span style={{
+                            fontSize: 10.5,
+                            color: 'var(--faint)',
+                            fontFamily: 'var(--font-mono)',
+                          }}>
+                            ← {p.parentName}
+                          </span>
+                        )}
                       </div>
                       <div style={{
                         fontSize: 11,
                         color: 'var(--muted)',
-                        marginTop: 2,
                         fontFamily: 'var(--font-mono)',
+                        marginTop: 2,
                       }}>
-                        {p.parentName && (
-                          <span>inherits from {p.parentName} · </span>
-                        )}
-                        {isCustom ? 'per-profile rule' : 'auto from preset'}
+                        {profileDesc(p.name)}
                       </div>
                     </div>
-                    {isCustom ? (
-                      <AllowBlockToggle
-                        value={value}
-                        onChange={(v) => onSetOverride(p.name, v)}
-                        blocked={blocked}
-                        blockedReason={
-                          blocked
-                            ? `${category.name} stays blocked during emergency.`
-                            : undefined
-                        }
-                      />
-                    ) : (
-                      <div style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 6,
-                        padding: '4px 9px',
-                        borderRadius: 5,
-                        border:
-                          '1px solid ' +
-                          (value === 'block' ? 'var(--danger)' : 'var(--ok)'),
-                        background:
-                          value === 'block'
-                            ? 'color-mix(in oklch, var(--danger) 16%, transparent)'
-                            : 'color-mix(in oklch, var(--ok) 16%, transparent)',
-                        color: value === 'block' ? 'var(--danger)' : 'var(--ok)',
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 11,
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.08em',
-                      }}>
-                        {value === 'block' ? '✕ Blocked' : '✓ Allowed'}
-                      </div>
-                    )}
+                    <AllowBlockToggle
+                      value={value}
+                      onChange={(v) => onSetOverride(p.name, v)}
+                      blocked={blocked}
+                      blockedReason={
+                        blocked
+                          ? `${category.name} stays blocked during emergency.`
+                          : undefined
+                      }
+                    />
                   </div>
                 );
               })}
             </div>
-          </div>
+          )}
         </div>
 
         {/* footer */}
         <div style={{
-          borderTop: '1px solid var(--line)',
           padding: '14px 24px',
+          borderTop: '1px solid var(--line)',
           display: 'flex',
           justifyContent: 'flex-end',
-          gap: 10,
-          background: 'var(--bg)',
+          gap: 8,
         }}>
           <button
             onClick={onClose}
@@ -1646,7 +1638,23 @@ export function CategoryDrawer({
               fontFamily: 'var(--font-sans)',
             }}
           >
-            Done
+            Cancel
+          </button>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '8px 14px',
+              background: 'var(--ink)',
+              color: 'var(--bg)',
+              border: 'none',
+              borderRadius: 6,
+              fontSize: 12.5,
+              fontWeight: 500,
+              cursor: 'pointer',
+              fontFamily: 'var(--font-sans)',
+            }}
+          >
+            Save changes
           </button>
         </div>
       </div>
