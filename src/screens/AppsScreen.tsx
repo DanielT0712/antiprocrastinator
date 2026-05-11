@@ -470,6 +470,7 @@ interface CategorySectionProps {
   ) => void;
   onClearAppOverrides: (appKey: string) => void;
   onOpenCategoryManager: () => void;
+  onOpenCategoryDrawer: (category: AppCategory) => void;
   onOpenApp: (appKey: string, mode: AppRowMode) => void;
 }
 
@@ -500,6 +501,7 @@ function CategorySection({
   onApplyPreset,
   onClearAppOverrides,
   onOpenCategoryManager,
+  onOpenCategoryDrawer,
   onOpenApp,
 }: CategorySectionProps) {
   const [open, setOpen] = useState(false);
@@ -645,6 +647,10 @@ function CategorySection({
                     key={p.id}
                     onClick={() => {
                       if (blockedByEmergency) return;
+                      if (p.id === 'custom') {
+                        onOpenCategoryDrawer(category);
+                        return;
+                      }
                       onApplyPreset('category', category.name, p.id);
                     }}
                     title={
@@ -2303,6 +2309,9 @@ export function AppsScreen() {
                   onApplyPreset={(t, k, p) => applyPreset(t, k, p)}
                   onClearAppOverrides={(appKey) => clearAppOverrides(appKey)}
                   onOpenCategoryManager={() => setCategoryManagerOpen(true)}
+                  onOpenCategoryDrawer={(c) =>
+                    setDrawerCategory({ category: c })
+                  }
                   onOpenApp={(appKey, mode) =>
                     setOpenApp({ appKey, mode })
                   }

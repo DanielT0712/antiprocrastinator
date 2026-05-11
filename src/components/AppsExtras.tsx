@@ -2,6 +2,7 @@ import {
   type CSSProperties,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { api } from '../api';
@@ -34,32 +35,132 @@ const inputStyle: CSSProperties = {
   fontFamily: 'var(--font-sans)',
 };
 
+// Custom styled dropdown (matches the design's StyledSelect — no native
+// <select>, hover states, animated open/close).
+export function StyledSelect({
+  value,
+  onChange,
+  options,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+
+  const current = options.find((o) => o.value === value);
+
+  return (
+    <div ref={ref} style={{ position: 'relative', flex: 1 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '9px 11px',
+          background: 'var(--bg)',
+          border: '1px solid var(--line)',
+          borderRadius: 6,
+          color: 'var(--ink)',
+          fontSize: 13,
+          fontFamily: 'var(--font-sans)',
+          cursor: 'pointer',
+          textAlign: 'left',
+        }}
+      >
+        <span style={{ color: current ? 'var(--ink)' : 'var(--muted)' }}>
+          {current?.label || placeholder || '—'}
+        </span>
+        <span style={{ color: 'var(--muted)' }}>
+          <svg
+            width={13}
+            height={13}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+        </span>
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 0,
+            right: 0,
+            zIndex: 20,
+            background: 'var(--bg-raise)',
+            border: '1px solid var(--line)',
+            borderRadius: 8,
+            boxShadow: '0 10px 28px rgba(0,0,0,0.35)',
+            overflow: 'hidden',
+            maxHeight: 260,
+            overflowY: 'auto',
+          }}
+        >
+          {options.map((o) => {
+            const sel = o.value === value;
+            return (
+              <div
+                key={o.value}
+                onClick={() => {
+                  onChange(o.value);
+                  setOpen(false);
+                }}
+                style={{
+                  padding: '9px 12px',
+                  fontSize: 13,
+                  color: sel ? 'var(--accent-ink)' : 'var(--ink)',
+                  background: sel ? 'var(--accent-soft)' : 'transparent',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={(e) => {
+                  if (!sel)
+                    e.currentTarget.style.background =
+                      'color-mix(in oklch, var(--ink) 6%, transparent)';
+                }}
+                onMouseLeave={(e) => {
+                  if (!sel) e.currentTarget.style.background = 'transparent';
+                }}
+              >
+                {o.label}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type DrawerPreset =
   | 'inherit'
   | 'always-allow'
   | 'block-work'
   | 'always-block'
   | 'custom';
-
-const DRAWER_PRESETS: { id: DrawerPreset; label: string; hint: string }[] = [
-  {
-    id: 'inherit',
-    label: 'Follow category',
-    hint: 'Use the rule set on this category.',
-  },
-  { id: 'always-allow', label: 'Always allow', hint: 'Never blocked.' },
-  {
-    id: 'block-work',
-    label: 'Block for work',
-    hint: 'Allowed during rest, blocked during work and deep work.',
-  },
-  { id: 'always-block', label: 'Always block', hint: 'Blocked in every profile.' },
-  {
-    id: 'custom',
-    label: 'Custom per profile',
-    hint: 'Pick allow or block for every profile individually.',
-  },
-];
 
 interface AppDrawerProps {
   app: KnownApp;
@@ -246,14 +347,13 @@ export function AppDrawer({
   onUpdateApp,
   categories,
 }: AppDrawerProps) {
-  const detected = detectDrawerPreset(app, profiles, overrides);
-  const [preset, setPreset] = useState<DrawerPreset>(
-    initialPreset ?? detected,
-  );
-  useEffect(() => setPreset(initialPreset ?? detected), [
-    initialPreset,
-    detected,
-  ]);
+  // Detection retained for callers that still pass initialPreset; the
+  // popup itself no longer exposes preset chips — it's purely a
+  // per-profile editor. The remaining helpers from older revisions are
+  // suppressed to keep the TS surface tidy.
+  void detectDrawerPreset;
+  void initialPreset;
+  void onApplyPreset;
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -262,16 +362,6 @@ export function AppDrawer({
     document.addEventListener('keydown', h);
     return () => document.removeEventListener('keydown', h);
   }, [onClose]);
-
-  const choosePreset = async (p: DrawerPreset) => {
-    setPreset(p);
-    if (p === 'custom') return;
-    if (p === 'inherit') {
-      await onApplyPreset('inherit');
-      return;
-    }
-    await onApplyPreset(p);
-  };
 
   // Description text per profile (matches design copy).
   const profileDesc = (name: string): string => {
@@ -380,76 +470,28 @@ export function AppDrawer({
             <label style={{ ...labelStyle, marginBottom: 7, display: 'block' }}>
               Category
             </label>
-            <select
+            <StyledSelect
               value={app.categoryOverride ?? app.effectiveCategory ?? ''}
-              onChange={(e) =>
+              onChange={(v) =>
                 onUpdateApp(app.appKey, {
-                  categoryOverride: e.target.value === '' ? null : e.target.value,
+                  categoryOverride: v === '' ? null : v,
                 })
               }
-              style={{ ...inputStyle, width: '100%', boxSizing: 'border-box' }}
-            >
-              <option value="">Uncategorized</option>
-              {categories.map((c) => (
-                <option key={c.name} value={c.name}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
+              placeholder="Uncategorized"
+              options={[
+                { value: '', label: 'Uncategorized' },
+                ...categories.map((c) => ({ value: c.name, label: c.name })),
+              ]}
+            />
           </div>
 
-          {/* rule */}
+          {/* per-profile matrix — this is what Custom is for */}
           <div>
             <label style={{ ...labelStyle, marginBottom: 7, display: 'block' }}>
-              Rule
+              Per-profile rules
             </label>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {DRAWER_PRESETS.filter((p) => p.id !== 'inherit').map((p) => {
-                const isActive = preset === p.id;
-                const color =
-                  p.id === 'always-allow'
-                    ? 'var(--ok)'
-                    : p.id === 'block-work'
-                    ? 'var(--accent)'
-                    : p.id === 'always-block'
-                    ? 'var(--danger)'
-                    : 'var(--muted)';
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    title={p.hint}
-                    onClick={() => choosePreset(p.id)}
-                    style={{
-                      flex: 1,
-                      padding: '9px 6px',
-                      borderRadius: 7,
-                      textAlign: 'center',
-                      border:
-                        '1px solid ' +
-                        (isActive ? color : 'var(--line)'),
-                      background: isActive
-                        ? `color-mix(in oklch, ${color} 14%, transparent)`
-                        : 'var(--bg)',
-                      color: isActive ? color : 'var(--muted)',
-                      fontSize: 12,
-                      fontFamily: 'var(--font-sans)',
-                      fontWeight: isActive ? 500 : 400,
-                      cursor: 'pointer',
-                      transition: 'border-color 80ms, background 80ms, color 80ms',
-                    }}
-                  >
-                    {p.id === 'custom' ? 'Custom' : p.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* per-profile matrix — only when Custom */}
-          {preset === 'custom' && (
             <div style={{
-              border: '1px solid var(--line)',
+              border: '1px solid var(--accent)',
               borderRadius: 8,
               background: 'var(--bg)',
               overflow: 'hidden',
@@ -530,7 +572,17 @@ export function AppDrawer({
                 );
               })}
             </div>
-          )}
+            <div style={{
+              marginTop: 6,
+              fontSize: 11,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+              lineHeight: 1.55,
+            }}>
+              Enforcement (close vs warn-then-close) is set globally in
+              Settings → Enforcement.
+            </div>
+          </div>
         </div>
 
         {/* footer */}
@@ -1446,17 +1498,12 @@ export function CategoryDrawer({
   onApplyPreset,
   onClearAllOverrides,
 }: CategoryDrawerProps) {
-  const detected = useMemo(
-    () => detectCategoryDrawerPreset(category, profiles, overrides),
-    [category, profiles, overrides],
-  );
-  const [preset, setPreset] = useState<DrawerPreset>(
-    initialPreset ?? detected,
-  );
-  useEffect(() => setPreset(initialPreset ?? detected), [
-    initialPreset,
-    detected,
-  ]);
+  // Older revisions exposed preset chips inside the drawer; the modal is
+  // now a per-profile editor only. Silence unused-prop warnings.
+  void detectCategoryDrawerPreset;
+  void initialPreset;
+  void onApplyPreset;
+  void onClearAllOverrides;
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -1470,37 +1517,15 @@ export function CategoryDrawer({
     (c) => c.toLowerCase() === category.name.toLowerCase(),
   );
 
-  const choosePreset = async (p: DrawerPreset) => {
-    setPreset(p);
-    if (p === 'custom') return;
-    if (p === 'inherit') {
-      await onClearAllOverrides();
-      return;
-    }
-    await onApplyPreset(p);
-  };
-
-  // Resolve the displayed verdict for each profile under the current
-  // preset choice (mirrors design's resolvePreset helper).
   function resolved(profileName: string): EnforcementDecision {
     if (hardLocked && profileName === 'emergency') return 'block';
-    if (preset === 'always-allow') return 'allow';
-    if (preset === 'always-block') return 'block';
-    if (preset === 'block-work') {
-      if (profileName === 'rest' || profileName === 'emergency') return 'allow';
-      return 'block';
-    }
-    if (preset === 'custom') {
-      const o = overrides.find(
-        (x) =>
-          x.profileName === profileName &&
-          x.subjectType === 'category' &&
-          x.subjectKey === category.name,
-      );
-      return o?.decision ?? 'allow';
-    }
-    // inherit — no per-profile override stored; show neutral "allow" baseline.
-    return 'allow';
+    const o = overrides.find(
+      (x) =>
+        x.profileName === profileName &&
+        x.subjectType === 'category' &&
+        x.subjectKey === category.name,
+    );
+    return o?.decision ?? 'allow';
   }
 
   const profileDesc = (name: string): string => {
@@ -1595,69 +1620,12 @@ export function CategoryDrawer({
           flexDirection: 'column',
           gap: 18,
         }}>
-          {/* rule */}
           <div>
             <label style={{ ...labelStyle, marginBottom: 7, display: 'block' }}>
-              Rule
+              Per-profile rules
             </label>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {DRAWER_PRESETS.filter((p) => p.id !== 'inherit').map((p) => {
-                const disabled = hardLocked && p.id !== 'always-block';
-                const isActive = preset === p.id;
-                const color =
-                  p.id === 'always-allow'
-                    ? 'var(--ok)'
-                    : p.id === 'block-work'
-                    ? 'var(--accent)'
-                    : p.id === 'always-block'
-                    ? 'var(--danger)'
-                    : 'var(--muted)';
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    title={
-                      disabled
-                        ? 'Emergency profile keeps this category blocked.'
-                        : p.hint
-                    }
-                    onClick={() => {
-                      if (disabled) return;
-                      choosePreset(p.id);
-                    }}
-                    disabled={disabled}
-                    style={{
-                      flex: 1,
-                      padding: '9px 6px',
-                      borderRadius: 7,
-                      textAlign: 'center',
-                      border:
-                        '1px solid ' +
-                        (isActive ? color : 'var(--line)'),
-                      background: isActive
-                        ? `color-mix(in oklch, ${color} 14%, transparent)`
-                        : 'var(--bg)',
-                      color: isActive ? color : 'var(--muted)',
-                      fontSize: 12,
-                      fontFamily: 'var(--font-sans)',
-                      fontWeight: isActive ? 500 : 400,
-                      cursor: disabled ? 'not-allowed' : 'pointer',
-                      opacity: disabled ? 0.4 : 1,
-                      transition:
-                        'border-color 80ms, background 80ms, color 80ms',
-                    }}
-                  >
-                    {p.id === 'custom' ? 'Custom' : p.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* per-profile matrix — only when Custom */}
-          {preset === 'custom' && (
             <div style={{
-              border: '1px solid var(--line)',
+              border: '1px solid var(--accent)',
               borderRadius: 8,
               background: 'var(--bg)',
               overflow: 'hidden',
@@ -1724,7 +1692,17 @@ export function CategoryDrawer({
                 );
               })}
             </div>
-          )}
+            <div style={{
+              marginTop: 6,
+              fontSize: 11,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+              lineHeight: 1.55,
+            }}>
+              Enforcement (close vs warn-then-close) is set globally in
+              Settings → Enforcement.
+            </div>
+          </div>
         </div>
 
         {/* footer */}
