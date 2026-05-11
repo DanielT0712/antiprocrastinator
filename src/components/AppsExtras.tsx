@@ -35,6 +35,33 @@ const inputStyle: CSSProperties = {
   fontFamily: 'var(--font-sans)',
 };
 
+type DrawerPreset =
+  | 'inherit'
+  | 'always-allow'
+  | 'block-work'
+  | 'always-block'
+  | 'custom';
+
+const DRAWER_PRESETS: { id: DrawerPreset; label: string; hint: string }[] = [
+  {
+    id: 'inherit',
+    label: 'Follow category',
+    hint: 'Use the rule set on this category.',
+  },
+  { id: 'always-allow', label: 'Always allow', hint: 'Never blocked.' },
+  {
+    id: 'block-work',
+    label: 'Block for work',
+    hint: 'Allowed during rest, blocked during work and deep work.',
+  },
+  { id: 'always-block', label: 'Always block', hint: 'Blocked in every profile.' },
+  {
+    id: 'custom',
+    label: 'Custom per profile',
+    hint: 'Pick allow or block for every profile individually.',
+  },
+];
+
 interface AppDrawerProps {
   app: KnownApp;
   profiles: EnforcementProfile[];
@@ -44,6 +71,9 @@ interface AppDrawerProps {
   onSetOverride: (
     profileName: string,
     decision: EnforcementDecision | null,
+  ) => Promise<void>;
+  onApplyPreset: (
+    preset: 'always-allow' | 'block-work' | 'always-block' | 'inherit',
   ) => Promise<void>;
   onUpdateApp: (
     appKey: string,
@@ -76,6 +106,201 @@ function decisionForApp(
   return null;
 }
 
+function detectDrawerPreset(
+  app: KnownApp,
+  profiles: EnforcementProfile[],
+  overrides: EnforcementProfileOverride[],
+): DrawerPreset {
+  const direct = profiles
+    .map((p) =>
+      overrides.find(
+        (o) =>
+          o.profileName === p.name &&
+          o.subjectType === 'app' &&
+          o.subjectKey === app.appKey,
+      ),
+    )
+    .filter(Boolean);
+  if (direct.length === 0) return 'inherit';
+  const all: Record<string, EnforcementDecision | null> = {};
+  profiles.forEach(
+    (p) =>
+      (all[p.name] =
+        overrides.find(
+          (o) =>
+            o.profileName === p.name &&
+            o.subjectType === 'app' &&
+            o.subjectKey === app.appKey,
+        )?.decision ?? null),
+  );
+  const vals = profiles.map((p) => all[p.name]);
+  if (vals.every((v) => v === 'allow')) return 'always-allow';
+  if (vals.every((v) => v === 'block')) return 'always-block';
+  if (
+    profiles.every((p) => {
+      const d = all[p.name];
+      if (p.name === 'rest' || p.name === 'emergency') return d === 'allow';
+      return d === 'block';
+    })
+  )
+    return 'block-work';
+  return 'custom';
+}
+
+function PresetOption({
+  label,
+  hint,
+  selected,
+  onClick,
+}: {
+  label: string;
+  hint: string;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 11,
+        padding: '11px 13px',
+        background: selected ? 'var(--accent-soft)' : 'transparent',
+        border: '1px solid ' + (selected ? 'var(--accent)' : 'var(--line)'),
+        borderRadius: 7,
+        textAlign: 'left',
+        cursor: 'pointer',
+        fontFamily: 'var(--font-sans)',
+        color: 'var(--ink)',
+      }}
+    >
+      <span style={{
+        marginTop: 2,
+        width: 14,
+        height: 14,
+        borderRadius: '50%',
+        border:
+          '1.5px solid ' + (selected ? 'var(--accent)' : 'var(--line)'),
+        display: 'grid',
+        placeItems: 'center',
+        flexShrink: 0,
+      }}>
+        {selected && (
+          <span style={{
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            background: 'var(--accent)',
+          }} />
+        )}
+      </span>
+      <div style={{ minWidth: 0 }}>
+        <div style={{
+          fontSize: 13,
+          color: 'var(--ink)',
+          fontWeight: selected ? 500 : 400,
+        }}>
+          {label}
+        </div>
+        <div style={{
+          fontSize: 11.5,
+          color: 'var(--muted)',
+          marginTop: 2,
+        }}>
+          {hint}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function AllowBlockToggle({
+  value,
+  onChange,
+  blocked,
+  blockedReason,
+}: {
+  value: EnforcementDecision;
+  onChange: (next: EnforcementDecision) => void;
+  blocked?: boolean;
+  blockedReason?: string;
+}) {
+  return (
+    <div style={{
+      display: 'inline-flex',
+      border: '1px solid var(--line)',
+      borderRadius: 6,
+      overflow: 'hidden',
+      background: 'var(--bg)',
+    }}>
+      <button
+        onClick={() => {
+          if (blocked) return;
+          onChange('allow');
+        }}
+        disabled={blocked}
+        title={blocked ? blockedReason : undefined}
+        style={{
+          padding: '6px 12px',
+          fontSize: 11.5,
+          background:
+            value === 'allow' ? 'var(--accent-soft)' : 'transparent',
+          color:
+            value === 'allow' ? 'var(--accent-ink)' : 'var(--muted)',
+          border: 'none',
+          cursor: blocked ? 'not-allowed' : 'pointer',
+          opacity: blocked ? 0.4 : 1,
+          fontFamily: 'var(--font-sans)',
+        }}
+      >
+        Allow
+      </button>
+      <button
+        onClick={() => onChange('block')}
+        style={{
+          padding: '6px 12px',
+          fontSize: 11.5,
+          background:
+            value === 'block'
+              ? 'color-mix(in oklch, var(--danger) 16%, transparent)'
+              : 'transparent',
+          color: value === 'block' ? 'var(--danger)' : 'var(--muted)',
+          border: 'none',
+          borderLeft: '1px solid var(--line)',
+          cursor: 'pointer',
+          fontFamily: 'var(--font-sans)',
+        }}
+      >
+        Block
+      </button>
+    </div>
+  );
+}
+
+function AppGlyph({ name, size = 26 }: { name: string; size?: number }) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
+  const letter = name.replace(/^www\./, '').charAt(0).toUpperCase();
+  return (
+    <div style={{
+      width: size,
+      height: size,
+      borderRadius: 6,
+      background: `oklch(0.45 0.06 ${h})`,
+      color: `oklch(0.94 0.04 ${h})`,
+      display: 'grid',
+      placeItems: 'center',
+      fontSize: size * 0.48,
+      fontWeight: 600,
+      fontFamily: 'var(--font-sans)',
+      flexShrink: 0,
+    }}>
+      {letter}
+    </div>
+  );
+}
+
 export function AppDrawer({
   app,
   profiles,
@@ -83,9 +308,14 @@ export function AppDrawer({
   emergencyBlockedCategories,
   onClose,
   onSetOverride,
+  onApplyPreset,
   onUpdateApp,
   categories,
 }: AppDrawerProps) {
+  const detected = detectDrawerPreset(app, profiles, overrides);
+  const [preset, setPreset] = useState<DrawerPreset>(detected);
+  useEffect(() => setPreset(detected), [detected]);
+
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -93,6 +323,16 @@ export function AppDrawer({
     document.addEventListener('keydown', h);
     return () => document.removeEventListener('keydown', h);
   }, [onClose]);
+
+  const choosePreset = async (p: DrawerPreset) => {
+    setPreset(p);
+    if (p === 'custom') return;
+    if (p === 'inherit') {
+      await onApplyPreset('inherit');
+      return;
+    }
+    await onApplyPreset(p);
+  };
 
   return (
     <div
@@ -110,7 +350,7 @@ export function AppDrawer({
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: 540,
+          width: 520,
           height: '100%',
           background: 'var(--bg)',
           borderLeft: '1px solid var(--line)',
@@ -119,16 +359,18 @@ export function AppDrawer({
         }}
       >
         <div style={{
-          padding: '20px 22px 16px',
+          padding: '22px 24px 18px',
           borderBottom: '1px solid var(--line)',
         }}>
           <div style={{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            marginBottom: 12,
+            marginBottom: 14,
           }}>
-            <span style={labelStyle}>App detail</span>
+            <div style={labelStyle}>
+              {app.effectiveCategory ?? 'Uncategorized'}
+            </div>
             <button
               onClick={onClose}
               style={{
@@ -142,27 +384,38 @@ export function AppDrawer({
               <Icons.x size={16} />
             </button>
           </div>
-          <div style={{
-            fontFamily: 'var(--font-display)',
-            fontSize: 22,
-            color: 'var(--ink)',
-            letterSpacing: '-0.015em',
-          }}>
-            {app.displayName}
-          </div>
-          <div style={{
-            fontSize: 12,
-            color: 'var(--muted)',
-            fontFamily: 'var(--font-mono)',
-            marginTop: 4,
-          }}>
-            {app.executableName ?? app.appKey} · {app.classificationStatus}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+            <AppGlyph name={app.displayName} size={44} />
+            <div>
+              <div style={{
+                fontFamily: 'var(--font-display)',
+                fontSize: 22,
+                color: 'var(--ink)',
+                letterSpacing: '-0.01em',
+              }}>
+                {app.displayName}
+              </div>
+              <div style={{
+                fontSize: 12,
+                color: 'var(--muted)',
+                marginTop: 3,
+                fontFamily: 'var(--font-mono)',
+              }}>
+                {app.executableName ?? app.appKey} · {app.classificationStatus}
+                {app.lastSeenRunningAt && (
+                  <>
+                    {' '}· last seen{' '}
+                    {new Date(app.lastSeenRunningAt).toLocaleDateString()}
+                  </>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 
-        <div style={{ flex: 1, overflow: 'auto', padding: '18px 22px' }}>
-          <div style={{ marginBottom: 18 }}>
-            <div style={{ ...labelStyle, marginBottom: 6 }}>Category</div>
+        <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px 80px' }}>
+          <div style={{ marginBottom: 22 }}>
+            <div style={{ ...labelStyle, marginBottom: 10 }}>Category</div>
             <select
               value={app.categoryOverride ?? app.effectiveCategory ?? ''}
               onChange={(e) =>
@@ -179,24 +432,32 @@ export function AppDrawer({
                 </option>
               ))}
             </select>
-            {app.effectiveCategory && (
-              <div style={{
-                fontSize: 11,
-                color: 'var(--faint)',
-                fontFamily: 'var(--font-mono)',
-                marginTop: 4,
-              }}>
-                Effective category: {app.effectiveCategory}
-              </div>
-            )}
           </div>
 
-          <div style={{ marginBottom: 14 }}>
-            <div style={{ ...labelStyle, marginBottom: 8 }}>Per-profile rules</div>
+          <div style={{ marginBottom: 22 }}>
+            <div style={{ ...labelStyle, marginBottom: 10 }}>
+              Rule for this app
+            </div>
+            <div style={{ display: 'grid', gap: 8 }}>
+              {DRAWER_PRESETS.map((p) => (
+                <PresetOption
+                  key={p.id}
+                  label={p.label}
+                  hint={p.hint}
+                  selected={preset === p.id}
+                  onClick={() => choosePreset(p.id)}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div style={{ marginBottom: 22 }}>
+            <div style={{ ...labelStyle, marginBottom: 10 }}>
+              Per-profile behavior
+            </div>
             <div style={{
               border: '1px solid var(--line)',
               borderRadius: 8,
-              overflow: 'hidden',
               background: 'var(--bg-raise)',
             }}>
               {profiles.map((p, i) => {
@@ -206,147 +467,96 @@ export function AppDrawer({
                     o.subjectType === 'app' &&
                     o.subjectKey === app.appKey,
                 );
-                const inherited = direct == null
-                  ? decisionForApp(app, p.name, overrides)
-                  : null;
+                const resolved =
+                  direct?.decision ??
+                  decisionForApp(app, p.name, overrides) ??
+                  'allow';
                 const blocked =
                   p.name === 'emergency' &&
                   app.effectiveCategory != null &&
                   emergencyBlockedCategories.some(
                     (c) =>
-                      c.toLowerCase() === app.effectiveCategory!.toLowerCase(),
+                      c.toLowerCase() ===
+                      app.effectiveCategory!.toLowerCase(),
                   );
                 return (
                   <div
                     key={p.name}
                     style={{
                       display: 'grid',
-                      gridTemplateColumns: 'minmax(0, 1fr) minmax(220px, auto)',
+                      gridTemplateColumns: '1fr auto',
                       alignItems: 'center',
-                      gap: 12,
-                      padding: '10px 14px',
-                      borderTop: i === 0 ? 'none' : '1px solid var(--line)',
+                      padding: '13px 14px',
+                      borderBottom:
+                        i < profiles.length - 1
+                          ? '1px solid var(--line)'
+                          : 'none',
                     }}
                   >
                     <div>
-                      <div style={{
-                        color: 'var(--ink)',
-                        fontSize: 13,
-                        fontWeight: 500,
-                      }}>
+                      <div style={{ fontSize: 13, color: 'var(--ink)' }}>
                         {p.name === 'deep_work'
                           ? 'Deep Work'
                           : p.name.charAt(0).toUpperCase() + p.name.slice(1)}
-                        {p.parentName && (
-                          <span style={{
-                            color: 'var(--faint)',
-                            fontFamily: 'var(--font-mono)',
-                            fontSize: 11,
-                            marginLeft: 6,
-                          }}>
-                            ← {p.parentName}
-                          </span>
-                        )}
                       </div>
                       <div style={{
                         fontSize: 11,
-                        color: 'var(--faint)',
-                        fontFamily: 'var(--font-mono)',
+                        color: 'var(--muted)',
                         marginTop: 2,
+                        fontFamily: 'var(--font-mono)',
                       }}>
+                        {p.parentName && (
+                          <span>inherits from {p.parentName} · </span>
+                        )}
                         {direct
-                          ? `Override: ${direct.decision}`
-                          : inherited
-                            ? `Inherits: ${inherited}`
-                            : 'No rule (allow by default)'}
+                          ? `override: ${direct.decision}`
+                          : 'follows category'}
                       </div>
                     </div>
-                    <DecisionToggle
-                      current={direct?.decision ?? null}
-                      hardLock={
-                        blocked
-                          ? `${app.effectiveCategory} apps cannot be allowed during emergency.`
-                          : null
-                      }
-                      onChange={(next) => onSetOverride(p.name, next)}
-                    />
+                    {preset === 'custom' ? (
+                      <AllowBlockToggle
+                        value={resolved}
+                        onChange={(v) => onSetOverride(p.name, v)}
+                        blocked={blocked}
+                        blockedReason={
+                          blocked
+                            ? `${app.effectiveCategory} apps cannot be allowed during emergency.`
+                            : undefined
+                        }
+                      />
+                    ) : (
+                      <div style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        padding: '4px 9px',
+                        borderRadius: 5,
+                        border:
+                          '1px solid ' +
+                          (resolved === 'block'
+                            ? 'var(--danger)'
+                            : 'var(--ok)'),
+                        background:
+                          resolved === 'block'
+                            ? 'color-mix(in oklch, var(--danger) 16%, transparent)'
+                            : 'color-mix(in oklch, var(--ok) 16%, transparent)',
+                        color:
+                          resolved === 'block' ? 'var(--danger)' : 'var(--ok)',
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 11,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.08em',
+                      }}>
+                        {resolved === 'block' ? '✕ Blocked' : '✓ Allowed'}
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
           </div>
-
-          <div style={{
-            marginTop: 18,
-            fontSize: 12,
-            color: 'var(--muted)',
-            fontFamily: 'var(--font-mono)',
-            lineHeight: 1.55,
-          }}>
-            Last seen running:{' '}
-            <span style={{ color: 'var(--ink)' }}>
-              {app.lastSeenRunningAt
-                ? new Date(app.lastSeenRunningAt).toLocaleString()
-                : '—'}
-            </span>
-          </div>
         </div>
       </div>
-    </div>
-  );
-}
-
-function DecisionToggle({
-  current,
-  hardLock,
-  onChange,
-}: {
-  current: EnforcementDecision | null;
-  hardLock: string | null;
-  onChange: (next: EnforcementDecision | null) => void;
-}) {
-  const opts: { v: EnforcementDecision | null; l: string }[] = [
-    { v: null, l: 'Inherit' },
-    { v: 'allow', l: 'Allow' },
-    { v: 'block', l: 'Block' },
-  ];
-  return (
-    <div style={{
-      display: 'inline-flex',
-      gap: 0,
-      border: '1px solid var(--line)',
-      borderRadius: 5,
-      overflow: 'hidden',
-      justifySelf: 'end',
-    }}>
-      {opts.map((o) => {
-        const sel = o.v === current;
-        const blocked = hardLock != null && o.v === 'allow';
-        return (
-          <button
-            key={String(o.v)}
-            onClick={() => {
-              if (blocked) return;
-              onChange(o.v);
-            }}
-            disabled={blocked}
-            title={blocked ? hardLock! : undefined}
-            style={{
-              padding: '5px 10px',
-              fontSize: 11.5,
-              background: sel ? 'var(--ink-soft)' : 'transparent',
-              color: sel ? 'var(--ink)' : blocked ? 'var(--faint)' : 'var(--muted)',
-              border: 'none',
-              borderRight: '1px solid var(--line)',
-              cursor: blocked ? 'not-allowed' : 'pointer',
-              fontFamily: 'var(--font-sans)',
-              opacity: blocked ? 0.5 : 1,
-            }}
-          >
-            {o.l}
-          </button>
-        );
-      })}
     </div>
   );
 }

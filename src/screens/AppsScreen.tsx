@@ -1574,6 +1574,25 @@ export function AppsScreen() {
               setError(String(err));
             }
           }}
+          onApplyPreset={async (preset) => {
+            try {
+              if (preset === 'inherit') {
+                for (const profileName of profileNames) {
+                  await api.deleteEnforcementProfileOverride(
+                    profileName,
+                    'app',
+                    drawerAppKey,
+                  );
+                }
+              } else {
+                await applyPreset('app', drawerAppKey, preset);
+                return;
+              }
+              refresh();
+            } catch (err) {
+              setError(String(err));
+            }
+          }}
           onUpdateApp={async (appKey, patch) => {
             try {
               await api.updateKnownApp(appKey, {
