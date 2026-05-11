@@ -1242,6 +1242,408 @@ interface AddTargetModalProps {
   }) => Promise<void>;
 }
 
+interface AddAppModalProps {
+  categories: AppCategory[];
+  profiles: EnforcementProfile[];
+  emergencyBlockedCategories: string[];
+  onClose: () => void;
+  onCreate: (input: {
+    displayName: string;
+    executableName: string | null;
+    categoryNames: string[];
+    rule: PresetId;
+    customRules: Record<string, EnforcementDecision>;
+  }) => Promise<void>;
+}
+
+function AddAppModal({
+  categories,
+  profiles,
+  emergencyBlockedCategories,
+  onClose,
+  onCreate,
+}: AddAppModalProps) {
+  const [displayName, setDisplayName] = useState('');
+  const [executableName, setExecutableName] = useState('');
+  const [categoryName, setCategoryName] = useState(
+    categories.find((c) => !c.builtin)?.name ?? categories[0]?.name ?? '',
+  );
+  const [rule, setRule] = useState<PresetId>('block-work');
+  const [customRules, setCustomRules] = useState<
+    Record<string, EnforcementDecision>
+  >({});
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', h);
+    return () => document.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  const canSubmit = displayName.trim().length > 0;
+
+  const submit = async () => {
+    if (!canSubmit || busy) return;
+    setBusy(true);
+    try {
+      await onCreate({
+        displayName: displayName.trim(),
+        executableName: executableName.trim() || null,
+        categoryNames: categoryName ? [categoryName] : [],
+        rule,
+        customRules,
+      });
+      onClose();
+    } catch (err) {
+      setBusy(false);
+    }
+  };
+
+  const RULES: { id: PresetId; label: string; hint: string }[] = [
+    { id: 'always-allow', label: 'Always allow', hint: 'Never blocked.' },
+    { id: 'block-work', label: 'Block for work', hint: 'Blocked during Work and Deep Work.' },
+    { id: 'always-block', label: 'Always block', hint: 'Blocked in every profile.' },
+    { id: 'custom', label: 'Custom', hint: 'Set per-profile below.' },
+  ];
+
+  const fLabel: CSSProperties = {
+    display: 'block',
+    fontSize: 10.5,
+    color: 'var(--muted)',
+    fontFamily: 'var(--font-mono)',
+    textTransform: 'uppercase',
+    letterSpacing: '0.1em',
+    marginBottom: 7,
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 70,
+        background: 'rgba(0,0,0,0.55)',
+        display: 'grid',
+        placeItems: 'center',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 560,
+          maxHeight: '88vh',
+          background: 'var(--bg-raise)',
+          border: '1px solid var(--line)',
+          borderRadius: 12,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        {/* header */}
+        <div style={{
+          padding: '20px 24px 16px',
+          borderBottom: '1px solid var(--line)',
+        }}>
+          <div style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10.5,
+            textTransform: 'uppercase',
+            letterSpacing: '0.12em',
+            color: 'var(--muted)',
+            marginBottom: 6,
+          }}>
+            Apps
+          </div>
+          <div style={{
+            fontFamily: 'var(--font-display)',
+            fontSize: 22,
+            color: 'var(--ink)',
+            letterSpacing: '-0.015em',
+          }}>
+            Add app
+          </div>
+        </div>
+
+        {/* body */}
+        <div style={{
+          flex: 1,
+          overflow: 'auto',
+          padding: '18px 24px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 18,
+        }}>
+          <div>
+            <label style={fLabel}>App name</label>
+            <input
+              autoFocus
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="e.g. Slack"
+              style={{
+                width: '100%',
+                padding: '9px 11px',
+                background: 'var(--bg)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                color: 'var(--ink)',
+                fontSize: 13,
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
+          </div>
+
+          <div>
+            <label style={fLabel}>Executable name (optional)</label>
+            <input
+              value={executableName}
+              onChange={(e) => setExecutableName(e.target.value)}
+              placeholder="e.g. Slack.app (helps with detection)"
+              style={{
+                width: '100%',
+                padding: '9px 11px',
+                background: 'var(--bg)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                color: 'var(--ink)',
+                fontSize: 13,
+                fontFamily: 'var(--font-mono)',
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
+          </div>
+
+          <div>
+            <label style={fLabel}>Category</label>
+            <select
+              value={categoryName}
+              onChange={(e) => setCategoryName(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '9px 11px',
+                background: 'var(--bg)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                color: 'var(--ink)',
+                fontSize: 13,
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            >
+              <option value="">Uncategorized</option>
+              {categories.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label style={fLabel}>Rule</label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {RULES.map((r) => {
+                const isActive = rule === r.id;
+                const color =
+                  r.id === 'always-allow'
+                    ? 'var(--ok)'
+                    : r.id === 'block-work'
+                    ? 'var(--accent)'
+                    : r.id === 'always-block'
+                    ? 'var(--danger)'
+                    : 'var(--muted)';
+                return (
+                  <button
+                    key={r.id}
+                    type="button"
+                    title={r.hint}
+                    onClick={() => setRule(r.id)}
+                    style={{
+                      flex: 1,
+                      padding: '9px 6px',
+                      borderRadius: 7,
+                      textAlign: 'center',
+                      border:
+                        '1px solid ' + (isActive ? color : 'var(--line)'),
+                      background: isActive
+                        ? `color-mix(in oklch, ${color} 14%, transparent)`
+                        : 'var(--bg)',
+                      color: isActive ? color : 'var(--muted)',
+                      fontSize: 12.5,
+                      fontFamily: 'var(--font-sans)',
+                      fontWeight: isActive ? 500 : 400,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {r.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {rule === 'custom' && (
+            <div>
+              <label style={fLabel}>Per-profile rules</label>
+              <div style={{
+                border: '1px solid var(--accent)',
+                borderRadius: 8,
+                background: 'var(--bg)',
+                overflow: 'hidden',
+              }}>
+                {profiles.map((p, i) => {
+                  const blocked =
+                    p.name === 'emergency' &&
+                    categoryName != null &&
+                    emergencyBlockedCategories.some(
+                      (c) => c.toLowerCase() === categoryName.toLowerCase(),
+                    );
+                  const v = customRules[p.name] ?? 'allow';
+                  return (
+                    <div
+                      key={p.name}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        padding: '11px 13px',
+                        borderBottom:
+                          i < profiles.length - 1
+                            ? '1px solid var(--line)'
+                            : 'none',
+                      }}
+                    >
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{
+                          fontSize: 13,
+                          color: 'var(--ink)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 7,
+                        }}>
+                          {PROFILE_DISPLAY[p.name] ?? p.name}
+                          {p.parentName && (
+                            <span style={{
+                              fontSize: 10.5,
+                              color: 'var(--faint)',
+                              fontFamily: 'var(--font-mono)',
+                            }}>
+                              ← {PROFILE_DISPLAY[p.parentName] ?? p.parentName}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div style={{
+                        display: 'inline-flex',
+                        border: '1px solid var(--line)',
+                        borderRadius: 6,
+                        overflow: 'hidden',
+                        background: 'var(--bg)',
+                      }}>
+                        {(['allow', 'block'] as EnforcementDecision[]).map(
+                          (d) => {
+                            const sel = v === d;
+                            const disabled = blocked && d !== 'block';
+                            return (
+                              <button
+                                key={d}
+                                disabled={disabled}
+                                onClick={() => {
+                                  if (disabled) return;
+                                  setCustomRules((prev) => ({
+                                    ...prev,
+                                    [p.name]: d,
+                                  }));
+                                }}
+                                style={{
+                                  padding: '6px 12px',
+                                  fontSize: 11.5,
+                                  background: sel
+                                    ? d === 'allow'
+                                      ? 'var(--accent-soft)'
+                                      : 'color-mix(in oklch, var(--danger) 16%, transparent)'
+                                    : 'transparent',
+                                  color: sel
+                                    ? d === 'allow'
+                                      ? 'var(--accent-ink)'
+                                      : 'var(--danger)'
+                                    : 'var(--muted)',
+                                  border: 'none',
+                                  borderLeft:
+                                    d === 'block'
+                                      ? '1px solid var(--line)'
+                                      : 'none',
+                                  cursor: disabled ? 'not-allowed' : 'pointer',
+                                  opacity: disabled ? 0.4 : 1,
+                                  fontFamily: 'var(--font-sans)',
+                                }}
+                              >
+                                {d === 'allow' ? 'Allow' : 'Block'}
+                              </button>
+                            );
+                          },
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* footer */}
+        <div style={{
+          padding: '14px 24px',
+          borderTop: '1px solid var(--line)',
+          display: 'flex',
+          justifyContent: 'flex-end',
+          gap: 8,
+        }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '8px 14px',
+              background: 'transparent',
+              color: 'var(--ink)',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              fontSize: 12.5,
+              cursor: 'pointer',
+              fontFamily: 'var(--font-sans)',
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            disabled={!canSubmit || busy}
+            onClick={submit}
+            style={{
+              padding: '8px 14px',
+              background: canSubmit ? 'var(--ink)' : 'var(--line)',
+              color: canSubmit ? 'var(--bg)' : 'var(--muted)',
+              border: 'none',
+              borderRadius: 6,
+              fontSize: 12.5,
+              fontWeight: 500,
+              cursor: canSubmit ? 'pointer' : 'not-allowed',
+              fontFamily: 'var(--font-sans)',
+            }}
+          >
+            {busy ? 'Adding…' : 'Add app'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AddBrowserTargetModal({ categories, onClose, onCreate }: AddTargetModalProps) {
   const [displayName, setDisplayName] = useState('');
   const [keyword, setKeyword] = useState('');
@@ -1446,6 +1848,7 @@ export function AppsScreen() {
   const [pendingApps, setPendingApps] = useState<KnownApp[]>([]);
   const [pendingTargets, setPendingTargets] = useState<KnownBrowserTarget[]>([]);
   const [adding, setAdding] = useState(false);
+  const [q, setQ] = useState('');
   const [openApp, setOpenApp] = useState<{
     appKey: string;
     mode: AppRowMode;
@@ -1505,18 +1908,39 @@ export function AppsScreen() {
     return map;
   }, [overrides]);
 
+  const filteredApps = useMemo(() => {
+    const qq = q.trim().toLowerCase();
+    if (!qq) return apps;
+    return apps.filter((a) => {
+      if (a.displayName.toLowerCase().includes(qq)) return true;
+      if (a.executableName?.toLowerCase().includes(qq)) return true;
+      if (a.effectiveCategory?.toLowerCase().includes(qq)) return true;
+      return false;
+    });
+  }, [apps, q]);
+
+  const filteredBrowserTargets = useMemo(() => {
+    const qq = q.trim().toLowerCase();
+    if (!qq) return browserTargets;
+    return browserTargets.filter((t) => {
+      if (t.displayName.toLowerCase().includes(qq)) return true;
+      if (t.keyword.toLowerCase().includes(qq)) return true;
+      return false;
+    });
+  }, [browserTargets, q]);
+
   const appsByCategory = useMemo(() => {
     const map = new Map<string, KnownApp[]>();
     for (const c of categories) map.set(c.name, []);
     map.set('Uncategorized', []);
-    for (const app of apps) {
+    for (const app of filteredApps) {
       const cat = app.effectiveCategory ?? 'Uncategorized';
       const list = map.get(cat) ?? [];
       list.push(app);
       map.set(cat, list);
     }
     return map;
-  }, [apps, categories]);
+  }, [filteredApps, categories]);
 
   const setOverride = async (
     key: OverrideKey,
@@ -1618,100 +2042,169 @@ export function AppsScreen() {
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <div style={{
-        padding: '16px 36px 0',
+        padding: '24px 36px 16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
         borderBottom: '1px solid var(--line)',
       }}>
-        <div style={{
-          fontFamily: 'var(--font-display)',
-          fontSize: 26,
-          color: 'var(--ink)',
-          letterSpacing: '-0.02em',
-          marginBottom: 4,
-        }}>
-          App Management
-        </div>
-        <div style={{
-          fontSize: 13,
-          color: 'var(--muted)',
-          marginBottom: 14,
-          maxWidth: 720,
-          lineHeight: 1.55,
-        }}>
-          Choose a profile, then set rules per category, per app, or per browser target.
-          Children profiles inherit from their parent unless overridden. Emergency profile
-          blocks Games and Entertainment unconditionally — those toggles are locked here.
-        </div>
+        {/* tabs + toolbar */}
         <div style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 10,
+          gap: 24,
           flexWrap: 'wrap',
         }}>
           <div style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 10.5,
-            textTransform: 'uppercase',
-            letterSpacing: '0.12em',
-            color: 'var(--muted)',
+            display: 'flex',
+            gap: 2,
+            position: 'relative',
+            marginBottom: -17,
+            paddingBottom: 16,
           }}>
-            Profiles
+            {(['apps', 'browser_targets'] as AppsTab[]).map((id) => {
+              const sel = tab === id;
+              return (
+                <button
+                  key={id}
+                  onClick={() => setTab(id)}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    padding: '10px 2px',
+                    marginRight: 20,
+                    color: sel ? 'var(--ink)' : 'var(--muted)',
+                    fontFamily: 'var(--font-sans)',
+                    fontSize: 14,
+                    fontWeight: sel ? 500 : 400,
+                    cursor: 'pointer',
+                    position: 'relative',
+                    borderBottom:
+                      '2px solid ' + (sel ? 'var(--accent)' : 'transparent'),
+                  }}
+                >
+                  {id === 'apps' ? 'Apps' : 'Browser Targets'}
+                </button>
+              );
+            })}
           </div>
-          <ProfileTabs
-            profiles={profiles}
-            active={activeProfile}
-            onChange={setActiveProfile}
-            onMenu={(p) => setProfileMenuName(p.name)}
-            onAddProfile={() => setCreatingProfile(true)}
-          />
-        </div>
-        <div style={{ height: 14 }} />
-        <div style={{
-          display: 'flex',
-          gap: 4,
-          alignItems: 'center',
-          borderBottom: '1px solid var(--line)',
-          marginLeft: -36,
-          marginRight: -36,
-          paddingLeft: 36,
-          paddingRight: 36,
-        }}>
-          {(['apps', 'browser_targets'] as AppsTab[]).map((id) => {
-            const sel = tab === id;
-            const count = id === 'apps' ? apps.length : browserTargets.length;
-            return (
-              <button
-                key={id}
-                onClick={() => setTab(id)}
+          <div style={{ flex: 1 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '7px 11px',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              background: 'var(--bg-raise)',
+              width: 240,
+            }}>
+              <span style={{ color: 'var(--faint)' }}>
+                <Icons.search size={13} />
+              </span>
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder={
+                  tab === 'apps' ? 'Search apps…' : 'Search sites…'
+                }
                 style={{
-                  padding: '10px 14px',
+                  flex: 1,
                   background: 'transparent',
                   border: 'none',
-                  borderBottom: sel
-                    ? '2px solid var(--accent)'
-                    : '2px solid transparent',
-                  color: sel ? 'var(--ink)' : 'var(--muted)',
-                  fontSize: 13,
-                  fontFamily: 'var(--font-sans)',
-                  fontWeight: sel ? 500 : 400,
-                  cursor: 'pointer',
+                  outline: 'none',
+                  color: 'var(--ink)',
+                  fontSize: 12.5,
                 }}
-              >
-                {id === 'apps' ? 'Apps' : 'Browser Targets'}
-                <span style={{
-                  marginLeft: 6,
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 11,
-                  color: 'var(--faint)',
-                }}>
-                  {count}
-                </span>
-              </button>
-            );
-          })}
+              />
+            </div>
+            <button
+              onClick={() => setCategoryManagerOpen(true)}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 7,
+                padding: '7px 11px',
+                background: 'transparent',
+                color: 'var(--ink)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                fontSize: 12.5,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <Icons.settings size={13} /> Manage categories
+            </button>
+            <button
+              onClick={() => setAdding(true)}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 7,
+                padding: '8px 12px',
+                background: 'var(--ink)',
+                color: 'var(--bg)',
+                border: 'none',
+                borderRadius: 6,
+                fontSize: 12.5,
+                fontWeight: 500,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <Icons.plus size={13} /> Add {tab === 'apps' ? 'app' : 'site'}
+            </button>
+          </div>
+        </div>
+
+        {/* profile selector + rules-shown-for */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: 14,
+        }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            flexWrap: 'wrap',
+          }}>
+            <div style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 10.5,
+              textTransform: 'uppercase',
+              letterSpacing: '0.12em',
+              color: 'var(--muted)',
+            }}>
+              Active profile
+            </div>
+            <ProfileTabs
+              profiles={profiles}
+              active={activeProfile}
+              onChange={setActiveProfile}
+              onMenu={(p) => setProfileMenuName(p.name)}
+              onAddProfile={() => setCreatingProfile(true)}
+            />
+          </div>
+          <div style={{
+            fontSize: 11.5,
+            color: 'var(--muted)',
+            fontFamily: 'var(--font-mono)',
+          }}>
+            Rules shown for{' '}
+            <span style={{ color: 'var(--accent-ink)' }}>
+              {PROFILE_DISPLAY[activeProfile] ?? activeProfile}
+            </span>
+          </div>
         </div>
       </div>
 
-      <div style={{ flex: 1, overflow: 'auto', padding: '20px 36px 60px' }}>
+      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+        <div style={{ flex: 1, overflow: 'auto', padding: '20px 36px 60px' }}>
         <div style={{ maxWidth: 1080 }}>
           {isEmergency && (
             <div style={{
@@ -1736,10 +2229,33 @@ export function AppsScreen() {
               <PendingBanner
                 apps={pendingApps}
                 browserTargets={pendingTargets}
+                isBrowserTab={false}
                 onOpenApp={(app) =>
                   setOpenApp({ appKey: app.appKey, mode: 'edit' })
                 }
-                onOpenBrowserTab={() => setTab('browser_targets')}
+                onAcceptApp={async (app) => {
+                  try {
+                    await api.updateKnownApp(app.appKey, {
+                      classificationStatus: 'confirmed',
+                    });
+                    refresh();
+                  } catch (err) {
+                    setError(String(err));
+                  }
+                }}
+                onAcceptBrowserTarget={async (target) => {
+                  // Browser targets don't have a confirmed status in the
+                  // backend yet; for now just re-affirm the classification
+                  // and refresh.
+                  try {
+                    await api.updateKnownBrowserTarget(target.targetKey, {
+                      classificationAction: target.classificationAction,
+                    });
+                    refresh();
+                  } catch (err) {
+                    setError(String(err));
+                  }
+                }}
               />
               <div style={{
                 display: 'flex',
@@ -1963,7 +2479,7 @@ export function AppsScreen() {
                     </tr>
                   </thead>
                   <tbody>
-                    {browserTargets.map((target) => {
+                    {filteredBrowserTargets.map((target) => {
                       const o = overrideMap.get(
                         overrideMapKey({
                           profile: activeProfile,
@@ -2001,13 +2517,68 @@ export function AppsScreen() {
             </>
           )}
         </div>
+        </div>
+
+        {categoryManagerOpen && (
+          <CategoryManagerModal
+            categories={categories}
+            apps={apps}
+            onClose={() => setCategoryManagerOpen(false)}
+            onRefresh={refresh}
+          />
+        )}
       </div>
 
-      {adding && (
+      {adding && tab === 'browser_targets' && (
         <AddBrowserTargetModal
           categories={categories}
           onClose={() => setAdding(false)}
           onCreate={createBrowserTarget}
+        />
+      )}
+
+      {adding && tab === 'apps' && (
+        <AddAppModal
+          categories={categories}
+          profiles={profiles}
+          emergencyBlockedCategories={emergencyBlockedCategories}
+          onClose={() => setAdding(false)}
+          onCreate={async ({
+            displayName,
+            executableName,
+            categoryNames,
+            rule,
+            customRules,
+          }) => {
+            const action: ClassificationAction =
+              rule === 'always-allow'
+                ? 'never_ban'
+                : rule === 'always-block'
+                ? 'always_ban'
+                : rule === 'block-work'
+                ? 'ban_during_work'
+                : 'unclassified';
+            const created = await api.createKnownApp({
+              displayName,
+              executableName: executableName ?? undefined,
+              categoryNames,
+              classificationAction: action,
+            });
+            if (rule === 'custom') {
+              for (const profile of profileNames) {
+                const v = customRules[profile];
+                if (v) {
+                  await api.setEnforcementProfileOverride({
+                    profileName: profile,
+                    subjectType: 'app',
+                    subjectKey: created.appKey,
+                    decision: v,
+                  });
+                }
+              }
+            }
+            refresh();
+          }}
         />
       )}
 
@@ -2126,15 +2697,6 @@ export function AppsScreen() {
               setError(String(err));
             }
           }}
-        />
-      )}
-
-      {categoryManagerOpen && (
-        <CategoryManagerModal
-          categories={categories}
-          apps={apps}
-          onClose={() => setCategoryManagerOpen(false)}
-          onRefresh={refresh}
         />
       )}
 

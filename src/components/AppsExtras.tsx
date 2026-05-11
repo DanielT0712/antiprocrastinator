@@ -1,6 +1,5 @@
 import {
   type CSSProperties,
-  type ReactNode,
   useEffect,
   useMemo,
   useState,
@@ -651,33 +650,18 @@ export function CategoryManagerModal({
 
   return (
     <div
-      onClick={onClose}
       style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 80,
-        background: 'rgba(10,9,8,0.55)',
-        backdropFilter: 'blur(3px)',
-        display: 'grid',
-        placeItems: 'center',
+        width: 320,
+        flexShrink: 0,
+        background: 'var(--bg-rail)',
+        borderLeft: '1px solid var(--line)',
+        display: 'flex',
+        flexDirection: 'column',
+        animation: 'ap-drawer-in 200ms ease-out',
       }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: 540,
-          maxHeight: '80vh',
-          background: 'var(--bg-raise)',
-          border: '1px solid var(--line)',
-          borderRadius: 12,
-          boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
-          overflow: 'hidden',
-          display: 'flex',
-          flexDirection: 'column',
-        }}
-      >
         <div style={{
-          padding: '20px 22px 14px',
+          padding: '18px 18px 14px',
           borderBottom: '1px solid var(--line)',
           display: 'flex',
           justifyContent: 'space-between',
@@ -686,19 +670,19 @@ export function CategoryManagerModal({
           <div>
             <div style={{
               fontFamily: 'var(--font-display)',
-              fontSize: 22,
+              fontSize: 17,
               color: 'var(--ink)',
-              letterSpacing: '-0.015em',
+              letterSpacing: '-0.01em',
             }}>
-              Manage categories
+              Categories
             </div>
             <div style={{
-              fontSize: 12.5,
+              fontSize: 11.5,
               color: 'var(--muted)',
               marginTop: 4,
+              fontFamily: 'var(--font-mono)',
             }}>
-              Built-in categories cannot be deleted. New categories show up immediately
-              in the rule editor.
+              Drag apps between categories.
             </div>
           </div>
           <button
@@ -711,7 +695,7 @@ export function CategoryManagerModal({
               padding: 4,
             }}
           >
-            <Icons.x size={16} />
+            <Icons.x size={15} />
           </button>
         </div>
 
@@ -941,7 +925,6 @@ export function CategoryManagerModal({
             {error}
           </div>
         )}
-      </div>
     </div>
   );
 }
@@ -949,102 +932,222 @@ export function CategoryManagerModal({
 interface PendingBannerProps {
   apps: KnownApp[];
   browserTargets: KnownBrowserTarget[];
+  isBrowserTab: boolean;
   onOpenApp: (app: KnownApp) => void;
-  onOpenBrowserTab: () => void;
+  onAcceptApp: (app: KnownApp) => void | Promise<void>;
+  onAcceptBrowserTarget: (target: KnownBrowserTarget) => void | Promise<void>;
 }
+
+const PRESET_LABEL_FOR_ACTION: Record<string, string> = {
+  always_ban: 'Always block',
+  ban_during_work: 'Block for work',
+  never_ban: 'Always allow',
+  unclassified: 'Unclassified',
+};
 
 export function PendingBanner({
   apps,
   browserTargets,
+  isBrowserTab,
   onOpenApp,
-  onOpenBrowserTab,
+  onAcceptApp,
+  onAcceptBrowserTarget,
 }: PendingBannerProps) {
-  const total = apps.length + browserTargets.length;
-  if (total === 0) return null;
-  const sample: ReactNode[] = [];
-  for (const app of apps.slice(0, 3)) {
-    sample.push(
-      <button
-        key={`a-${app.appKey}`}
-        onClick={() => onOpenApp(app)}
-        style={chipStyle}
-      >
-        {app.displayName}
-      </button>,
-    );
-  }
-  for (const target of browserTargets.slice(0, 3)) {
-    sample.push(
-      <button
-        key={`b-${target.targetKey}`}
-        onClick={onOpenBrowserTab}
-        style={chipStyle}
-      >
-        {target.displayName}
-      </button>,
-    );
-  }
+  const [open, setOpen] = useState(false);
+  const items = isBrowserTab ? browserTargets : apps;
+  if (items.length === 0) return null;
+
+  const label = isBrowserTab ? 'site' : 'app';
+  const labelPlural = items.length === 1 ? label : `${label}s`;
+
   return (
     <div style={{
-      padding: '12px 14px',
-      border: '1px solid color-mix(in oklch, var(--warn) 60%, var(--line))',
-      borderRadius: 8,
+      border: '1px solid color-mix(in oklch, var(--accent) 40%, var(--line))',
+      borderRadius: 9,
+      background: 'color-mix(in oklch, var(--accent) 10%, var(--bg-raise))',
+      padding: open ? '14px 16px 4px' : '11px 14px',
       marginBottom: 16,
-      background: 'color-mix(in oklch, var(--warn) 8%, var(--bg-raise))',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 8,
     }}>
       <div style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 8,
+        justifyContent: 'space-between',
+        gap: 12,
       }}>
-        <span style={{
-          fontFamily: 'var(--font-mono)',
-          fontSize: 11,
-          color: 'var(--warn)',
-          textTransform: 'uppercase',
-          letterSpacing: '0.1em',
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          minWidth: 0,
         }}>
-          Pending review
-        </span>
-        <span style={{
-          fontSize: 13,
-          color: 'var(--ink)',
+          <Icons.alert size={16} />
+          <div style={{ fontSize: 13, color: 'var(--ink)' }}>
+            <strong style={{ fontWeight: 500 }}>
+              {items.length} newly-seen {labelPlural}
+            </strong>
+            <span style={{ color: 'var(--muted)' }}>
+              {' '}· auto-classified, waiting for review
+            </span>
+          </div>
+        </div>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '6px 11px',
+            background: 'transparent',
+            color: 'var(--ink)',
+            border: '1px solid var(--line)',
+            borderRadius: 6,
+            fontSize: 12.5,
+            cursor: 'pointer',
+            fontFamily: 'var(--font-sans)',
+          }}
+        >
+          {open ? 'Hide' : 'Review'}
+          <Icons.chevronD size={12} />
+        </button>
+      </div>
+      {open && (
+        <div style={{
+          marginTop: 12,
+          display: 'grid',
+          gap: 8,
+          paddingBottom: 10,
         }}>
-          {total} {total === 1 ? 'item' : 'items'} need a category and rule
-        </span>
-      </div>
-      <div style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        gap: 6,
-      }}>
-        {sample}
-        {total > sample.length && (
-          <span style={{
-            fontSize: 11,
-            color: 'var(--muted)',
-            fontFamily: 'var(--font-mono)',
-            alignSelf: 'center',
-            marginLeft: 4,
-          }}>
-            +{total - sample.length} more
-          </span>
-        )}
-      </div>
+          {!isBrowserTab &&
+            apps.map((a) => (
+              <div
+                key={a.appKey}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '10px 12px',
+                  background: 'var(--bg)',
+                  border: '1px solid var(--line)',
+                  borderRadius: 7,
+                }}
+              >
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  minWidth: 0,
+                }}>
+                  <AppGlyph name={a.displayName} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, color: 'var(--ink)' }}>
+                      {a.displayName}
+                    </div>
+                    <div style={{
+                      fontSize: 11,
+                      color: 'var(--muted)',
+                      marginTop: 2,
+                      fontFamily: 'var(--font-mono)',
+                    }}>
+                      Guessed: {a.effectiveCategory ?? 'Uncategorized'} ·{' '}
+                      {PRESET_LABEL_FOR_ACTION[a.classificationAction] ??
+                        a.classificationAction}
+                      {a.confidence != null && (
+                        <> · {Math.round(a.confidence * 100)}% confidence</>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    onClick={() => onOpenApp(a)}
+                    style={ghostBtnStyle}
+                  >
+                    Change…
+                  </button>
+                  <button
+                    onClick={() => onAcceptApp(a)}
+                    style={primaryBtnStyle}
+                  >
+                    Accept
+                  </button>
+                </div>
+              </div>
+            ))}
+          {isBrowserTab &&
+            browserTargets.map((t) => (
+              <div
+                key={t.targetKey}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '10px 12px',
+                  background: 'var(--bg)',
+                  border: '1px solid var(--line)',
+                  borderRadius: 7,
+                }}
+              >
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  minWidth: 0,
+                }}>
+                  <AppGlyph name={t.displayName} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, color: 'var(--ink)' }}>
+                      {t.displayName}
+                    </div>
+                    <div style={{
+                      fontSize: 11,
+                      color: 'var(--muted)',
+                      marginTop: 2,
+                      fontFamily: 'var(--font-mono)',
+                    }}>
+                      Guessed: {t.categoryName ?? 'Uncategorized'} ·{' '}
+                      {PRESET_LABEL_FOR_ACTION[t.classificationAction] ??
+                        t.classificationAction}
+                      {t.confidence != null && (
+                        <> · {Math.round(t.confidence * 100)}% confidence</>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    onClick={() => onAcceptBrowserTarget(t)}
+                    style={primaryBtnStyle}
+                  >
+                    Accept
+                  </button>
+                </div>
+              </div>
+            ))}
+        </div>
+      )}
     </div>
   );
 }
 
-const chipStyle: CSSProperties = {
-  padding: '4px 9px',
-  fontSize: 11.5,
-  background: 'var(--bg)',
+const ghostBtnStyle: CSSProperties = {
+  padding: '6px 11px',
+  background: 'transparent',
   color: 'var(--ink)',
   border: '1px solid var(--line)',
-  borderRadius: 5,
+  borderRadius: 6,
+  fontSize: 12.5,
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+};
+
+const primaryBtnStyle: CSSProperties = {
+  padding: '6px 12px',
+  background: 'var(--ink)',
+  color: 'var(--bg)',
+  border: 'none',
+  borderRadius: 6,
+  fontSize: 12.5,
+  fontWeight: 500,
   cursor: 'pointer',
   fontFamily: 'var(--font-sans)',
 };

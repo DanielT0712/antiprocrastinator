@@ -123,6 +123,28 @@ export const api = {
     invoke<string | null>('get_app_icon', { appKey }),
   refreshKnownAppsInventory: () =>
     invoke<KnownApp[]>('refresh_known_apps_inventory'),
+  createKnownApp: (input: {
+    displayName: string;
+    executableName?: string;
+    executablePath?: string;
+    appPath?: string;
+    categoryNames?: string[];
+    categoryOverride?: string | null;
+    classificationAction: ClassificationAction;
+    syncRule?: boolean;
+  }) =>
+    invoke<KnownApp>('create_known_app', {
+      app: {
+        displayName: input.displayName,
+        executableName: input.executableName,
+        executablePath: input.executablePath,
+        appPath: input.appPath,
+        categoryNames: input.categoryNames ?? [],
+        categoryOverride: input.categoryOverride ?? undefined,
+        classificationAction: input.classificationAction,
+        syncRule: input.syncRule ?? true,
+      },
+    }),
   updateKnownApp: (
     appKey: string,
     updates: {
