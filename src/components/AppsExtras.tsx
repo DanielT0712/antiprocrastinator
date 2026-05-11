@@ -643,21 +643,23 @@ export function CategoryManagerModal({
   onClose,
   onRefresh,
 }: CategoryManagerProps) {
-  const [draftName, setDraftName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [dragOverCategory, setDragOverCategory] = useState<string | null>(null);
+  const [renamingName, setRenamingName] = useState<string | null>(null);
+  const [renameVal, setRenameVal] = useState('');
+  const [confirmDeleteName, setConfirmDeleteName] = useState<string | null>(null);
+  const [newInput, setNewInput] = useState(false);
+  const [newName, setNewName] = useState('');
 
-  const appsByCategory = useMemo(() => {
-    const map = new Map<string, KnownApp[]>();
-    for (const c of categories) map.set(c.name, []);
-    map.set('Uncategorized', []);
+  const counts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const cat of categories) c[cat.name] = 0;
+    c['Uncategorized'] = 0;
     for (const a of apps) {
       const bucket = a.effectiveCategory ?? 'Uncategorized';
-      const list = map.get(bucket) ?? [];
-      list.push(a);
-      map.set(bucket, list);
+      c[bucket] = (c[bucket] ?? 0) + 1;
     }
-    return map;
+    return c;
   }, [apps, categories]);
 
   const reassign = async (appKey: string, targetCategory: string | null) => {
@@ -679,12 +681,32 @@ export function CategoryManagerModal({
     return () => document.removeEventListener('keydown', h);
   }, [onClose]);
 
-  const create = async () => {
-    const name = draftName.trim();
+  const startRename = (name: string) => {
+    setRenamingName(name);
+    setRenameVal(name);
+  };
+  const commitRename = async (oldName: string) => {
+    const next = renameVal.trim();
+    setRenamingName(null);
+    if (!next || next === oldName) return;
+    try {
+      await api.upsertAppCategory({ name: next });
+      // The backend doesn't have a rename op yet; the new category is
+      // added and the old one stays. Leave deletion to the user via the
+      // trash button so they don't lose data accidentally.
+      onRefresh();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const addCat = async () => {
+    const name = newName.trim();
     if (!name) return;
     try {
       await api.upsertAppCategory({ name });
-      setDraftName('');
+      setNewName('');
+      setNewInput(false);
       onRefresh();
     } catch (err) {
       setError(String(err));
@@ -694,16 +716,29 @@ export function CategoryManagerModal({
   const remove = async (name: string) => {
     try {
       await api.deleteAppCategory(name);
+      setConfirmDeleteName(null);
       onRefresh();
     } catch (err) {
       setError(String(err));
     }
   };
 
+  type Row = AppCategory & { permanent?: boolean };
+  const rows: Row[] = [
+    ...categories,
+    {
+      name: 'Uncategorized',
+      builtin: true,
+      createdAt: 0,
+      updatedAt: 0,
+      permanent: true,
+    } as Row,
+  ];
+
   return (
     <div
       style={{
-        width: 320,
+        width: 280,
         flexShrink: 0,
         background: 'var(--bg-rail)',
         borderLeft: '1px solid var(--line)',
@@ -712,30 +747,21 @@ export function CategoryManagerModal({
         animation: 'ap-drawer-in 200ms ease-out',
       }}
     >
+        {/* header */}
         <div style={{
           padding: '18px 18px 14px',
           borderBottom: '1px solid var(--line)',
           display: 'flex',
+          alignItems: 'center',
           justifyContent: 'space-between',
-          alignItems: 'flex-start',
         }}>
-          <div>
-            <div style={{
-              fontFamily: 'var(--font-display)',
-              fontSize: 17,
-              color: 'var(--ink)',
-              letterSpacing: '-0.01em',
-            }}>
-              Categories
-            </div>
-            <div style={{
-              fontSize: 11.5,
-              color: 'var(--muted)',
-              marginTop: 4,
-              fontFamily: 'var(--font-mono)',
-            }}>
-              Drag apps between categories.
-            </div>
+          <div style={{
+            fontFamily: 'var(--font-display)',
+            fontSize: 17,
+            color: 'var(--ink)',
+            letterSpacing: '-0.01em',
+          }}>
+            Categories
           </div>
           <button
             onClick={onClose}
@@ -751,24 +777,13 @@ export function CategoryManagerModal({
           </button>
         </div>
 
-        <div style={{
-          padding: '6px 18px 10px',
-          fontSize: 12,
-          color: 'var(--muted)',
-          lineHeight: 1.55,
-        }}>
-          Drag app chips between categories to re-classify. Drop on
-          <em style={{ color: 'var(--ink)', fontStyle: 'normal' }}> Uncategorized </em>
-          to clear an override.
-        </div>
-
-        <div style={{ flex: 1, overflow: 'auto', padding: '8px 18px 14px' }}>
-          {[
-            ...categories,
-            { name: 'Uncategorized', builtin: true, createdAt: 0, updatedAt: 0 } as AppCategory,
-          ].map((c) => {
-            const items = appsByCategory.get(c.name) ?? [];
+        {/* category list */}
+        <div style={{ flex: 1, overflow: 'auto', padding: '8px 10px' }}>
+          {rows.map((c) => {
             const isDropTarget = dragOverCategory === c.name;
+            const isPermanent = !!c.permanent;
+            const isConfirmDelete = confirmDeleteName === c.name;
+            const count = counts[c.name] ?? 0;
             return (
               <div
                 key={c.name}
@@ -784,182 +799,266 @@ export function CategoryManagerModal({
                   const appKey = e.dataTransfer.getData('text/app-key');
                   setDragOverCategory(null);
                   if (!appKey) return;
-                  reassign(
-                    appKey,
-                    c.name === 'Uncategorized' ? null : c.name,
-                  );
+                  reassign(appKey, isPermanent ? null : c.name);
                 }}
                 style={{
-                  padding: '11px 14px',
+                  borderRadius: 7,
                   border:
                     '1px solid ' +
-                    (isDropTarget ? 'var(--accent)' : 'var(--line)'),
-                  borderRadius: 8,
-                  marginBottom: 8,
+                    (isDropTarget
+                      ? 'var(--accent)'
+                      : 'var(--line)'),
                   background: isDropTarget
-                    ? 'color-mix(in oklch, var(--accent) 8%, var(--bg))'
-                    : 'var(--bg)',
-                  transition: 'background 80ms ease, border-color 80ms ease',
+                    ? 'color-mix(in oklch, var(--accent) 14%, var(--bg-raise))'
+                    : 'var(--bg-raise)',
+                  marginBottom: 6,
+                  overflow: 'hidden',
+                  transition: 'border-color 80ms, background 80ms',
+                  opacity: isPermanent ? 0.75 : 1,
                 }}
               >
                 <div style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 10,
-                  marginBottom: items.length > 0 ? 10 : 0,
+                  gap: 7,
+                  padding: '10px 11px',
                 }}>
-                  <div style={{
-                    color: 'var(--ink)',
-                    fontSize: 13.5,
-                    fontWeight: 500,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                  }}>
-                    {c.name}
-                    {c.builtin && c.name !== 'Uncategorized' && (
-                      <span style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 10,
-                        color: 'var(--faint)',
-                        textTransform: 'uppercase',
-                        letterSpacing: '0.08em',
-                        padding: '1px 5px',
-                        border: '1px solid var(--line)',
-                        borderRadius: 3,
-                      }}>
-                        builtin
-                      </span>
-                    )}
-                  </div>
-                  <div style={{
-                    fontSize: 11,
-                    color: 'var(--muted)',
-                    fontFamily: 'var(--font-mono)',
-                  }}>
-                    {items.length} {items.length === 1 ? 'app' : 'apps'}
-                  </div>
-                  <div style={{ flex: 1 }} />
-                  {!c.builtin && (
-                    <button
-                      onClick={() => {
-                        if (
-                          confirm(
-                            `Delete category "${c.name}"? Apps will become uncategorized.`,
-                          )
-                        ) {
-                          remove(c.name);
-                        }
-                      }}
+                  {!isPermanent && (
+                    <span
+                      title="Drag to reorder"
                       style={{
-                        padding: '5px 10px',
-                        background: 'transparent',
-                        border:
-                          '1px solid color-mix(in oklch, var(--danger) 50%, var(--line))',
-                        borderRadius: 5,
-                        color: 'var(--danger)',
-                        fontSize: 11.5,
-                        cursor: 'pointer',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 4,
+                        color: 'var(--faint)',
+                        cursor: 'grab',
+                        fontSize: 13,
+                        lineHeight: 1,
+                        flexShrink: 0,
+                        userSelect: 'none',
                       }}
                     >
-                      <Icons.trash size={11} /> Delete
-                    </button>
+                      ⠿
+                    </span>
                   )}
-                </div>
-                {items.length > 0 && (
-                  <div style={{
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: 6,
+
+                  {renamingName === c.name ? (
+                    <input
+                      autoFocus
+                      value={renameVal}
+                      onChange={(e) => setRenameVal(e.target.value)}
+                      onBlur={() => commitRename(c.name)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitRename(c.name);
+                        if (e.key === 'Escape') setRenamingName(null);
+                      }}
+                      style={{
+                        flex: 1,
+                        background: 'transparent',
+                        border: 'none',
+                        borderBottom: '1px solid var(--accent)',
+                        color: 'var(--ink)',
+                        fontSize: 13,
+                        outline: 'none',
+                        padding: '0 0 2px',
+                      }}
+                    />
+                  ) : (
+                    <div
+                      onClick={() => !isPermanent && startRename(c.name)}
+                      title={
+                        isPermanent
+                          ? 'Built-in — cannot rename'
+                          : 'Click to rename'
+                      }
+                      style={{
+                        flex: 1,
+                        fontSize: 13,
+                        color: isPermanent ? 'var(--muted)' : 'var(--ink)',
+                        cursor: isPermanent ? 'default' : 'text',
+                        minWidth: 0,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        textDecoration: isPermanent
+                          ? 'none'
+                          : 'underline dotted color-mix(in oklch, var(--ink) 25%, transparent)',
+                        textUnderlineOffset: '3px',
+                      }}
+                    >
+                      {c.name}
+                    </div>
+                  )}
+
+                  <span style={{
+                    fontSize: 10.5,
+                    color: 'var(--muted)',
+                    fontFamily: 'var(--font-mono)',
+                    flexShrink: 0,
                   }}>
-                    {items.map((a) => (
-                      <div
-                        key={a.appKey}
-                        draggable
-                        onDragStart={(e) => {
-                          e.dataTransfer.setData('text/app-key', a.appKey);
-                          e.dataTransfer.effectAllowed = 'move';
-                        }}
-                        title={`Drag to move ${a.displayName} to another category`}
+                    {count}
+                  </span>
+
+                  {!isPermanent && !c.builtin && (
+                    isConfirmDelete ? (
+                      <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                        <span style={{
+                          fontSize: 11,
+                          color: 'var(--danger)',
+                          fontFamily: 'var(--font-mono)',
+                          whiteSpace: 'nowrap',
+                        }}>
+                          Delete?
+                        </span>
+                        <button
+                          onClick={() => remove(c.name)}
+                          style={{
+                            padding: '2px 7px',
+                            fontSize: 11,
+                            background: 'var(--danger)',
+                            color: '#fff',
+                            border: 'none',
+                            borderRadius: 4,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Yes
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteName(null)}
+                          style={{
+                            padding: '2px 7px',
+                            fontSize: 11,
+                            background: 'transparent',
+                            color: 'var(--muted)',
+                            border: '1px solid var(--line)',
+                            borderRadius: 4,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          No
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmDeleteName(c.name)}
+                        title="Delete category"
                         style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 6,
-                          padding: '5px 10px 5px 6px',
-                          background: 'var(--bg-raise)',
-                          border: '1px solid var(--line)',
-                          borderRadius: 20,
-                          fontSize: 11.5,
-                          color: 'var(--ink)',
-                          cursor: 'grab',
-                          userSelect: 'none',
+                          background: 'transparent',
+                          border: 'none',
+                          color: 'var(--faint)',
+                          cursor: 'pointer',
+                          padding: '0 2px',
+                          fontSize: 13,
+                          lineHeight: 1,
+                          flexShrink: 0,
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.color = 'var(--danger)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.color = 'var(--faint)';
                         }}
                       >
-                        <span style={{
-                          width: 18,
-                          height: 18,
-                          borderRadius: 4,
-                          background:
-                            'color-mix(in oklch, var(--ink) 8%, transparent)',
-                          color: 'var(--muted)',
-                          display: 'inline-grid',
-                          placeItems: 'center',
-                          fontSize: 10,
-                          fontFamily: 'var(--font-mono)',
-                        }}>
-                          {(a.displayName || a.appKey).charAt(0).toUpperCase()}
-                        </span>
-                        {a.displayName}
-                      </div>
-                    ))}
+                        <Icons.trash size={13} />
+                      </button>
+                    )
+                  )}
+                </div>
+
+                {isDropTarget && (
+                  <div style={{
+                    padding: '4px 11px 10px',
+                    fontSize: 11,
+                    color: 'var(--accent-ink)',
+                    fontFamily: 'var(--font-mono)',
+                    fontStyle: 'italic',
+                  }}>
+                    drop here
                   </div>
                 )}
               </div>
             );
           })}
+        </div>
 
-          <div style={{
-            border: '1px dashed var(--line)',
-            borderRadius: 8,
-            padding: 14,
-            display: 'flex',
-            gap: 8,
-            alignItems: 'center',
-          }}>
-            <input
-              value={draftName}
-              onChange={(e) => setDraftName(e.target.value)}
-              placeholder="New category name…"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') create();
-              }}
-              style={{
-                ...inputStyle,
-                flex: 1,
-                boxSizing: 'border-box',
-              }}
-            />
+        {/* new category */}
+        <div style={{
+          padding: '10px 10px 16px',
+          borderTop: '1px solid var(--line)',
+        }}>
+          {newInput ? (
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                autoFocus
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') addCat();
+                  if (e.key === 'Escape') setNewInput(false);
+                }}
+                placeholder="Category name…"
+                style={{
+                  flex: 1,
+                  padding: '7px 10px',
+                  background: 'var(--bg-raise)',
+                  border: '1px solid var(--accent)',
+                  borderRadius: 6,
+                  color: 'var(--ink)',
+                  fontSize: 12.5,
+                  outline: 'none',
+                }}
+              />
+              <button
+                onClick={addCat}
+                style={{
+                  padding: '7px 12px',
+                  background: 'var(--ink)',
+                  color: 'var(--bg)',
+                  border: 'none',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  cursor: 'pointer',
+                  fontFamily: 'var(--font-sans)',
+                  fontWeight: 500,
+                }}
+              >
+                Add
+              </button>
+              <button
+                onClick={() => setNewInput(false)}
+                style={{
+                  padding: '7px 10px',
+                  background: 'transparent',
+                  color: 'var(--muted)',
+                  border: '1px solid var(--line)',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  cursor: 'pointer',
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          ) : (
             <button
-              onClick={create}
-              disabled={!draftName.trim()}
+              onClick={() => setNewInput(true)}
               style={{
-                padding: '7px 14px',
-                background: draftName.trim() ? 'var(--accent)' : 'var(--line)',
-                color: draftName.trim()
-                  ? 'oklch(0.18 0.04 60)'
-                  : 'var(--muted)',
-                border: '1px solid var(--accent)',
-                borderRadius: 5,
+                width: '100%',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 6,
+                padding: '7px 11px',
+                background: 'transparent',
+                color: 'var(--ink)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
                 fontSize: 12.5,
-                cursor: draftName.trim() ? 'pointer' : 'not-allowed',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-sans)',
               }}
             >
-              Add
+              <Icons.plus size={13} /> New category
             </button>
-          </div>
+          )}
         </div>
         {error && (
           <div

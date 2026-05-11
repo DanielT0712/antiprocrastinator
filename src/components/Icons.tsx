@@ -86,6 +86,21 @@ export const Icons = {
       }
     />
   ),
+  tweak: (p: IconProps) => (
+    <Icon
+      {...p}
+      d={
+        <>
+          <path d="M4 7h10" />
+          <path d="M18 7h2" />
+          <circle cx="16" cy="7" r="2" />
+          <path d="M4 17h4" />
+          <path d="M12 17h8" />
+          <circle cx="10" cy="17" r="2" />
+        </>
+      }
+    />
+  ),
   check: (p: IconProps) => <Icon {...p} d={<path d="m5 12 5 5 9-11" />} />,
   plus: (p: IconProps) => (
     <Icon {...p} d={<><path d="M12 5v14M5 12h14" /></>} />

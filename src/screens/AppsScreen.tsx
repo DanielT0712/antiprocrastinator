@@ -687,7 +687,7 @@ function CategorySection({
                 }}
                 title="Open category manager"
               >
-                <Icons.settings size={13} /> Manage…
+                <Icons.tweak size={13} /> Manage…
               </button>
             </div>
             <div style={{
@@ -2141,7 +2141,7 @@ export function AppsScreen() {
                 fontFamily: 'var(--font-sans)',
               }}
             >
-              <Icons.settings size={13} /> Manage categories
+              <Icons.tweak size={13} /> Manage categories
             </button>
             <button
               onClick={() => setAdding(true)}
