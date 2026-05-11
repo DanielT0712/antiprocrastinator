@@ -348,6 +348,7 @@ export function HomeScreen({ onError }: Props) {
         <BlockEndedModal
           onClose={() => setModal(null)}
           onExtend={() => setModal('extend')}
+          taskName={currentTask?.name ?? block?.title}
           onError={onError}
         />
       )}

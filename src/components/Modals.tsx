@@ -549,10 +549,16 @@ export function EmergencyModal({ onClose, onError }: EmergencyProps) {
 interface BlockEndedProps {
   onClose: () => void;
   onExtend: () => void;
+  taskName?: string;
   onError?: (msg: string) => void;
 }
 
-export function BlockEndedModal({ onClose, onExtend, onError }: BlockEndedProps) {
+export function BlockEndedModal({
+  onClose,
+  onExtend,
+  taskName,
+  onError,
+}: BlockEndedProps) {
   const [busy, setBusy] = useState<'done' | 'continue' | null>(null);
 
   const done = async () => {
@@ -580,7 +586,11 @@ export function BlockEndedModal({ onClose, onExtend, onError }: BlockEndedProps)
     <Backdrop onClose={onClose} align="top">
       <ModalShell
         title="This block has ended."
-        subtitle="Keep going on the same task or mark it done."
+        subtitle={
+          taskName
+            ? `${taskName} — keep going or mark it done.`
+            : 'Keep going or mark it done.'
+        }
         width={460}
         footer={
           <>
