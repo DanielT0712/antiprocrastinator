@@ -168,13 +168,29 @@ pub fn scan_processes() -> Vec<ProcessInfo> {
     let mut system = System::new_all();
     system.refresh_processes(ProcessesToUpdate::All, true);
 
+    #[cfg(target_os = "windows")]
+    let visible_pids = taskbar_pids();
+
     system
         .processes()
         .iter()
         .filter_map(|(pid, process)| {
             let exe = process.exe().map(|p| p.to_path_buf());
-            if !is_user_facing_app(exe.as_deref()) {
-                return None;
+            #[cfg(target_os = "windows")]
+            {
+                // Prefer a taskbar / EnumWindows match when we have one,
+                // otherwise fall back to the path-based heuristic.
+                let raw_pid = pid.as_u32();
+                let in_taskbar = visible_pids.contains(&raw_pid);
+                if !in_taskbar && !is_user_facing_app(exe.as_deref()) {
+                    return None;
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                if !is_user_facing_app(exe.as_deref()) {
+                    return None;
+                }
             }
             Some(ProcessInfo {
                 pid: pid.as_u32(),
@@ -184,6 +200,49 @@ pub fn scan_processes() -> Vec<ProcessInfo> {
             })
         })
         .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn taskbar_pids() -> HashSet<u32> {
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW,
+        GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, GW_OWNER,
+        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    };
+
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let pids = &mut *(lparam as *mut HashSet<u32>);
+        if IsWindowVisible(hwnd) == 0 {
+            return TRUE;
+        }
+        if GetWindowTextLengthW(hwnd) == 0 {
+            return TRUE;
+        }
+        let owner = GetWindow(hwnd, GW_OWNER);
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let is_app_window = (ex_style & WS_EX_APPWINDOW) != 0;
+        let is_tool = (ex_style & WS_EX_TOOLWINDOW) != 0;
+        let visible_in_taskbar = is_app_window || (!is_tool && owner.is_null());
+        if !visible_in_taskbar {
+            return TRUE;
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != 0 {
+            pids.insert(pid);
+        }
+        TRUE
+    }
+
+    let mut pids: HashSet<u32> = HashSet::new();
+    unsafe {
+        EnumWindows(
+            Some(cb),
+            &mut pids as *mut HashSet<u32> as LPARAM,
+        );
+    }
+    pids
 }
 
 /// Heuristic: a process is "user-facing" if its executable lives inside a
@@ -1582,26 +1641,97 @@ fn discover_installed_apps() -> Vec<DiscoveredApp> {
 
 #[cfg(target_os = "macos")]
 fn discover_installed_apps_for_platform() -> Vec<DiscoveredApp> {
-    let mut apps = Vec::new();
+    let mut apps: Vec<DiscoveredApp> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // Spotlight knows about every .app bundle on disk regardless of location
+    // (Downloads, /Volumes, ~/Desktop, Steam library, Setapp, etc.).
+    if let Ok(output) = Command::new("mdfind")
+        .arg("kMDItemContentType == 'com.apple.application-bundle'")
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let path = PathBuf::from(line.trim());
+                if path.extension().and_then(|value| value.to_str()) != Some("app") {
+                    continue;
+                }
+                let display = path.display().to_string();
+                // Skip embedded helper / framework bundles.
+                if display.contains(".app/Contents/") {
+                    continue;
+                }
+                if !seen.insert(display.clone()) {
+                    continue;
+                }
+                if let Some(display_name) = path
+                    .file_stem()
+                    .map(|name| name.to_string_lossy().to_string())
+                {
+                    let (category_guess, confidence) =
+                        classify_app_candidate(&display_name, Some(&display));
+                    apps.push(DiscoveredApp {
+                        app_key: app_key_for(
+                            &display_name,
+                            Some(&display_name),
+                            Some(&display),
+                        ),
+                        display_name: display_name.clone(),
+                        executable_name: Some(display_name.clone()),
+                        executable_path: None,
+                        app_path: Some(display),
+                        platform: "macos".to_string(),
+                        source: "installed_scan".to_string(),
+                        category_guess,
+                        confidence,
+                    });
+                }
+            }
+        }
+    }
+
+    // Fallback: walk the canonical roots in case Spotlight is disabled.
     let mut roots = vec![
         PathBuf::from("/Applications"),
         PathBuf::from("/System/Applications"),
+        PathBuf::from("/Applications/Setapp"),
     ];
     if let Some(home) = dirs::home_dir() {
         roots.push(home.join("Applications"));
+        roots.push(home.join(
+            "Library/Application Support/Steam/steamapps/common",
+        ));
     }
-
     for root in roots {
+        let before = apps.len();
         collect_app_bundles(&root, &mut apps);
+        // dedupe newly added entries against `seen`.
+        for app in &apps[before..] {
+            if let Some(path) = &app.app_path {
+                seen.insert(path.clone());
+            }
+        }
     }
-
-    apps
+    // Final dedupe by app_path.
+    let mut deduped: Vec<DiscoveredApp> = Vec::new();
+    let mut taken: HashSet<String> = HashSet::new();
+    for app in apps {
+        let key = app
+            .app_path
+            .clone()
+            .unwrap_or_else(|| app.display_name.clone());
+        if taken.insert(key) {
+            deduped.push(app);
+        }
+    }
+    deduped
 }
 
 #[cfg(target_os = "windows")]
 fn discover_installed_apps_for_platform() -> Vec<DiscoveredApp> {
     let mut apps = Vec::new();
-    let mut roots = Vec::new();
+    let mut roots: Vec<PathBuf> = Vec::new();
 
     for key in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
         if let Ok(value) = std::env::var(key) {
@@ -1609,7 +1739,9 @@ fn discover_installed_apps_for_platform() -> Vec<DiscoveredApp> {
             if key == "LOCALAPPDATA" {
                 roots.push(path.join("Programs"));
             } else {
-                roots.push(path);
+                // Native Win32 installs + Microsoft Store / UWP packages.
+                roots.push(path.clone());
+                roots.push(path.join("WindowsApps"));
             }
         }
     }
@@ -1629,7 +1761,110 @@ fn discover_installed_apps_for_platform() -> Vec<DiscoveredApp> {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn discover_installed_apps_for_platform() -> Vec<DiscoveredApp> {
-    vec![]
+    let mut apps: Vec<DiscoveredApp> = Vec::new();
+    let mut roots: Vec<PathBuf> = vec![
+        PathBuf::from("/usr/share/applications"),
+        PathBuf::from("/usr/local/share/applications"),
+        PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+        PathBuf::from("/var/lib/snapd/desktop/applications"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".local/share/applications"));
+        roots.push(home.join(".local/share/flatpak/exports/share/applications"));
+    }
+    if let Ok(xdg_dirs) = std::env::var("XDG_DATA_DIRS") {
+        for entry in xdg_dirs.split(':') {
+            let path = PathBuf::from(entry).join("applications");
+            if !roots.contains(&path) {
+                roots.push(path);
+            }
+        }
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+    for root in roots {
+        let Ok(entries) = fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("desktop") {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            // Only honour the [Desktop Entry] section; bail on the first
+            // additional section header.
+            let mut in_entry = false;
+            let mut name: Option<String> = None;
+            let mut exec: Option<String> = None;
+            let mut no_display = false;
+            let mut hidden = false;
+            let mut entry_type: Option<String> = None;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('[') && line.ends_with(']') {
+                    in_entry = line == "[Desktop Entry]";
+                    continue;
+                }
+                if !in_entry {
+                    continue;
+                }
+                if let Some(value) = line.strip_prefix("Name=") {
+                    name.get_or_insert_with(|| value.trim().to_string());
+                } else if let Some(value) = line.strip_prefix("Exec=") {
+                    let head = value
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    exec.get_or_insert(head);
+                } else if let Some(value) = line.strip_prefix("Type=") {
+                    entry_type = Some(value.trim().to_string());
+                } else if line == "NoDisplay=true" {
+                    no_display = true;
+                } else if line == "Hidden=true" {
+                    hidden = true;
+                }
+            }
+            if hidden || no_display {
+                continue;
+            }
+            if entry_type.as_deref().unwrap_or("Application") != "Application" {
+                continue;
+            }
+            let Some(display_name) = name else {
+                continue;
+            };
+            let exec_path = exec
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim_start_matches('"').trim_end_matches('"').to_string());
+            let key_path = exec_path.clone().unwrap_or_else(|| display_name.clone());
+            if !seen.insert(key_path.clone()) {
+                continue;
+            }
+            let (category_guess, confidence) =
+                classify_app_candidate(&display_name, exec_path.as_deref());
+            apps.push(DiscoveredApp {
+                app_key: app_key_for(
+                    &display_name,
+                    Some(&display_name),
+                    exec_path.as_deref(),
+                ),
+                display_name: display_name.clone(),
+                executable_name: Some(display_name.clone()),
+                executable_path: exec_path,
+                app_path: Some(path.display().to_string()),
+                platform: "linux".to_string(),
+                source: "installed_scan".to_string(),
+                category_guess,
+                confidence,
+            });
+        }
+    }
+    apps
 }
 
 #[cfg(target_os = "macos")]
