@@ -85,9 +85,11 @@ dependencies = [
 name = "antiprocrastinator"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
  "log",
+ "once_cell",
  "rusqlite",
  "serde",
  "serde_json",

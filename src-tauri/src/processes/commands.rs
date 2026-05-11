@@ -31,6 +31,15 @@ pub fn get_known_apps(database: State<'_, DatabaseState>) -> Result<Vec<KnownApp
 }
 
 #[tauri::command]
+pub fn get_app_icon(
+    app_key: String,
+    database: State<'_, DatabaseState>,
+) -> Result<Option<String>, String> {
+    let connection = database.connection()?;
+    monitor::get_app_icon_data_url(&connection, &app_key)
+}
+
+#[tauri::command]
 pub fn get_emergency_allowlist(
     database: State<'_, DatabaseState>,
 ) -> Result<Vec<KnownApp>, String> {

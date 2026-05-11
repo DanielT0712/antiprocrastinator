@@ -57,6 +57,7 @@ pub fn run() {
             processes::commands::get_running_processes,
             processes::commands::get_focused_window,
             processes::commands::get_known_apps,
+            processes::commands::get_app_icon,
             processes::commands::get_emergency_allowlist,
             processes::commands::get_emergency_blocked_categories,
             processes::commands::refresh_known_apps_inventory,

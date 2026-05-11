@@ -783,12 +783,28 @@ function AppRow({
         ? 'allow'
         : 'block');
 
+  const [iconData, setIconData] = useState<string | null>(null);
+  const looksLikeBundle = !!app.appPath && app.appPath.endsWith('.app');
+  useEffect(() => {
+    if (!looksLikeBundle) return;
+    let cancelled = false;
+    api
+      .getAppIcon(app.appKey)
+      .then((data) => {
+        if (!cancelled) setIconData(data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [app.appKey, looksLikeBundle]);
+
   return (
     <div
       onClick={onClick}
       style={{
         display: 'grid',
-        gridTemplateColumns: '1fr auto auto 16px',
+        gridTemplateColumns: '28px 1fr auto auto 16px',
         alignItems: 'center',
         gap: 12,
         padding: '11px 16px',
@@ -803,6 +819,34 @@ function AppRow({
         e.currentTarget.style.background = 'transparent';
       }}
     >
+      <div
+        style={{
+          width: 28,
+          height: 28,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          borderRadius: 6,
+          background: iconData
+            ? 'transparent'
+            : 'color-mix(in oklch, var(--ink) 6%, transparent)',
+          color: 'var(--muted)',
+          fontSize: 11,
+          fontFamily: 'var(--font-mono)',
+          overflow: 'hidden',
+          flexShrink: 0,
+        }}
+      >
+        {iconData ? (
+          <img
+            src={`data:image/png;base64,${iconData}`}
+            alt=""
+            style={{ width: 28, height: 28, objectFit: 'contain' }}
+          />
+        ) : (
+          (app.displayName || app.appKey).charAt(0).toUpperCase()
+        )}
+      </div>
       <div style={{ minWidth: 0 }}>
         <div style={{
           fontSize: 13,

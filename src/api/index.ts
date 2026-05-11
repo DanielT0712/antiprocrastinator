@@ -119,6 +119,8 @@ export const api = {
 
   // Processes / Apps
   getKnownApps: () => invoke<KnownApp[]>('get_known_apps'),
+  getAppIcon: (appKey: string) =>
+    invoke<string | null>('get_app_icon', { appKey }),
   refreshKnownAppsInventory: () =>
     invoke<KnownApp[]>('refresh_known_apps_inventory'),
   updateKnownApp: (

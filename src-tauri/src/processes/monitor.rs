@@ -2936,6 +2936,89 @@ fn resolve_subject_category(
     }
 }
 
+/// Returns a `data:image/png;base64,…` URL for an app's bundle icon when we
+/// can find one. macOS only — uses `qlmanage` to render the bundle's icon
+/// thumbnail to PNG, then base64-encodes the result. The first call per
+/// app is the slow path (spawn + write); subsequent calls return the
+/// cached string.
+pub fn get_app_icon_data_url(
+    connection: &Connection,
+    app_key: &str,
+) -> Result<Option<String>, String> {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use std::sync::Mutex;
+
+    static ICON_CACHE: once_cell::sync::Lazy<Mutex<HashMap<String, Option<String>>>> =
+        once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+
+    if let Some(cached) = ICON_CACHE
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(app_key)
+        .cloned()
+    {
+        return Ok(cached);
+    }
+
+    let app_path: Option<String> = connection
+        .query_row(
+            "SELECT app_path FROM known_apps WHERE app_key = ?1",
+            params![app_key],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .flatten();
+
+    let png = app_path
+        .as_deref()
+        .filter(|path| path.ends_with(".app") && std::path::Path::new(path).exists())
+        .and_then(render_bundle_icon);
+    let data_url = png.map(|bytes| {
+        format!("data:image/png;base64,{}", STANDARD.encode(&bytes))
+    });
+
+    ICON_CACHE
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(app_key.to_string(), data_url.clone());
+    Ok(data_url)
+}
+
+#[cfg(target_os = "macos")]
+fn render_bundle_icon(app_path: &str) -> Option<Vec<u8>> {
+    let tmp_dir = std::env::temp_dir().join("antiprocrastinator-icons");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let status = Command::new("qlmanage")
+        .args([
+            "-t",
+            "-s",
+            "128",
+            "-o",
+            tmp_dir.to_str()?,
+            app_path,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let bundle_name = std::path::Path::new(app_path).file_name()?.to_string_lossy();
+    let png_path = tmp_dir.join(format!("{bundle_name}.png"));
+    let bytes = std::fs::read(&png_path).ok()?;
+    let _ = std::fs::remove_file(png_path);
+    Some(bytes)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn render_bundle_icon(_app_path: &str) -> Option<Vec<u8>> {
+    None
+}
+
 pub fn get_emergency_allowlist(connection: &Connection) -> Result<Vec<KnownApp>, String> {
     ensure_enforcement_defaults(connection)?;
     let apps = get_known_apps(connection)?;
