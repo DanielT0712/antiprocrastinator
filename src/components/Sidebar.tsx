@@ -168,12 +168,12 @@ export function Sidebar({ current, onNav, collapsed, onToggleCollapse, onSuspend
       }}>
         <button
           onClick={onSuspendApp}
-          title="Suspend the app — pauses all enforcement and the schedule"
+          title="Suspend the entire AntiProcrastinator app for a set period. App auto-restarts after."
           style={{
             display: 'flex',
             alignItems: 'center',
             gap: 10,
-            padding: compact ? '9px' : '9px 11px',
+            padding: compact ? '9px 0' : '9px 10px',
             justifyContent: compact ? 'center' : 'flex-start',
             background: 'transparent',
             border: '1px solid var(--line)',
@@ -182,12 +182,13 @@ export function Sidebar({ current, onNav, collapsed, onToggleCollapse, onSuspend
             cursor: 'pointer',
             fontSize: 12.5,
             fontFamily: 'var(--font-sans)',
+            width: '100%',
           }}
           onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--ink)')}
           onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--muted)')}
         >
           <Icons.clock size={15} />
-          {!compact && <span>Suspend…</span>}
+          {!compact && <span>Suspend app…</span>}
         </button>
       </div>
     </aside>

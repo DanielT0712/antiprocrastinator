@@ -246,6 +246,19 @@ export function TimelineRail({
           No blocks yet today. Open Schedule to plan, or wait for the planner to fill the gap with rest.
         </div>
       )}
+
+      {blocks.length > 0 && (
+        <div style={{
+          marginTop: 14,
+          fontFamily: 'var(--font-mono)',
+          fontSize: 10.5,
+          color: 'var(--muted)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.08em',
+        }}>
+          Tap any block to inspect →
+        </div>
+      )}
     </aside>
   );
 }

@@ -1689,9 +1689,8 @@ export function TasksScreen() {
                 <th style={{ ...th, width: 100 }}>Priority</th>
                 <th style={{ ...th, width: 110 }}>Estimate</th>
                 <th style={{ ...th, width: 130 }}>Deadline</th>
-                <th style={{ ...th, width: 110 }}>Profile</th>
-                <th style={{ ...th, width: 100 }}>Status</th>
-                <th style={{ ...th, width: 90 }}>Done×</th>
+                <th style={{ ...th, width: 110 }}>Status</th>
+                <th style={{ ...th, width: 36 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -1768,16 +1767,6 @@ export function TasksScreen() {
                     }}>
                       {formatDeadline(t.deadline, Date.now())}
                     </td>
-                    <td style={{
-                      ...td,
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: 11.5,
-                      color: 'var(--muted)',
-                    }}>
-                      {PROFILE_OPTIONS.find((p) => p.v === t.enforcementProfile)?.l ??
-                        t.enforcementProfile ??
-                        '—'}
-                    </td>
                     <td style={td}>
                       {planned ? (
                         <span style={{
@@ -1807,13 +1796,33 @@ export function TasksScreen() {
                         </span>
                       )}
                     </td>
-                    <td style={{
-                      ...td,
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: 11.5,
-                      color: 'var(--muted)',
-                    }}>
-                      {t.completionCount}
+                    <td
+                      style={{ padding: '6px 8px 6px 4px', verticalAlign: 'middle' }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        onClick={() => {
+                          if (confirm(`Delete "${t.name}"?`)) remove(t.id);
+                        }}
+                        title="Delete"
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: 'var(--faint)',
+                          cursor: 'pointer',
+                          padding: 4,
+                          borderRadius: 4,
+                          display: 'flex',
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.color = 'var(--danger)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.color = 'var(--faint)';
+                        }}
+                      >
+                        <Icons.trash size={14} />
+                      </button>
                     </td>
                   </tr>
                 );

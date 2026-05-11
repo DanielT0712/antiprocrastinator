@@ -355,6 +355,7 @@ export function PauseModal({ onClose, block, remainingSecs, onError }: PauseProp
           {[
             ['Rest buffer available', bufferMins == null ? '…' : `${bufferMins} min`],
             ['Block ends at', blockEndsAt],
+            ['If paused now, resumes', 'automatically after rest'],
             ['Remaining on block', `${remainingMins} min`],
           ].map(([k, v]) => (
             <div

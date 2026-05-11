@@ -874,7 +874,7 @@ export function SettingsScreen() {
                 />
               </SettingsCard>
 
-              <SettingsCard title="Clustering">
+              <SettingsCard title="Planner behaviour">
                 <SettingsRow
                   title="Group clustering"
                   help="How the planner orders tasks within free windows."
@@ -958,33 +958,33 @@ export function SettingsScreen() {
                 title="Enforcement"
                 blurb="How the process monitor reacts when something it should block is running."
               />
-              <SettingsCard title="Process monitor">
+              <SettingsCard title="Warnings">
                 <SettingsRow
-                  title="Warning before kill"
-                  help="Seconds of warning before the monitor terminates a blocked process."
+                  title="Warn for"
+                  help="Time before the countdown starts."
                   control={
                     <Stepper
                       value={prefs.processWarningSeconds}
                       onChange={(v) => update({ processWarningSeconds: v })}
                       min={0}
-                      max={300}
-                      step={5}
-                      unit="sec"
+                      max={600}
+                      step={10}
+                      unit="s"
                       width={140}
                     />
                   }
                 />
                 <SettingsRow
-                  title="Countdown after warning"
-                  help="Final countdown before the kill."
+                  title="Countdown to kill"
+                  help="Time after the warning before the process is closed. 0 = close immediately."
                   control={
                     <Stepper
                       value={prefs.processCountdownSeconds}
                       onChange={(v) => update({ processCountdownSeconds: v })}
                       min={0}
-                      max={300}
+                      max={120}
                       step={5}
-                      unit="sec"
+                      unit="s"
                       width={140}
                     />
                   }
@@ -992,7 +992,7 @@ export function SettingsScreen() {
                 <SettingsRow
                   last
                   title="Scan interval"
-                  help="How often the monitor checks for running processes."
+                  help="How often running processes are checked. Lower = faster reaction, more CPU."
                   control={
                     <Stepper
                       value={prefs.processScanIntervalSeconds}
@@ -1002,7 +1002,7 @@ export function SettingsScreen() {
                       min={1}
                       max={60}
                       step={1}
-                      unit="sec"
+                      unit="s"
                       width={140}
                     />
                   }

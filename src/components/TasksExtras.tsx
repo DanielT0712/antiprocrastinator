@@ -1388,6 +1388,9 @@ export function RemoveFromPlanModal({
   onAfterRemove,
 }: RemoveModalProps) {
   const [busy, setBusy] = useState(false);
+  const [taskBlocks, setTaskBlocks] = useState<
+    Array<{ id: number; startTime: number; endTime: number; title: string }>
+  >([]);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -1397,19 +1400,42 @@ export function RemoveFromPlanModal({
     return () => document.removeEventListener('keydown', h);
   }, [onClose]);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const horizon = Date.now() + 30 * 86_400_000;
+        const blocks = await api.getScheduleRange(Date.now(), horizon);
+        if (cancelled) return;
+        setTaskBlocks(
+          blocks
+            .filter(
+              (b) =>
+                b.taskId === task.id &&
+                (b.status === 'scheduled' ||
+                  b.status === 'active' ||
+                  b.status === 'paused'),
+            )
+            .map((b) => ({
+              id: b.id,
+              startTime: b.startTime,
+              endTime: b.endTime,
+              title: b.title,
+            })),
+        );
+      } catch {
+        if (!cancelled) setTaskBlocks([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [task.id]);
+
   const submit = async () => {
     if (busy) return;
     setBusy(true);
     try {
-      const horizon = Date.now() + 30 * 86_400_000;
-      const blocks = await api.getScheduleRange(Date.now(), horizon);
-      const taskBlocks = blocks.filter(
-        (b) =>
-          b.taskId === task.id &&
-          (b.status === 'scheduled' ||
-            b.status === 'active' ||
-            b.status === 'paused'),
-      );
       for (const b of taskBlocks) {
         await api.deleteTimeBlock(b.id);
       }
@@ -1421,6 +1447,17 @@ export function RemoveFromPlanModal({
     } finally {
       setBusy(false);
     }
+  };
+
+  const totalMin = taskBlocks.reduce(
+    (acc, b) => acc + Math.round((b.endTime - b.startTime) / 60_000),
+    0,
+  );
+  const fmtMins = (mins: number) => {
+    if (mins < 60) return mins + 'm';
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m === 0 ? `${h}h` : `${h}h ${m}m`;
   };
 
   return (
@@ -1467,13 +1504,96 @@ export function RemoveFromPlanModal({
           </div>
         </div>
         <div style={{ padding: '16px 20px' }}>
+          <div style={{ ...labelStyle, marginBottom: 8 }}>
+            {taskBlocks.length}{' '}
+            {taskBlocks.length === 1 ? 'block' : 'blocks'} · {fmtMins(totalMin)}
+          </div>
           <div style={{
-            fontSize: 13,
-            color: 'var(--muted)',
-            lineHeight: 1.55,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+            maxHeight: 240,
+            overflow: 'auto',
           }}>
-            Removes any scheduled, active, or paused blocks linked to this task and replans
-            the rest of the schedule.
+            {taskBlocks.map((b) => {
+              const start = new Date(b.startTime);
+              const end = new Date(b.endTime);
+              const day = start.toLocaleDateString('en-US', {
+                weekday: 'short',
+                month: 'short',
+                day: 'numeric',
+              });
+              const t1 = start.toLocaleTimeString('en-US', {
+                hour: 'numeric',
+                minute: '2-digit',
+                hour12: false,
+              });
+              const t2 = end.toLocaleTimeString('en-US', {
+                hour: 'numeric',
+                minute: '2-digit',
+                hour12: false,
+              });
+              const mins = Math.round(
+                (b.endTime - b.startTime) / 60_000,
+              );
+              return (
+                <div
+                  key={b.id}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns:
+                      '130px 130px 70px minmax(0, 1fr)',
+                    alignItems: 'center',
+                    gap: 12,
+                    padding: '6px 10px',
+                    background: 'var(--bg-raise)',
+                    borderRadius: 5,
+                    border: '1px solid var(--line)',
+                    fontSize: 12,
+                    color: 'var(--muted)',
+                  }}
+                >
+                  <span style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 11.5,
+                  }}>
+                    {day}
+                  </span>
+                  <span style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 11.5,
+                    color: 'var(--ink)',
+                  }}>
+                    {t1} – {t2}
+                  </span>
+                  <span style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 11,
+                    color: 'var(--faint)',
+                  }}>
+                    {fmtMins(mins)}
+                  </span>
+                  <span style={{
+                    fontSize: 11.5,
+                    color: 'var(--muted)',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  }}>
+                    {b.title}
+                  </span>
+                </div>
+              );
+            })}
+            {taskBlocks.length === 0 && (
+              <div style={{
+                fontSize: 12.5,
+                color: 'var(--muted)',
+                padding: '12px 0',
+              }}>
+                No scheduled blocks to remove.
+              </div>
+            )}
           </div>
         </div>
         <div style={{
