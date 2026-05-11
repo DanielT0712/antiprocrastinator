@@ -125,22 +125,9 @@ pub fn run() {
             app.manage(guard);
 
             guard::watchdog::setup_system_tray(&app.handle()).map_err(std::io::Error::other)?;
-
-            // In debug builds the binary is launched via `tauri dev`, which
-            // ties Vite + the app together. Ctrl+C in tauri-cli kills Vite
-            // and SIGTERMs the app abruptly, but the supervisor helper is a
-            // separate detached process that survives and would respawn the
-            // debug binary against a now-dead Vite (white screen). Skip the
-            // supervisor entirely in debug builds and make sure any stale
-            // helper from a previous run exits on its next poll.
-            if cfg!(debug_assertions) {
-                if let Err(error) = guard::watchdog::disable_supervisor(&app.handle()) {
-                    log::warn!("failed to disable supervisor in debug build: {error}");
-                }
-            } else {
-                guard::watchdog::start_supervisor_runtime(&app.handle())
-                    .map_err(std::io::Error::other)?;
-            }
+            guard::watchdog::start_supervisor_runtime(&app.handle())
+                .map_err(std::io::Error::other)?;
+            spawn_termination_signal_listener(app.handle().clone());
 
             schedule::engine::start_timer_loop(app.handle().clone());
             processes::monitor::start_monitor_loop(app.handle().clone());
@@ -196,14 +183,6 @@ fn handle_window_close<R: tauri::Runtime>(window: &tauri::Window<R>, api: &tauri
 }
 
 fn handle_exit_request(app: &tauri::AppHandle, api: &tauri::ExitRequestApi, code: Option<i32>) {
-    // Debug builds run under `tauri dev`; Ctrl+C must terminate the app so
-    // it doesn't get stuck against a torn-down Vite server. Always allow
-    // exit in debug.
-    if cfg!(debug_assertions) {
-        let _ = guard::watchdog::disable_supervisor(app);
-        return;
-    }
-
     let guard = app.state::<guard::watchdog::GuardState>();
     match guard.consume_exit_allowance() {
         Ok(true) => return,
@@ -272,4 +251,55 @@ fn handle_quit_request(app: &tauri::AppHandle, source: &str) {
         return;
     }
     app.exit(0);
+}
+
+/// Listen for SIGTERM / SIGINT (Unix) or Ctrl+C (Windows) and shut down
+/// cleanly: tell the supervisor to stand down so its helper exits its
+/// poll loop, mark a one-shot exit allowance, then ask Tauri to quit.
+/// Without this the dev binary is killed abruptly by `tauri-cli` on
+/// Ctrl+C and the still-running helper respawns it against a dead Vite
+/// server (white window).
+fn spawn_termination_signal_listener(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        wait_for_termination_signal().await;
+        log::info!("termination signal received; disabling supervisor and exiting");
+        if let Err(error) = guard::watchdog::disable_supervisor(&app) {
+            log::warn!("failed to disable supervisor on termination: {error}");
+        }
+        let guard = app.state::<guard::watchdog::GuardState>();
+        if let Err(error) = guard.allow_exit_once() {
+            log::warn!("failed to allow termination exit: {error}");
+        }
+        app.exit(0);
+    });
+}
+
+#[cfg(unix)]
+async fn wait_for_termination_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(stream) => stream,
+        Err(error) => {
+            log::warn!("failed to install SIGTERM handler: {error}");
+            return;
+        }
+    };
+    let mut int = match signal(SignalKind::interrupt()) {
+        Ok(stream) => stream,
+        Err(error) => {
+            log::warn!("failed to install SIGINT handler: {error}");
+            return;
+        }
+    };
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = int.recv() => {}
+    }
+}
+
+#[cfg(windows)]
+async fn wait_for_termination_signal() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        log::warn!("failed to wait for Ctrl+C: {error}");
+    }
 }
