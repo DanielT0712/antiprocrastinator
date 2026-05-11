@@ -125,8 +125,22 @@ pub fn run() {
             app.manage(guard);
 
             guard::watchdog::setup_system_tray(&app.handle()).map_err(std::io::Error::other)?;
-            guard::watchdog::start_supervisor_runtime(&app.handle())
-                .map_err(std::io::Error::other)?;
+
+            // In debug builds the binary is launched via `tauri dev`, which
+            // ties Vite + the app together. Ctrl+C in tauri-cli kills Vite
+            // and SIGTERMs the app abruptly, but the supervisor helper is a
+            // separate detached process that survives and would respawn the
+            // debug binary against a now-dead Vite (white screen). Skip the
+            // supervisor entirely in debug builds and make sure any stale
+            // helper from a previous run exits on its next poll.
+            if cfg!(debug_assertions) {
+                if let Err(error) = guard::watchdog::disable_supervisor(&app.handle()) {
+                    log::warn!("failed to disable supervisor in debug build: {error}");
+                }
+            } else {
+                guard::watchdog::start_supervisor_runtime(&app.handle())
+                    .map_err(std::io::Error::other)?;
+            }
 
             schedule::engine::start_timer_loop(app.handle().clone());
             processes::monitor::start_monitor_loop(app.handle().clone());
@@ -182,6 +196,14 @@ fn handle_window_close<R: tauri::Runtime>(window: &tauri::Window<R>, api: &tauri
 }
 
 fn handle_exit_request(app: &tauri::AppHandle, api: &tauri::ExitRequestApi, code: Option<i32>) {
+    // Debug builds run under `tauri dev`; Ctrl+C must terminate the app so
+    // it doesn't get stuck against a torn-down Vite server. Always allow
+    // exit in debug.
+    if cfg!(debug_assertions) {
+        let _ = guard::watchdog::disable_supervisor(app);
+        return;
+    }
+
     let guard = app.state::<guard::watchdog::GuardState>();
     match guard.consume_exit_allowance() {
         Ok(true) => return,
