@@ -791,7 +791,7 @@ function Stat({
   l,
   accent,
 }: {
-  n: number;
+  n: number | string;
   l: string;
   accent?: boolean;
 }) {
@@ -1076,142 +1076,140 @@ export function ScheduleScreen() {
     }
   };
 
+  const rangeLabel = useMemo(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const last = new Date(today.getTime() + (daysToShow - 1) * 86_400_000);
+    const fmt = (d: Date) =>
+      d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    if (daysToShow === 1) return fmt(today);
+    return `${fmt(today)} – ${fmt(last)}`;
+  }, [daysToShow]);
+
+  const finishLabel = projectedFinish
+    ? new Date(projectedFinish).toLocaleString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      })
+    : '—';
+
   return (
     <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         <div style={{
-          padding: '16px 28px 14px',
+          padding: '14px 28px 14px',
           borderBottom: '1px solid var(--line)',
           display: 'flex',
-          flexDirection: 'column',
-          gap: 10,
+          alignItems: 'center',
+          gap: 20,
+          flexWrap: 'wrap',
         }}>
           <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 12,
-          }}>
-            <div style={{
-              fontFamily: 'var(--font-display)',
-              fontSize: 22,
-              color: 'var(--ink)',
-              letterSpacing: '-0.02em',
-            }}>
-              Schedule
-            </div>
-            <span style={{ flex: 1 }} />
-            <div style={{
-              display: 'inline-flex',
-              gap: 0,
-              border: '1px solid var(--line)',
-              borderRadius: 6,
-              overflow: 'hidden',
-            }}>
-              {(['day', '5d', 'week'] as ViewMode[]).map((v) => (
-                <button
-                  key={v}
-                  onClick={() => setView(v)}
-                  style={{
-                    padding: '6px 12px',
-                    background: view === v ? 'var(--ink-soft)' : 'transparent',
-                    color: view === v ? 'var(--ink)' : 'var(--muted)',
-                    border: 'none',
-                    borderRight: v === 'week' ? 'none' : '1px solid var(--line)',
-                    fontSize: 12,
-                    fontFamily: 'var(--font-sans)',
-                    cursor: 'pointer',
-                    fontWeight: view === v ? 500 : 400,
-                  }}
-                >
-                  {VIEW_LABELS[v]}
-                </button>
-              ))}
-            </div>
-            <TemplatesButton />
-            <button
-              onClick={() => setShowHistory((v) => !v)}
-              style={{
-                padding: '7px 12px',
-                background: 'var(--bg-raise)',
-                border: '1px solid var(--line)',
-                borderRadius: 6,
-                color: 'var(--ink)',
-                fontSize: 12.5,
-                cursor: 'pointer',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 5,
-              }}
-            >
-              {showHistory ? 'Hide log' : 'Replan log'}
-            </button>
-            <button
-              onClick={() => setAdding(true)}
-              style={{
-                padding: '7px 12px',
-                background: 'var(--bg-raise)',
-                border: '1px solid var(--line)',
-                borderRadius: 6,
-                color: 'var(--ink)',
-                fontSize: 12.5,
-                cursor: 'pointer',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 5,
-              }}
-            >
-              <Icons.plus size={13} /> Add block
-            </button>
-            <button
-              onClick={rebuild}
-              style={{
-                padding: '7px 14px',
-                background: 'var(--accent)',
-                color: 'oklch(0.18 0.04 60)',
-                border: '1px solid var(--accent)',
-                borderRadius: 6,
-                fontSize: 12.5,
-                cursor: 'pointer',
-              }}
-            >
-              Rebuild
-            </button>
-          </div>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 22,
-            flexWrap: 'wrap',
             fontFamily: 'var(--font-mono)',
             fontSize: 11.5,
             color: 'var(--muted)',
+            textTransform: 'uppercase',
+            letterSpacing: '0.1em',
+            whiteSpace: 'nowrap',
           }}>
-            <Stat n={stats.blockCount} l="blocks" />
-            <DotSep />
-            <Stat n={stats.workHours} l="work hours" />
-            <DotSep />
-            <Stat n={stats.deepBlocks} l="deep" accent />
-            <DotSep />
-            <Stat n={stats.restHours} l="rest hours" />
-            <DotSep />
-            <Stat n={stats.fixedBlocks} l="fixed" />
-            {projectedFinish && (
-              <>
-                <DotSep />
-                <span>
-                  projected finish{' '}
-                  <span style={{ color: 'var(--ink)' }}>
-                    {new Date(projectedFinish).toLocaleString('en-US', {
-                      weekday: 'short',
-                      hour: 'numeric',
-                      minute: '2-digit',
-                      hour12: false,
-                    })}
-                  </span>
-                </span>
-              </>
-            )}
+            {rangeLabel}
           </div>
+          <div style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 18,
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11.5,
+          }}>
+            <Stat n={stats.blockCount} l="blocks today" />
+            <DotSep />
+            <Stat n={`${stats.workHours}h`} l="task time" />
+            <DotSep />
+            <Stat n={finishLabel} l="projected finish" accent />
+          </div>
+          <span style={{ flex: 1 }} />
+          <div style={{
+            display: 'inline-flex',
+            border: '1px solid var(--line)',
+            borderRadius: 6,
+            overflow: 'hidden',
+            background: 'var(--bg-raise)',
+          }}>
+            {(['day', '5d', 'week'] as ViewMode[]).map((v) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                style={{
+                  padding: '6px 12px',
+                  background: view === v ? 'var(--ink-soft)' : 'transparent',
+                  color: view === v ? 'var(--ink)' : 'var(--muted)',
+                  border: 'none',
+                  fontSize: 12,
+                  fontFamily: 'var(--font-sans)',
+                  cursor: 'pointer',
+                  fontWeight: view === v ? 500 : 400,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {VIEW_LABELS[v]}
+              </button>
+            ))}
+          </div>
+          <TemplatesButton />
+          <button
+            onClick={() => setShowHistory((v) => !v)}
+            style={{
+              padding: '7px 12px',
+              background: 'var(--bg-raise)',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              color: 'var(--ink)',
+              fontSize: 12.5,
+              cursor: 'pointer',
+              fontFamily: 'var(--font-sans)',
+            }}
+          >
+            {showHistory ? 'Hide log' : 'Replan log'}
+          </button>
+          <button
+            onClick={rebuild}
+            title="Recompute the plan based on current tasks and boundaries"
+            style={{
+              padding: '7px 14px',
+              background: 'var(--btn-primary-bg)',
+              color: 'var(--btn-primary-fg)',
+              border: '1px solid var(--btn-primary-bg)',
+              borderRadius: 6,
+              fontSize: 12.5,
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              fontFamily: 'var(--font-sans)',
+              fontWeight: 500,
+            }}
+          >
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+              <path d="M3 21v-5h5" />
+            </svg>
+            Replan
+          </button>
         </div>
 
         <div style={{ flex: 1, overflow: 'auto' }}>
