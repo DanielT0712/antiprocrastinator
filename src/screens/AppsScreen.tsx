@@ -567,6 +567,32 @@ function CategorySection({
               />
             ))
           )}
+          <button
+            onClick={() =>
+              alert(
+                'Use Refresh installed apps below to import apps into ' +
+                  category.name +
+                  ', or open an app drawer to retag it.',
+              )
+            }
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 7,
+              width: '100%',
+              padding: '11px 16px',
+              background: 'transparent',
+              border: 'none',
+              borderTop: '1px dashed var(--line)',
+              color: 'var(--muted)',
+              fontSize: 12.5,
+              fontFamily: 'var(--font-sans)',
+              cursor: 'pointer',
+              textAlign: 'left',
+            }}
+          >
+            <Icons.plus size={13} /> Add to this category
+          </button>
         </div>
       )}
     </div>
@@ -1238,25 +1264,41 @@ export function AppsScreen() {
           Children profiles inherit from their parent unless overridden. Emergency profile
           blocks Games and Entertainment unconditionally — those toggles are locked here.
         </div>
-        <ProfileTabs
-          profiles={profiles}
-          active={activeProfile}
-          onChange={setActiveProfile}
-          onMenu={(p) => setProfileMenuName(p.name)}
-          onAddProfile={async () => {
-            const name = prompt('Name the new profile (lowercase, snake_case):');
-            if (!name) return;
-            try {
-              await api.upsertEnforcementProfile({
-                name: name.trim(),
-                parentName: 'work',
-              });
-              refresh();
-            } catch (err) {
-              setError(String(err));
-            }
-          }}
-        />
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          flexWrap: 'wrap',
+        }}>
+          <div style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10.5,
+            textTransform: 'uppercase',
+            letterSpacing: '0.12em',
+            color: 'var(--muted)',
+          }}>
+            Active profile
+          </div>
+          <ProfileTabs
+            profiles={profiles}
+            active={activeProfile}
+            onChange={setActiveProfile}
+            onMenu={(p) => setProfileMenuName(p.name)}
+            onAddProfile={async () => {
+              const name = prompt('Name the new profile (lowercase, snake_case):');
+              if (!name) return;
+              try {
+                await api.upsertEnforcementProfile({
+                  name: name.trim(),
+                  parentName: 'work',
+                });
+                refresh();
+              } catch (err) {
+                setError(String(err));
+              }
+            }}
+          />
+        </div>
         <div style={{ height: 14 }} />
         <div style={{
           display: 'flex',
