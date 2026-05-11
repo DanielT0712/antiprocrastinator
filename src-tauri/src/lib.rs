@@ -253,20 +253,53 @@ fn handle_quit_request(app: &tauri::AppHandle, source: &str) {
     app.exit(0);
 }
 
-/// Listen for SIGTERM / SIGINT (Unix) or Ctrl+C (Windows) and shut down
-/// cleanly: tell the supervisor to stand down so its helper exits its
-/// poll loop, mark a one-shot exit allowance, then ask Tauri to quit.
-/// Without this the dev binary is killed abruptly by `tauri-cli` on
-/// Ctrl+C and the still-running helper respawns it against a dead Vite
-/// server (white window).
+/// Listen for SIGTERM / SIGINT (Unix) or Ctrl+C (Windows). On signal:
+/// behave the same way Cmd+Q / dock Quit / window close do — surface a
+/// quit-required event so the in-app challenge dialog appears, and let
+/// the rest of the strong-guard flow decide whether the app exits. We
+/// intentionally do NOT disable the supervisor or call app.exit here:
+/// that would let any terminal user kill strong guard via `kill -TERM`
+/// (or macOS dock right-click Quit, which sends SIGTERM).
+///
+/// In a dev session the OS escalates SIGTERM to SIGKILL after a short
+/// timeout, the binary dies, and the helper exits its loop because the
+/// binary lives under `target/` (see is_development_binary). In a
+/// packaged release the user has to type the challenge phrase, exactly
+/// like every other quit path.
 fn spawn_termination_signal_listener(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         wait_for_termination_signal().await;
-        log::info!("termination signal received; disabling supervisor and exiting");
-        if let Err(error) = guard::watchdog::disable_supervisor(&app) {
-            log::warn!("failed to disable supervisor on termination: {error}");
-        }
+        log::info!(
+            "termination signal received; emitting quit-required (supervisor stays active)"
+        );
+        let preferences = match app
+            .state::<config::manager::ConfigState>()
+            .get_preferences()
+        {
+            Ok(p) => Some(p),
+            Err(error) => {
+                log::warn!("failed to load preferences on termination: {error}");
+                None
+            }
+        };
         let guard = app.state::<guard::watchdog::GuardState>();
+        let strong_guard_active = preferences
+            .as_ref()
+            .map(|p| p.strong_guard_enabled)
+            .unwrap_or(true)
+            && guard.is_active().unwrap_or(false);
+
+        if strong_guard_active {
+            // Show the challenge dialog if the UI is up; OS will SIGKILL
+            // shortly if we do not respond, and the helper will recover.
+            let _ = guard::watchdog::show_main_window(&app);
+            let _ = guard::watchdog::emit_quit_required(&app, "signal", false);
+            return;
+        }
+
+        // Strong guard is off (developer toggled it, or release-mode user
+        // explicitly disabled). Exit cleanly so the helper can stop too.
+        let _ = guard::watchdog::disable_supervisor(&app);
         if let Err(error) = guard.allow_exit_once() {
             log::warn!("failed to allow termination exit: {error}");
         }
