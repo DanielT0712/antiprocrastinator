@@ -31,12 +31,88 @@ pub fn get_known_apps(database: State<'_, DatabaseState>) -> Result<Vec<KnownApp
 }
 
 #[tauri::command]
-pub fn get_app_icon(
+pub async fn get_app_icon(
     app_key: String,
+    app: tauri::AppHandle,
     database: State<'_, DatabaseState>,
 ) -> Result<Option<String>, String> {
-    let connection = database.connection()?;
-    monitor::get_app_icon_data_url(&connection, &app_key)
+    use once_cell::sync::Lazy;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tauri::Manager;
+    use tokio::sync::Semaphore;
+
+    // Global cap on concurrent `sips` spawns so a list of 400 apps doesn't
+    // fork 400 subprocesses at once.
+    static ICON_RENDER_GATE: Lazy<Arc<Semaphore>> =
+        Lazy::new(|| Arc::new(Semaphore::new(4)));
+
+    // In-memory cache keyed by app_key. Stores the final data URL (or None
+    // for "no icon").
+    static ICON_MEM_CACHE: Lazy<Mutex<HashMap<String, Option<String>>>> =
+        Lazy::new(|| Mutex::new(HashMap::new()));
+
+    if let Some(cached) = ICON_MEM_CACHE
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&app_key)
+        .cloned()
+    {
+        return Ok(cached);
+    }
+
+    let app_path = {
+        let connection = database.connection()?;
+        monitor::lookup_icon_source(&connection, &app_key)?
+    };
+    let Some(app_path) = app_path else {
+        ICON_MEM_CACHE
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(app_key, None);
+        return Ok(None);
+    };
+
+    let cache_dir = monitor::icon_cache_dir(
+        &app.path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?,
+    );
+
+    // Fast path: cached PNG already on disk.
+    if let Some(bytes) = monitor::read_cached_icon(&cache_dir, &app_key) {
+        let url = monitor::png_to_data_url(&bytes);
+        ICON_MEM_CACHE
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(app_key, Some(url.clone()));
+        return Ok(Some(url));
+    }
+
+    // Slow path: render via sips. Acquire permit on the async side, then
+    // hand the work to the blocking pool so the Tauri runtime stays free.
+    let permit = ICON_RENDER_GATE
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|e| e.to_string())?;
+    let key_for_task = app_key.clone();
+    let cache_dir_clone = cache_dir.clone();
+    let bytes = tokio::task::spawn_blocking(move || {
+        let result =
+            monitor::render_and_cache_icon(&cache_dir_clone, &key_for_task, &app_path);
+        drop(permit);
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let data_url = bytes.as_ref().map(|b| monitor::png_to_data_url(b));
+    ICON_MEM_CACHE
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(app_key, data_url.clone());
+    Ok(data_url)
 }
 
 #[tauri::command]

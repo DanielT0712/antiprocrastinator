@@ -3036,70 +3036,92 @@ fn resolve_subject_category(
     }
 }
 
-/// Returns a `data:image/png;base64,…` URL for an app's bundle icon when we
-/// can find one. macOS only — uses `qlmanage` to render the bundle's icon
-/// thumbnail to PNG, then base64-encodes the result. The first call per
-/// app is the slow path (spawn + write); subsequent calls return the
-/// cached string.
-pub fn get_app_icon_data_url(
+/// Look up the cached app_path for an icon lookup. Returns Ok(None) if the
+/// row exists but has no bundle path. Cheap DB read, decoupled from the
+/// blocking render path.
+pub fn lookup_icon_source(
     connection: &Connection,
     app_key: &str,
 ) -> Result<Option<String>, String> {
-    use base64::engine::general_purpose::STANDARD;
-    use base64::Engine;
-    use std::sync::Mutex;
-
-    static ICON_CACHE: once_cell::sync::Lazy<Mutex<HashMap<String, Option<String>>>> =
-        once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
-
-    if let Some(cached) = ICON_CACHE
-        .lock()
-        .map_err(|e| e.to_string())?
-        .get(app_key)
-        .cloned()
-    {
-        return Ok(cached);
-    }
-
-    let app_path: Option<String> = connection
+    let row: Option<String> = connection
         .query_row(
             "SELECT app_path FROM known_apps WHERE app_key = ?1",
             params![app_key],
             |row| row.get::<_, Option<String>>(0),
         )
         .optional()
-        .ok()
-        .flatten()
-        .flatten();
-
-    let png = app_path
-        .as_deref()
-        .filter(|path| path.ends_with(".app") && std::path::Path::new(path).exists())
-        .and_then(render_bundle_icon);
-    let data_url = png.map(|bytes| {
-        format!("data:image/png;base64,{}", STANDARD.encode(&bytes))
-    });
-
-    ICON_CACHE
-        .lock()
         .map_err(|e| e.to_string())?
-        .insert(app_key.to_string(), data_url.clone());
-    Ok(data_url)
+        .flatten();
+    Ok(row)
 }
 
+/// Convert a PNG byte buffer to a `data:image/png;base64,…` URL.
+pub fn png_to_data_url(bytes: &[u8]) -> String {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    format!("data:image/png;base64,{}", STANDARD.encode(bytes))
+}
+
+/// Sanitize app_key for use as a filename (alphanumeric + a few safe chars).
+fn icon_cache_filename(app_key: &str) -> String {
+    let mut out = String::with_capacity(app_key.len() + 4);
+    for ch in app_key.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    out.push_str(".png");
+    out
+}
+
+/// Resolve (and create) the directory where icon PNGs are cached.
+pub fn icon_cache_dir(app_data_root: &Path) -> PathBuf {
+    let dir = app_data_root.join("icon_cache");
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+/// Look for an existing cached PNG. Cheap fs hit, no spawn.
+pub fn read_cached_icon(cache_dir: &Path, app_key: &str) -> Option<Vec<u8>> {
+    let path = cache_dir.join(icon_cache_filename(app_key));
+    fs::read(path).ok()
+}
+
+/// Render the bundle icon into the cache directory and return the bytes.
+/// macOS only — uses `sips` against the bundle's `.icns` file, which is
+/// orders of magnitude lighter than `qlmanage` (no Quick Look daemon).
+/// Other platforms always return None.
 #[cfg(target_os = "macos")]
-fn render_bundle_icon(app_path: &str) -> Option<Vec<u8>> {
-    let tmp_dir = std::env::temp_dir().join("antiprocrastinator-icons");
-    let _ = std::fs::create_dir_all(&tmp_dir);
-    let status = Command::new("qlmanage")
+pub fn render_and_cache_icon(
+    cache_dir: &Path,
+    app_key: &str,
+    app_path: &str,
+) -> Option<Vec<u8>> {
+    if !app_path.ends_with(".app") {
+        return None;
+    }
+    let bundle = Path::new(app_path);
+    if !bundle.exists() {
+        return None;
+    }
+    let resources = bundle.join("Contents/Resources");
+    let icns = find_icns_in_resources(&resources)?;
+    let out_path = cache_dir.join(icon_cache_filename(app_key));
+
+    // sips -s format png -Z 64 <icns> --out <out_path>
+    let status = Command::new("sips")
         .args([
-            "-t",
             "-s",
-            "128",
-            "-o",
-            tmp_dir.to_str()?,
-            app_path,
+            "format",
+            "png",
+            "-Z",
+            "64",
+            icns.to_str()?,
+            "--out",
         ])
+        .arg(&out_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -3107,16 +3129,38 @@ fn render_bundle_icon(app_path: &str) -> Option<Vec<u8>> {
     if !status.success() {
         return None;
     }
-    let bundle_name = std::path::Path::new(app_path).file_name()?.to_string_lossy();
-    let png_path = tmp_dir.join(format!("{bundle_name}.png"));
-    let bytes = std::fs::read(&png_path).ok()?;
-    let _ = std::fs::remove_file(png_path);
-    Some(bytes)
+    fs::read(&out_path).ok()
 }
 
 #[cfg(not(target_os = "macos"))]
-fn render_bundle_icon(_app_path: &str) -> Option<Vec<u8>> {
+pub fn render_and_cache_icon(
+    _cache_dir: &Path,
+    _app_key: &str,
+    _app_path: &str,
+) -> Option<Vec<u8>> {
     None
+}
+
+#[cfg(target_os = "macos")]
+fn find_icns_in_resources(resources: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(resources).ok()?;
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("icns") {
+            candidates.push(path);
+        }
+    }
+    // Prefer common names first.
+    for preferred in ["AppIcon.icns", "Icon.icns", "app.icns", "icon.icns"] {
+        if let Some(found) = candidates
+            .iter()
+            .find(|p| p.file_name().map(|n| n == preferred).unwrap_or(false))
+        {
+            return Some(found.clone());
+        }
+    }
+    candidates.into_iter().next()
 }
 
 pub fn get_emergency_allowlist(connection: &Connection) -> Result<Vec<KnownApp>, String> {

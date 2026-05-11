@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { api } from '../api';
@@ -784,9 +785,34 @@ function AppRow({
         : 'block');
 
   const [iconData, setIconData] = useState<string | null>(null);
+  const [shouldFetchIcon, setShouldFetchIcon] = useState(false);
+  const rowRef = useRef<HTMLDivElement | null>(null);
   const looksLikeBundle = !!app.appPath && app.appPath.endsWith('.app');
+
+  // Only fetch the icon once the row scrolls into view, otherwise opening a
+  // long list would fan out hundreds of subprocess spawns on the backend.
   useEffect(() => {
-    if (!looksLikeBundle) return;
+    if (!looksLikeBundle || shouldFetchIcon) return;
+    const node = rowRef.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setShouldFetchIcon(true);
+            observer.disconnect();
+            break;
+          }
+        }
+      },
+      { rootMargin: '64px' },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [looksLikeBundle, shouldFetchIcon]);
+
+  useEffect(() => {
+    if (!shouldFetchIcon) return;
     let cancelled = false;
     api
       .getAppIcon(app.appKey)
@@ -797,10 +823,11 @@ function AppRow({
     return () => {
       cancelled = true;
     };
-  }, [app.appKey, looksLikeBundle]);
+  }, [app.appKey, shouldFetchIcon]);
 
   return (
     <div
+      ref={rowRef}
       onClick={onClick}
       style={{
         display: 'grid',
@@ -839,7 +866,7 @@ function AppRow({
       >
         {iconData ? (
           <img
-            src={`data:image/png;base64,${iconData}`}
+            src={iconData}
             alt=""
             style={{ width: 28, height: 28, objectFit: 'contain' }}
           />
