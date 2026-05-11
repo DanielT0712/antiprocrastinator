@@ -113,6 +113,153 @@ function detectPreset(
   return 'custom';
 }
 
+function NewProfileDialog({
+  profiles,
+  onClose,
+  onCreate,
+}: {
+  profiles: EnforcementProfile[];
+  onClose: () => void;
+  onCreate: (name: string, parentName: string | null) => Promise<void>;
+}) {
+  const [name, setName] = useState('');
+  const [parent, setParent] = useState<string | null>('work');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', h);
+    return () => document.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  const submit = async () => {
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    try {
+      await onCreate(name.trim(), parent);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inp: CSSProperties = {
+    width: '100%',
+    boxSizing: 'border-box',
+    background: 'var(--bg)',
+    border: '1px solid var(--line)',
+    borderRadius: 5,
+    padding: '7px 9px',
+    fontSize: 13,
+    color: 'var(--ink)',
+    outline: 'none',
+    fontFamily: 'var(--font-sans)',
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 80,
+        background: 'rgba(10,9,8,0.55)',
+        backdropFilter: 'blur(3px)',
+        display: 'grid',
+        placeItems: 'center',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 420,
+          background: 'var(--bg-raise)',
+          border: '1px solid var(--line)',
+          borderRadius: 12,
+          padding: '22px 24px',
+          boxShadow: '0 24px 60px rgba(0,0,0,0.5)',
+        }}
+      >
+        <div style={{
+          fontFamily: 'var(--font-display)',
+          fontSize: 20,
+          color: 'var(--ink)',
+          letterSpacing: '-0.015em',
+          marginBottom: 14,
+        }}>
+          New profile
+        </div>
+        <div style={{ ...labelStyle, marginBottom: 6 }}>Name</div>
+        <input
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') submit();
+          }}
+          placeholder="e.g. focus_morning"
+          style={inp}
+        />
+        <div style={{ ...labelStyle, marginTop: 14, marginBottom: 6 }}>
+          Inherits from
+        </div>
+        <select
+          value={parent ?? ''}
+          onChange={(e) =>
+            setParent(e.target.value === '' ? null : e.target.value)
+          }
+          style={inp}
+        >
+          <option value="">No parent</option>
+          {profiles.map((p) => (
+            <option key={p.name} value={p.name}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        <div style={{
+          marginTop: 18,
+          display: 'flex',
+          gap: 8,
+          justifyContent: 'flex-end',
+        }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: '7px 14px',
+              background: 'transparent',
+              border: '1px solid var(--line)',
+              borderRadius: 5,
+              color: 'var(--ink)',
+              fontSize: 12.5,
+              cursor: 'pointer',
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={busy || !name.trim()}
+            style={{
+              padding: '7px 14px',
+              background: busy || !name.trim() ? 'var(--line)' : 'var(--accent)',
+              color:
+                busy || !name.trim() ? 'var(--muted)' : 'oklch(0.18 0.04 60)',
+              border: '1px solid var(--accent)',
+              borderRadius: 5,
+              fontSize: 12.5,
+              cursor: busy || !name.trim() ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {busy ? 'Creating…' : 'Create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProfileTabs({
   profiles,
   active,
@@ -136,80 +283,79 @@ function ProfileTabs({
       {profiles.map((p) => {
         const sel = p.name === active;
         return (
-          <div
+          <button
             key={p.name}
+            onClick={() => onChange(p.name)}
             style={{
               display: 'inline-flex',
-              alignItems: 'stretch',
-              borderRadius: 999,
+              alignItems: 'center',
+              gap: 6,
+              padding: '7px 11px',
+              borderRadius: 6,
               border: '1px solid ' + (sel ? 'var(--accent)' : 'var(--line)'),
               background: sel ? 'var(--accent-soft)' : 'transparent',
-              overflow: 'hidden',
+              color: sel ? 'var(--accent-ink)' : 'var(--ink)',
+              fontSize: 12.5,
+              fontFamily: 'var(--font-sans)',
+              cursor: 'pointer',
+              fontWeight: sel ? 500 : 400,
             }}
           >
-            <button
-              onClick={() => onChange(p.name)}
-              style={{
-                padding: '7px 14px',
-                background: 'transparent',
-                color: sel ? 'var(--accent-ink)' : 'var(--muted)',
-                fontSize: 12.5,
-                fontFamily: 'var(--font-sans)',
-                cursor: 'pointer',
-                fontWeight: sel ? 500 : 400,
-                border: 'none',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
+            {sel && (
+              <span style={{
+                width: 5,
+                height: 5,
+                borderRadius: '50%',
+                background: 'var(--accent)',
+              }} />
+            )}
+            {PROFILE_DISPLAY[p.name] ?? p.name}
+            {p.parentName && (
+              <span style={{
+                color: 'var(--faint)',
+                fontSize: 10,
+                fontFamily: 'var(--font-mono)',
+              }}>
+                ← {PROFILE_DISPLAY[p.parentName] ?? p.parentName}
+              </span>
+            )}
+            <span
+              onClick={(e) => {
+                e.stopPropagation();
+                onMenu(p);
               }}
-            >
-              {PROFILE_DISPLAY[p.name] ?? p.name}
-              {p.parentName && (
-                <span style={{
-                  fontSize: 10,
-                  color: 'var(--faint)',
-                  fontFamily: 'var(--font-mono)',
-                }}>
-                  ← {PROFILE_DISPLAY[p.parentName] ?? p.parentName}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => onMenu(p)}
-              title="Profile options"
+              title="Edit profile"
               style={{
-                padding: '0 10px',
-                background: 'transparent',
-                color: 'var(--muted)',
-                border: 'none',
-                borderLeft: '1px solid var(--line)',
+                marginLeft: 2,
+                padding: '0 2px',
+                color: 'var(--faint)',
                 cursor: 'pointer',
                 fontSize: 14,
                 lineHeight: 1,
               }}
             >
               ⋯
-            </button>
-          </div>
+            </span>
+          </button>
         );
       })}
       <button
         onClick={onAddProfile}
         style={{
-          padding: '7px 12px',
-          borderRadius: 999,
-          border: '1px dashed var(--line)',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+          padding: '7px 10px',
+          borderRadius: 6,
           background: 'transparent',
+          border: '1px dashed var(--line)',
           color: 'var(--muted)',
           fontSize: 12.5,
           fontFamily: 'var(--font-sans)',
           cursor: 'pointer',
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 5,
         }}
       >
-        + New profile
+        <Icons.plus size={13} /> New profile
       </button>
     </div>
   );
@@ -1091,6 +1237,7 @@ export function AppsScreen() {
   const [drawerAppKey, setDrawerAppKey] = useState<string | null>(null);
   const [categoryManagerOpen, setCategoryManagerOpen] = useState(false);
   const [profileMenuName, setProfileMenuName] = useState<string | null>(null);
+  const [creatingProfile, setCreatingProfile] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -1277,26 +1424,14 @@ export function AppsScreen() {
             letterSpacing: '0.12em',
             color: 'var(--muted)',
           }}>
-            Active profile
+            Profiles
           </div>
           <ProfileTabs
             profiles={profiles}
             active={activeProfile}
             onChange={setActiveProfile}
             onMenu={(p) => setProfileMenuName(p.name)}
-            onAddProfile={async () => {
-              const name = prompt('Name the new profile (lowercase, snake_case):');
-              if (!name) return;
-              try {
-                await api.upsertEnforcementProfile({
-                  name: name.trim(),
-                  parentName: 'work',
-                });
-                refresh();
-              } catch (err) {
-                setError(String(err));
-              }
-            }}
+            onAddProfile={() => setCreatingProfile(true)}
           />
         </div>
         <div style={{ height: 14 }} />
@@ -1667,6 +1802,26 @@ export function AppsScreen() {
           onClose={() => setProfileMenuName(null)}
           onRefresh={refresh}
           onError={(msg) => setError(msg)}
+        />
+      )}
+
+      {creatingProfile && (
+        <NewProfileDialog
+          profiles={profiles}
+          onClose={() => setCreatingProfile(false)}
+          onCreate={async (name, parent) => {
+            try {
+              await api.upsertEnforcementProfile({
+                name: name.trim(),
+                parentName: parent,
+              });
+              setActiveProfile(name.trim().toLowerCase().replace(/\s+/g, '_'));
+              setCreatingProfile(false);
+              refresh();
+            } catch (err) {
+              setError(String(err));
+            }
+          }}
         />
       )}
 

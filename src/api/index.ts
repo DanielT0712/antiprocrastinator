@@ -101,8 +101,13 @@ export const api = {
 
   // Config
   getPreferences: () => invoke<UserPreferences>('get_preferences'),
-  updatePreferences: (updates: Partial<UserPreferences>) =>
-    invoke<UserPreferences>('update_preferences', { updates }),
+  updatePreferences: async (updates: Partial<UserPreferences>) => {
+    const current = await invoke<UserPreferences>('get_preferences');
+    const merged = { ...current, ...updates } as UserPreferences;
+    return invoke<UserPreferences>('update_preferences', {
+      preferences: merged,
+    });
+  },
 
   // Guard
   getGuardStatus: () => invoke<GuardStatus>('get_guard_status'),

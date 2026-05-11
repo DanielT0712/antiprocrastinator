@@ -1998,25 +1998,103 @@ fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<Str
         path.map(normalize_process_name).unwrap_or_default()
     );
     for (category, keywords) in [
-        ("Games", &["steam", "riot", "epic", "battle", "game"][..]),
+        (
+            "Games",
+            &[
+                "steam", "riot", "epic", "battle", "game", "minecraft", "roblox",
+                "valorant", "fortnite", "league", "blizzard", "playstation",
+                "xbox", "nintendo", "emulator", "rpcs", "dolphin", "retroarch",
+                "gameloop", "gog", "ubisoft", "rockstar",
+            ][..],
+        ),
         (
             "Social Media",
             &[
                 "discord", "telegram", "whatsapp", "signal", "wechat", "line",
+                "messenger", "instagram", "twitter", "tweetbot", "mastodon",
+                "bluesky", "threads", "reddit", "snapchat", "tiktok", "wire",
+                "viber", "kakao", "facebook",
             ][..],
         ),
         (
             "Entertainment",
-            &["spotify", "vlc", "iina", "netflix", "music"][..],
+            &[
+                "spotify", "vlc", "iina", "netflix", "music", "podcast", "youtube",
+                "twitch", "plex", "infuse", "hulu", "primevideo", "disney",
+                "appletv", "mpv", "quicktime", "audible", "soundcloud",
+                "tidal", "deezer", "kindle", "comic",
+            ][..],
+        ),
+        (
+            "Communication",
+            &[
+                "slack", "teams", "zoom", "webex", "meet", "skype", "outlook",
+                "thunderbird", "mail", "gmail", "spark", "airmail", "newton",
+                "fastmail", "front", "hey", "linear", "shortwave",
+            ][..],
         ),
         (
             "Browsers",
             &[
                 "chrome", "firefox", "safari", "edge", "arc", "brave", "browser",
+                "opera", "vivaldi", "chromium", "tor", "duckduckgo", "orion",
+                "thorium", "zen",
+            ][..],
+        ),
+        (
+            "Development",
+            &[
+                "code", "vscode", "cursor", "xcode", "android studio",
+                "intellij", "pycharm", "webstorm", "rubymine", "goland",
+                "phpstorm", "rider", "datagrip", "clion", "appcode", "fleet",
+                "zed", "sublime", "atom", "vim", "neovim", "emacs", "nova",
+                "terminal", "iterm", "warp", "alacritty", "kitty", "hyper",
+                "wezterm", "tmux", "docker", "podman", "lazygit", "github",
+                "sourcetree", "tower", "fork", "gitkraken", "postman", "insomnia",
+                "bruno", "tableplus", "dbeaver", "pgadmin", "mongodb compass",
+                "redis", "tinypng", "transmit", "cyberduck", "filezilla",
+                "tunnelblick", "wireshark", "proxyman", "charles",
+            ][..],
+        ),
+        (
+            "Productivity",
+            &[
+                "notion", "obsidian", "logseq", "roam", "bear", "craft", "evernote",
+                "onenote", "anytype", "remnote", "things", "todoist", "ticktick",
+                "omnifocus", "trello", "asana", "linear", "jira", "monday",
+                "clickup", "basecamp", "notes", "reminders", "freeform",
+                "scrivener", "drafts", "ulysses", "ia writer", "1writer",
+                "raycast", "alfred", "rectangle", "magnet", "shottr",
+                "cleanshot", "1password", "bitwarden", "lastpass", "dashlane",
+                "calendar", "fantastical", "cron", "amie", "vimcal", "sunsama",
+            ][..],
+        ),
+        (
+            "Utilities",
+            &[
+                "calculator", "preview", "photos", "image", "screenshot",
+                "transmission", "macupdater", "appcleaner", "the unarchiver",
+                "unzip", "keka", "betterzip", "iina", "iina", "vmware", "parallels",
+                "virtualbox", "utm", "homebrew", "cleanmymac", "macdiskpart",
+                "carbon copy", "time machine", "battery", "stats", "istat",
+            ][..],
+        ),
+        (
+            "Creative",
+            &[
+                "photoshop", "illustrator", "indesign", "premiere", "after effects",
+                "lightroom", "figma", "sketch", "framer", "blender", "cinema 4d",
+                "fusion", "logic", "garageband", "ableton", "fl studio", "audacity",
+                "davinci", "final cut", "imovie", "obs", "screenflow", "procreate",
+                "affinity", "pixelmator", "capture one", "rawtherapee",
+                "darktable", "krita",
             ][..],
         ),
     ] {
-        if keywords.iter().any(|keyword| haystack.contains(keyword)) {
+        if keywords.iter().any(|keyword| {
+            let needle = keyword.replace(' ', "");
+            haystack.contains(&needle)
+        }) {
             return (Some(category.to_string()), 0.65);
         }
     }
