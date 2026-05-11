@@ -1320,6 +1320,7 @@ export function ProfileMenu({
 }: ProfileMenuProps) {
   const [name, setName] = useState(profile.name);
   const [parentName, setParentName] = useState<string | null>(profile.parentName);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -1358,7 +1359,13 @@ export function ProfileMenu({
       onError('Built-in profiles cannot be deleted.');
       return;
     }
-    if (!confirm(`Delete profile "${profile.name}"?`)) return;
+    // Inline Yes/No instead of window.confirm — Tauri's webview returns
+    // false from confirm() silently in some configs, which was eating
+    // the delete intent.
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
     try {
       await api.deleteEnforcementProfile(profile.name);
       onRefresh();
@@ -1460,23 +1467,64 @@ export function ProfileMenu({
           gap: 8,
           justifyContent: 'flex-end',
         }}>
-          <button
-            onClick={remove}
-            disabled={profile.builtin}
-            style={{
-              padding: '7px 12px',
-              background: 'transparent',
-              border:
-                '1px solid color-mix(in oklch, var(--danger) 50%, var(--line))',
-              borderRadius: 5,
-              color: 'var(--danger)',
-              fontSize: 12.5,
-              cursor: profile.builtin ? 'not-allowed' : 'pointer',
-              opacity: profile.builtin ? 0.5 : 1,
-            }}
-          >
-            Delete
-          </button>
+          {confirmDelete ? (
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <span style={{
+                fontSize: 12,
+                color: 'var(--danger)',
+                fontFamily: 'var(--font-mono)',
+              }}>
+                Delete "{profile.name}"?
+              </span>
+              <button
+                onClick={remove}
+                style={{
+                  padding: '6px 12px',
+                  background: 'var(--danger)',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: 5,
+                  fontSize: 12.5,
+                  cursor: 'pointer',
+                  fontWeight: 500,
+                }}
+              >
+                Yes
+              </button>
+              <button
+                onClick={() => setConfirmDelete(false)}
+                style={{
+                  padding: '6px 10px',
+                  background: 'transparent',
+                  color: 'var(--muted)',
+                  border: '1px solid var(--line)',
+                  borderRadius: 5,
+                  fontSize: 12.5,
+                  cursor: 'pointer',
+                }}
+              >
+                No
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={remove}
+              disabled={profile.builtin}
+              style={{
+                padding: '7px 12px',
+                background: 'transparent',
+                border:
+                  '1px solid color-mix(in oklch, var(--danger) 50%, var(--line))',
+                borderRadius: 5,
+                color: 'var(--danger)',
+                fontSize: 12.5,
+                cursor: profile.builtin ? 'not-allowed' : 'pointer',
+                opacity: profile.builtin ? 0.5 : 1,
+              }}
+            >
+              Delete
+            </button>
+          )}
           <span style={{ flex: 1 }} />
           <button
             onClick={clone}
