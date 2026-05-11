@@ -161,6 +161,75 @@ fn ensure_enforcement_defaults(connection: &Connection) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
 
+    migrate_category_override_casing(connection)?;
+
+    Ok(())
+}
+
+/// Earlier versions of `normalize_subject_key` lower-cased category names
+/// when persisting profile overrides ("Utilities" -> "utilities"). The
+/// resolver still matched at runtime but the UI looks rows up by their
+/// canonical TitleCase name, so chip state never reflected the saved rule.
+/// Upgrade existing rows to the canonical name from `app_categories` so the
+/// override store and the UI line up again.
+fn migrate_category_override_casing(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT epo.profile_name, epo.subject_key, ac.name
+            FROM enforcement_profile_overrides epo
+            JOIN app_categories ac
+              ON LOWER(ac.name) = LOWER(epo.subject_key)
+            WHERE epo.subject_type = 'category'
+              AND epo.subject_key != ac.name
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let rows: Vec<(String, String, String)> = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    for (profile_name, old_key, canonical_key) in rows {
+        // Move the row from the stale lower-case key to the canonical one.
+        // Use INSERT OR REPLACE on the destination key so we don't violate
+        // the unique constraint if a row with the canonical name already
+        // exists.
+        let now = timestamp_ms();
+        connection
+            .execute(
+                r#"
+                INSERT INTO enforcement_profile_overrides
+                    (profile_name, subject_type, subject_key, decision, created_at, updated_at)
+                SELECT profile_name, subject_type, ?3, decision, created_at, ?4
+                FROM enforcement_profile_overrides
+                WHERE profile_name = ?1 AND subject_type = 'category' AND subject_key = ?2
+                ON CONFLICT(profile_name, subject_type, subject_key) DO UPDATE SET
+                    decision = excluded.decision,
+                    updated_at = excluded.updated_at
+                "#,
+                params![profile_name, old_key, canonical_key, now],
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "DELETE FROM enforcement_profile_overrides WHERE profile_name = ?1 AND subject_type = 'category' AND subject_key = ?2",
+                params![profile_name, old_key],
+            )
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -3000,7 +3069,11 @@ fn normalize_subject_type(subject_type: &str) -> Result<String, String> {
 }
 
 fn normalize_subject_key(subject_key: &str) -> String {
-    normalize_process_name(subject_key)
+    // Preserve case so user-facing category names ("Utilities", "Social Media")
+    // round-trip correctly between the override store and the UI. App keys
+    // and browser-target keys are already lower-case at construction so this
+    // is a no-op for them.
+    subject_key.trim().to_string()
 }
 
 fn resolve_subject_category(

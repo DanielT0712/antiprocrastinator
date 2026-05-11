@@ -197,12 +197,20 @@ export const api = {
     }),
 };
 
+export interface GuardQuitRequiredEvent {
+  source: string;
+  minimizedToTray: boolean;
+  warning: string;
+  requiredPhrase: string;
+}
+
 // Event subscriptions
 export type AppEventMap = {
   'timer-tick': TimerTickPayload;
   'block-changed': TimeBlock;
   'block-finished-prompt': BlockDecisionPrompt;
   'schedule-warning': ScheduleWarning[];
+  'guard-quit-required': GuardQuitRequiredEvent;
 };
 
 export function onAppEvent<K extends keyof AppEventMap>(

@@ -774,3 +774,133 @@ export function SuspendAppModal({ onClose, onError }: SuspendProps) {
     </Backdrop>
   );
 }
+
+interface QuitChallengeProps {
+  open: boolean;
+  source?: string;
+  minimizedToTray?: boolean;
+  onClose: () => void;
+  onError?: (msg: string) => void;
+}
+
+export function QuitChallengeModal({
+  open,
+  source,
+  minimizedToTray,
+  onClose,
+  onError,
+}: QuitChallengeProps) {
+  const [warning, setWarning] = useState<string>('');
+  const [requiredPhrase, setRequiredPhrase] = useState<string>(
+    'I WANT TO PROCRASTINATE',
+  );
+  const [phrase, setPhrase] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setPhrase('');
+    setBusy(false);
+    api
+      .requestQuit()
+      .then((info) => {
+        if (info.warning) setWarning(info.warning);
+        if (info.requiredPhrase) setRequiredPhrase(info.requiredPhrase);
+      })
+      .catch((err) => onError?.(String(err)));
+  }, [open, onError]);
+
+  if (!open) return null;
+
+  const armed = phrase.trim() === requiredPhrase;
+
+  const submit = async () => {
+    if (!armed || busy) return;
+    setBusy(true);
+    try {
+      const ok = await api.confirmQuit(phrase.trim());
+      if (!ok) {
+        onError?.('Quit phrase did not match.');
+        setBusy(false);
+        return;
+      }
+      // Backend will exit the process; no need to close the modal.
+    } catch (err) {
+      onError?.(String(err));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Backdrop onClose={onClose}>
+      <ModalShell
+        title="Stop AntiProcrastinator?"
+        subtitle={warning || 'Stopping the app also stops the guardrails that were supposed to keep you focused.'}
+        width={500}
+        footer={
+          <>
+            <button onClick={onClose} style={btnGhost} disabled={busy}>
+              Keep running
+            </button>
+            <button
+              onClick={submit}
+              disabled={!armed || busy}
+              style={{
+                ...btnPrimary,
+                background: armed ? 'var(--danger)' : 'var(--line)',
+                color: armed ? 'var(--bg)' : 'var(--muted)',
+                cursor: armed ? 'pointer' : 'not-allowed',
+              }}
+            >
+              {busy ? 'Stopping…' : 'Stop the app'}
+            </button>
+          </>
+        }
+      >
+        <div
+          style={{
+            padding: '10px 12px',
+            marginBottom: 14,
+            border: '1px solid var(--line)',
+            borderRadius: 7,
+            background: 'var(--bg)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 12,
+            color: 'var(--muted)',
+            lineHeight: 1.55,
+          }}
+        >
+          {minimizedToTray ? (
+            <>
+              Window minimized to the tray. The app is still running and still
+              enforcing your blocks. Close it for real only if you really mean
+              to stop the guardrails.
+            </>
+          ) : (
+            <>
+              Force-quitting from the dock, Cmd+Q, or Activity Monitor will not
+              work while strong guard is on — the supervisor relaunches the
+              app. Use this dialog to stop it properly.
+            </>
+          )}
+          {source ? (
+            <div style={{ marginTop: 6, opacity: 0.7 }}>
+              Triggered by: {source}
+            </div>
+          ) : null}
+        </div>
+        <label style={labelStyle}>
+          Type <span style={{ color: 'var(--ink)' }}>{requiredPhrase}</span> to confirm
+        </label>
+        <input
+          value={phrase}
+          onChange={(e) => setPhrase(e.target.value)}
+          style={inputStyle}
+          placeholder={requiredPhrase}
+          autoFocus
+          spellCheck={false}
+        />
+      </ModalShell>
+    </Backdrop>
+  );
+}

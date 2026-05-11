@@ -17,9 +17,17 @@ interface Props {
   collapsed: boolean;
   onToggleCollapse: () => void;
   onSuspendApp: () => void;
+  onRequestQuit: () => void;
 }
 
-export function Sidebar({ current, onNav, collapsed, onToggleCollapse, onSuspendApp }: Props) {
+export function Sidebar({
+  current,
+  onNav,
+  collapsed,
+  onToggleCollapse,
+  onSuspendApp,
+  onRequestQuit,
+}: Props) {
   const [hovered, setHovered] = useState(false);
   const compact = collapsed && !hovered;
 
@@ -162,9 +170,10 @@ export function Sidebar({ current, onNav, collapsed, onToggleCollapse, onSuspend
         marginTop: 'auto',
         paddingTop: 14,
         borderTop: '1px solid var(--line)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 10,
+        display: compact ? 'flex' : 'grid',
+        flexDirection: compact ? 'column' : undefined,
+        gridTemplateColumns: compact ? undefined : '1fr 1fr',
+        gap: compact ? 8 : 6,
       }}>
         <button
           onClick={onSuspendApp}
@@ -172,9 +181,9 @@ export function Sidebar({ current, onNav, collapsed, onToggleCollapse, onSuspend
           style={{
             display: 'flex',
             alignItems: 'center',
-            gap: 10,
+            gap: 8,
             padding: compact ? '9px 0' : '9px 10px',
-            justifyContent: compact ? 'center' : 'flex-start',
+            justifyContent: 'center',
             background: 'transparent',
             border: '1px solid var(--line)',
             borderRadius: 7,
@@ -188,7 +197,31 @@ export function Sidebar({ current, onNav, collapsed, onToggleCollapse, onSuspend
           onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--muted)')}
         >
           <Icons.clock size={15} />
-          {!compact && <span>Suspend app…</span>}
+          {!compact && <span>Suspend</span>}
+        </button>
+        <button
+          onClick={onRequestQuit}
+          title="Stop the app entirely. Requires typing a confirmation phrase."
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: compact ? '9px 0' : '9px 10px',
+            justifyContent: 'center',
+            background: 'transparent',
+            border: '1px solid var(--line)',
+            borderRadius: 7,
+            color: 'var(--muted)',
+            cursor: 'pointer',
+            fontSize: 12.5,
+            fontFamily: 'var(--font-sans)',
+            width: '100%',
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--danger)')}
+          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--muted)')}
+        >
+          <Icons.x size={15} />
+          {!compact && <span>Quit…</span>}
         </button>
       </div>
     </aside>

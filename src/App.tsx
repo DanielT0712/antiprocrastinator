@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, onAppEvent } from './api';
 import { Sidebar, type Route } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
-import { SuspendAppModal } from './components/Modals';
+import { QuitChallengeModal, SuspendAppModal } from './components/Modals';
 import { SleepPromptModal } from './components/SleepPromptModal';
 import { applyTheme } from './lib/themes';
 import { HomeScreen } from './screens/HomeScreen';
@@ -27,6 +27,9 @@ function App() {
     () => localStorage.getItem(COLLAPSED_KEY) === '1',
   );
   const [suspendOpen, setSuspendOpen] = useState(false);
+  const [quitOpen, setQuitOpen] = useState(false);
+  const [quitSource, setQuitSource] = useState<string | undefined>(undefined);
+  const [quitMinimizedToTray, setQuitMinimizedToTray] = useState(false);
   const [sleepPromptOpen, setSleepPromptOpen] = useState(false);
   const [activeProfile, setActiveProfile] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -100,6 +103,15 @@ function App() {
       if (cancelled) u();
       else cleanups.push(u);
     })();
+    (async () => {
+      const u = await onAppEvent('guard-quit-required', (payload) => {
+        setQuitSource(payload.source);
+        setQuitMinimizedToTray(payload.minimizedToTray);
+        setQuitOpen(true);
+      });
+      if (cancelled) u();
+      else cleanups.push(u);
+    })();
     return () => {
       cancelled = true;
       cleanups.forEach((fn) => fn());
@@ -121,6 +133,11 @@ function App() {
         collapsed={collapsed}
         onToggleCollapse={() => setCollapsed((c) => !c)}
         onSuspendApp={() => setSuspendOpen(true)}
+        onRequestQuit={() => {
+          setQuitSource('sidebar');
+          setQuitMinimizedToTray(false);
+          setQuitOpen(true);
+        }}
       />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -155,6 +172,14 @@ function App() {
           onError={handleError}
         />
       )}
+
+      <QuitChallengeModal
+        open={quitOpen}
+        source={quitSource}
+        minimizedToTray={quitMinimizedToTray}
+        onClose={() => setQuitOpen(false)}
+        onError={handleError}
+      />
 
       {sleepPromptOpen && (
         <SleepPromptModal
