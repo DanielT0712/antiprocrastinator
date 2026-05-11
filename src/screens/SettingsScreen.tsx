@@ -1014,36 +1014,42 @@ export function SettingsScreen() {
                     </div>
                   }
                 />
-                <SettingsRow
-                  title="Warn for"
-                  help="Time before the countdown starts."
-                  control={
-                    <Stepper
-                      value={prefs.processWarningSeconds}
-                      onChange={(v) => update({ processWarningSeconds: v })}
-                      min={0}
-                      max={600}
-                      step={10}
-                      unit="s"
-                      width={140}
+                {(prefs.processWarningSeconds ?? 0) > 0 && (
+                  <>
+                    <SettingsRow
+                      title="Warn for"
+                      help="Time before the countdown starts."
+                      control={
+                        <Stepper
+                          value={prefs.processWarningSeconds}
+                          onChange={(v) => update({ processWarningSeconds: v })}
+                          min={1}
+                          max={600}
+                          step={10}
+                          unit="s"
+                          width={140}
+                        />
+                      }
                     />
-                  }
-                />
-                <SettingsRow
-                  title="Countdown to kill"
-                  help="Time after the warning before the process is closed. 0 = close immediately."
-                  control={
-                    <Stepper
-                      value={prefs.processCountdownSeconds}
-                      onChange={(v) => update({ processCountdownSeconds: v })}
-                      min={0}
-                      max={120}
-                      step={5}
-                      unit="s"
-                      width={140}
+                    <SettingsRow
+                      title="Countdown to kill"
+                      help="Time after the warning before the process is closed."
+                      control={
+                        <Stepper
+                          value={prefs.processCountdownSeconds}
+                          onChange={(v) =>
+                            update({ processCountdownSeconds: v })
+                          }
+                          min={0}
+                          max={120}
+                          step={5}
+                          unit="s"
+                          width={140}
+                        />
+                      }
                     />
-                  }
-                />
+                  </>
+                )}
                 <SettingsRow
                   last
                   title="Scan interval"
