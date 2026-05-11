@@ -627,8 +627,6 @@ interface SuspendProps {
   onError?: (msg: string) => void;
 }
 
-const SUSPEND_PHRASE = 'suspend';
-
 const SUSPEND_DURATIONS = [
   { v: '30m', label: '30 min', mins: 30 },
   { v: '1h', label: '1 hour', mins: 60 },
@@ -642,9 +640,21 @@ export function SuspendAppModal({ onClose, onError }: SuspendProps) {
   const [reason, setReason] = useState('');
   const [phrase, setPhrase] = useState('');
   const [busy, setBusy] = useState(false);
+  const [requiredPhrase, setRequiredPhrase] = useState('suspend');
+
+  useEffect(() => {
+    api
+      .getPreferences()
+      .then((prefs) => {
+        if (prefs.suspendPhrase && prefs.suspendPhrase.trim()) {
+          setRequiredPhrase(prefs.suspendPhrase.trim());
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const selected = SUSPEND_DURATIONS.find((d) => d.v === dur)!;
-  const armed = phrase.trim().toLowerCase() === SUSPEND_PHRASE;
+  const armed = phrase.trim().toLowerCase() === requiredPhrase.toLowerCase();
 
   const resumeLabel = useMemo(
     () => formatHHMM(Date.now() + selected.mins * 60_000),
@@ -736,13 +746,13 @@ export function SuspendAppModal({ onClose, onError }: SuspendProps) {
         <label style={labelStyle}>
           Confirm: type{' '}
           <span style={{ color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>
-            {SUSPEND_PHRASE}
+            {requiredPhrase}
           </span>
         </label>
         <input
           value={phrase}
           onChange={(e) => setPhrase(e.target.value)}
-          placeholder={SUSPEND_PHRASE}
+          placeholder={requiredPhrase}
           style={inputStyle}
         />
         <div style={{

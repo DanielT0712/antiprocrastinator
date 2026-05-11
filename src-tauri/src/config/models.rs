@@ -39,6 +39,9 @@ pub struct UserPreferences {
     pub task_chunk_clustering: TaskChunkClusteringMode,
     pub clustering_allows_priority_inversions: bool,
     pub fill_dead_gaps: bool,
+    pub guard_restart_delay_seconds: u32,
+    pub suspend_phrase: String,
+    pub suspend_cooldown_minutes: u32,
 }
 
 impl Default for UserPreferences {
@@ -65,6 +68,9 @@ impl Default for UserPreferences {
             task_chunk_clustering: TaskChunkClusteringMode::GroupSameTaskChunks,
             clustering_allows_priority_inversions: true,
             fill_dead_gaps: true,
+            guard_restart_delay_seconds: 3,
+            suspend_phrase: "suspend".to_string(),
+            suspend_cooldown_minutes: 60,
         }
     }
 }

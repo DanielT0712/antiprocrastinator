@@ -221,6 +221,44 @@ pub fn run_migrations(connection: &Connection) -> Result<(), rusqlite::Error> {
         )?;
     }
 
+    if current_version < 9 {
+        for (column, ddl) in [
+            (
+                "kind",
+                "ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'flexible'",
+            ),
+            (
+                "fixed_window_start_minute",
+                "ALTER TABLE tasks ADD COLUMN fixed_window_start_minute INTEGER",
+            ),
+            (
+                "fixed_window_end_minute",
+                "ALTER TABLE tasks ADD COLUMN fixed_window_end_minute INTEGER",
+            ),
+            (
+                "recurrence_kind",
+                "ALTER TABLE tasks ADD COLUMN recurrence_kind TEXT NOT NULL DEFAULT 'none'",
+            ),
+            (
+                "recurrence_days_mask",
+                "ALTER TABLE tasks ADD COLUMN recurrence_days_mask INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "recurrence_anchor_date",
+                "ALTER TABLE tasks ADD COLUMN recurrence_anchor_date INTEGER",
+            ),
+        ] {
+            let exists: i32 = connection.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = ?1",
+                [column],
+                |row| row.get(0),
+            )?;
+            if exists == 0 {
+                connection.execute(ddl, [])?;
+            }
+        }
+    }
+
     if current_version != CURRENT_SCHEMA_VERSION {
         connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     }

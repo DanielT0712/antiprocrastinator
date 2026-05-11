@@ -1055,13 +1055,75 @@ export function SettingsScreen() {
                 }
               >
                 <SettingsRow
-                  last
                   title="Strong guard"
                   help="Quitting requires the challenge phrase. Closing the window minimizes to tray instead."
                   control={
                     <Toggle
                       on={prefs.strongGuardEnabled}
                       onChange={(v) => update({ strongGuardEnabled: v })}
+                    />
+                  }
+                />
+                <SettingsRow
+                  last
+                  title="Restart delay"
+                  help="Time before the app restarts after a force-quit."
+                  control={
+                    <Stepper
+                      value={prefs.guardRestartDelaySeconds}
+                      onChange={(v) =>
+                        update({ guardRestartDelaySeconds: v })
+                      }
+                      min={1}
+                      max={60}
+                      step={1}
+                      unit="s"
+                      width={140}
+                    />
+                  }
+                />
+              </SettingsCard>
+              <SettingsCard title="Suspend lockout">
+                <SettingsRow
+                  title="Confirmation phrase"
+                  help="Type this phrase to confirm a suspend. Default: suspend."
+                  control={
+                    <input
+                      type="text"
+                      defaultValue={prefs.suspendPhrase}
+                      onBlur={(e) => {
+                        const v = e.target.value.trim();
+                        if (v) update({ suspendPhrase: v });
+                      }}
+                      style={{
+                        width: 200,
+                        padding: '7px 10px',
+                        background: 'var(--bg)',
+                        color: 'var(--ink)',
+                        border: '1px solid var(--line)',
+                        borderRadius: 6,
+                        fontSize: 12.5,
+                        fontFamily: 'var(--font-mono)',
+                        outline: 'none',
+                      }}
+                    />
+                  }
+                />
+                <SettingsRow
+                  last
+                  title="Cooldown after suspend"
+                  help="Minimum gap between suspends."
+                  control={
+                    <Stepper
+                      value={prefs.suspendCooldownMinutes}
+                      onChange={(v) =>
+                        update({ suspendCooldownMinutes: v })
+                      }
+                      min={0}
+                      max={1440}
+                      step={15}
+                      unit="min"
+                      width={140}
                     />
                   }
                 />

@@ -776,7 +776,196 @@ pub fn complete_current_block(
     schedule: &ScheduleState,
     preferences: &UserPreferences,
 ) -> Result<ScheduleActionResult, String> {
-    finish_current_block_with_rest(connection, schedule, preferences, BlockStatus::Completed)
+    let task_id = current_or_paused_block(connection, schedule)?
+        .and_then(|block| block.task_id);
+    let result =
+        finish_current_block_with_rest(connection, schedule, preferences, BlockStatus::Completed)?;
+    if let Some(id) = task_id {
+        maybe_respawn_recurring_task(connection, id);
+    }
+    Ok(result)
+}
+
+/// If the task has recurrence != none, insert a sibling task row with the
+/// next occurrence's deadline so the planner picks it up the next time it
+/// rebuilds.
+fn maybe_respawn_recurring_task(connection: &Connection, task_id: i64) {
+    use crate::tasks::models::{
+        recurrence_kind_from_str, recurrence_kind_to_str, task_kind_from_str, task_kind_to_str,
+        RecurrenceKind,
+    };
+
+    let row: Option<(
+        String,
+        Option<i64>,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        bool,
+        Option<String>,
+        String,
+        Option<i64>,
+        Option<i64>,
+        String,
+        i64,
+        Option<i64>,
+    )> = connection
+        .query_row(
+            r#"
+            SELECT name, group_id, priority, estimated_minutes, deadline,
+                   max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+                   work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile,
+                   kind, fixed_window_start_minute, fixed_window_end_minute,
+                   recurrence_kind, recurrence_days_mask, recurrence_anchor_date
+            FROM tasks
+            WHERE id = ?1
+            "#,
+            params![task_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                    row.get(15)?,
+                    row.get(16)?,
+                    row.get(17)?,
+                ))
+            },
+        )
+        .ok();
+    let Some(row) = row else {
+        return;
+    };
+    let (
+        name,
+        group_id,
+        priority,
+        estimated_minutes,
+        deadline,
+        max_chunk,
+        min_chunk,
+        min_rest,
+        work_ratio,
+        rest_ratio,
+        protect,
+        enforcement_profile,
+        kind_str,
+        fixed_start,
+        fixed_end,
+        recurrence_str,
+        recurrence_days_mask,
+        recurrence_anchor,
+    ) = row;
+    let recurrence = recurrence_kind_from_str(&recurrence_str);
+    if matches!(recurrence, RecurrenceKind::None) {
+        return;
+    }
+    let now = timestamp_ms();
+    let next_deadline = next_recurrence_at(recurrence, recurrence_days_mask, now)
+        .or(deadline.map(|d| d + 86_400_000));
+    let _ = connection.execute(
+        r#"
+        INSERT INTO tasks (
+            name, group_id, priority, estimated_minutes, deadline,
+            max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
+            work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile,
+            average_priority, average_actual_minutes, completion_count,
+            kind, fixed_window_start_minute, fixed_window_end_minute,
+            recurrence_kind, recurrence_days_mask, recurrence_anchor_date,
+            created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+        "#,
+        params![
+            name,
+            group_id,
+            priority,
+            estimated_minutes,
+            next_deadline,
+            max_chunk,
+            min_chunk,
+            min_rest,
+            work_ratio,
+            rest_ratio,
+            protect,
+            enforcement_profile,
+            priority as f64,
+            Option::<f64>::None,
+            0_i64,
+            task_kind_to_str(task_kind_from_str(&kind_str)),
+            fixed_start,
+            fixed_end,
+            recurrence_kind_to_str(recurrence),
+            recurrence_days_mask,
+            recurrence_anchor,
+            now,
+            now,
+        ],
+    );
+}
+
+fn next_recurrence_at(
+    kind: crate::tasks::models::RecurrenceKind,
+    days_mask: i64,
+    now_ms: i64,
+) -> Option<i64> {
+    use crate::tasks::models::RecurrenceKind;
+    use chrono::{Duration, Local, TimeZone};
+    let now_local = Local.timestamp_millis_opt(now_ms).single()?;
+    let day = now_local.date_naive();
+    let weekday = day.weekday().num_days_from_monday() as i64; // 0 = Mon
+    let advance_days = match kind {
+        RecurrenceKind::Daily => 1,
+        RecurrenceKind::Weekdays => {
+            // Skip Sat (5) / Sun (6).
+            let mut step = 1;
+            let mut cursor = (weekday + step) % 7;
+            while cursor >= 5 {
+                step += 1;
+                cursor = (weekday + step) % 7;
+            }
+            step
+        }
+        RecurrenceKind::Weekly => {
+            if days_mask == 0 {
+                7
+            } else {
+                let mut step = 1_i64;
+                loop {
+                    let cursor = (weekday + step) % 7;
+                    if days_mask & (1 << cursor) != 0 {
+                        break step;
+                    }
+                    step += 1;
+                    if step > 14 {
+                        break 7;
+                    }
+                }
+            }
+        }
+        RecurrenceKind::Once | RecurrenceKind::None => return None,
+    };
+    let next = day + Duration::days(advance_days);
+    Local
+        .from_local_datetime(&next.and_hms_opt(18, 0, 0)?)
+        .single()
+        .map(|dt| dt.timestamp_millis())
 }
 
 pub fn skip_current_block(

@@ -3,6 +3,7 @@ import { api, onAppEvent } from './api';
 import { Sidebar, type Route } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { SuspendAppModal } from './components/Modals';
+import { SleepPromptModal } from './components/SleepPromptModal';
 import { applyTheme } from './lib/themes';
 import { HomeScreen } from './screens/HomeScreen';
 import { ScheduleScreen } from './screens/ScheduleScreen';
@@ -26,8 +27,31 @@ function App() {
     () => localStorage.getItem(COLLAPSED_KEY) === '1',
   );
   const [suspendOpen, setSuspendOpen] = useState(false);
+  const [sleepPromptOpen, setSleepPromptOpen] = useState(false);
   const [activeProfile, setActiveProfile] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (localStorage.getItem('ap-sleep-prompt-dismissed') === '1') return;
+    let cancelled = false;
+    api
+      .getWeeklyTemplate()
+      .then((template) => {
+        if (cancelled) return;
+        const days =
+          (template as { days?: Array<{ sleepStartMinute?: number | null }> } | null)
+            ?.days ?? [];
+        const hasSleep = days.some(
+          (d) =>
+            typeof d.sleepStartMinute === 'number' && d.sleepStartMinute >= 0,
+        );
+        if (!hasSleep) setSleepPromptOpen(true);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(ROUTE_KEY, route);
@@ -129,6 +153,19 @@ function App() {
         <SuspendAppModal
           onClose={() => setSuspendOpen(false)}
           onError={handleError}
+        />
+      )}
+
+      {sleepPromptOpen && (
+        <SleepPromptModal
+          onSaved={() => {
+            localStorage.setItem('ap-sleep-prompt-dismissed', '1');
+            setSleepPromptOpen(false);
+          }}
+          onSkip={() => {
+            localStorage.setItem('ap-sleep-prompt-dismissed', '1');
+            setSleepPromptOpen(false);
+          }}
         />
       )}
 

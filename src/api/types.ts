@@ -136,6 +136,9 @@ export interface UserPreferences {
   taskChunkClustering: 'group_same_task_chunks' | 'separate_same_task_chunks';
   clusteringAllowsPriorityInversions: boolean;
   fillDeadGaps: boolean;
+  guardRestartDelaySeconds: number;
+  suspendPhrase: string;
+  suspendCooldownMinutes: number;
 }
 
 export interface GuardStatus {
