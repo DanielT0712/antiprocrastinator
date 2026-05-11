@@ -44,7 +44,6 @@ pub fn run() {
             schedule::commands::get_weekly_template,
             schedule::commands::save_weekly_template,
             schedule::commands::complete_current_block,
-            schedule::commands::skip_current_block,
             schedule::commands::extend_current_block,
             schedule::commands::pause_current_block,
             schedule::commands::resume_current_block,

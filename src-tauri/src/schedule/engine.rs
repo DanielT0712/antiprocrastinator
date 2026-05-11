@@ -786,9 +786,10 @@ pub fn complete_current_block(
     Ok(result)
 }
 
-/// If the task has recurrence != none, insert a sibling task row with the
-/// next occurrence's deadline so the planner picks it up the next time it
-/// rebuilds.
+/// If the task has recurrence != none AND every planned chunk has now been
+/// completed, insert a sibling task row with the next occurrence's deadline
+/// so the planner picks it up the next time it rebuilds. Tasks split into
+/// multiple chunks only respawn once the final chunk is finished.
 fn maybe_respawn_recurring_task(connection: &Connection, task_id: i64) {
     use crate::tasks::models::{
         recurrence_kind_from_str, recurrence_kind_to_str, task_kind_from_str, task_kind_to_str,
@@ -877,6 +878,42 @@ fn maybe_respawn_recurring_task(connection: &Connection, task_id: i64) {
     if matches!(recurrence, RecurrenceKind::None) {
         return;
     }
+
+    // Multi-chunk: only respawn once every chunk of this task is done. We
+    // consider the task complete when:
+    //   - it has no estimate (single-shot task), OR
+    //   - completed-block minutes >= estimated_minutes, OR
+    //   - no remaining scheduled / active / paused blocks reference it.
+    let consumed_ms: i64 = connection
+        .query_row(
+            r#"
+            SELECT COALESCE(SUM(end_time - start_time), 0)
+            FROM time_blocks
+            WHERE task_id = ?1 AND status = 'completed'
+            "#,
+            params![task_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    let pending_chunks: i64 = connection
+        .query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM time_blocks
+            WHERE task_id = ?1
+              AND status IN ('scheduled', 'active', 'paused')
+            "#,
+            params![task_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    let consumed_min = consumed_ms / 60_000;
+    let estimate = estimated_minutes.unwrap_or(0);
+    let estimate_satisfied = estimate <= 0 || consumed_min >= estimate;
+    if !estimate_satisfied && pending_chunks > 0 {
+        return;
+    }
+
     let now = timestamp_ms();
     let next_deadline = next_recurrence_at(recurrence, recurrence_days_mask, now)
         .or(deadline.map(|d| d + 86_400_000));

@@ -35,7 +35,6 @@ export const api = {
 
   completeCurrentBlock: () =>
     invoke<ScheduleMutationResult>('complete_current_block'),
-  skipCurrentBlock: () => invoke<ScheduleMutationResult>('skip_current_block'),
   extendCurrentBlock: (minutes: number) =>
     invoke<ScheduleMutationResult>('extend_current_block', { minutes }),
   pauseCurrentBlock: () =>
