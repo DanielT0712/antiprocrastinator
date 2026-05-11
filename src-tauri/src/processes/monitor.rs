@@ -171,13 +171,148 @@ pub fn scan_processes() -> Vec<ProcessInfo> {
     system
         .processes()
         .iter()
-        .map(|(pid, process)| ProcessInfo {
-            pid: pid.as_u32(),
-            name: process.name().to_string_lossy().to_string(),
-            exe_path: process.exe().map(|path| path.display().to_string()),
-            memory_bytes: process.memory(),
+        .filter_map(|(pid, process)| {
+            let exe = process.exe().map(|p| p.to_path_buf());
+            if !is_user_facing_app(exe.as_deref()) {
+                return None;
+            }
+            Some(ProcessInfo {
+                pid: pid.as_u32(),
+                name: process.name().to_string_lossy().to_string(),
+                exe_path: exe.map(|p| p.display().to_string()),
+                memory_bytes: process.memory(),
+            })
         })
         .collect()
+}
+
+/// Heuristic: a process is "user-facing" if its executable lives inside a
+/// real .app bundle (macOS), an Applications/Steam-like folder, or a Linux
+/// launcher path. System frameworks, daemons under /System/Library and
+/// /usr/* are filtered out so the inventory matches what the user actually
+/// thinks of as an app.
+fn is_user_facing_app(exe: Option<&Path>) -> bool {
+    let Some(path) = exe else {
+        return false;
+    };
+    let display = path.to_string_lossy();
+
+    #[cfg(target_os = "macos")]
+    {
+        // exclude OS daemons + helper processes inside system frameworks
+        const DENY_PREFIXES: &[&str] = &[
+            "/System/Library/",
+            "/usr/libexec/",
+            "/usr/sbin/",
+            "/usr/bin/",
+            "/sbin/",
+            "/bin/",
+            "/Library/Apple/",
+            "/Library/Frameworks/",
+            "/Library/PrivilegedHelperTools/",
+            "/private/var/",
+        ];
+        for prefix in DENY_PREFIXES {
+            if display.starts_with(prefix) {
+                return false;
+            }
+        }
+        // require the path to live inside a .app bundle OR a well-known
+        // launcher root.
+        if display.contains(".app/Contents/MacOS/") {
+            // skip XPC services / Login Items / framework helpers — those
+            // live under .app/Contents/Frameworks/.../XPCServices.
+            if display.contains(".xpc/") || display.contains("/Frameworks/") {
+                return false;
+            }
+            return true;
+        }
+        for root in [
+            "/Applications/",
+            "/System/Applications/",
+            "/Applications/Setapp/",
+        ] {
+            if display.starts_with(root) {
+                return true;
+            }
+        }
+        // Steam games, ~/Applications, and user-installed CLI binaries
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = home.to_string_lossy();
+            let user_apps = format!("{}/Applications/", home);
+            let steam_lib = format!(
+                "{}/Library/Application Support/Steam/steamapps/",
+                home
+            );
+            if display.starts_with(user_apps.as_str())
+                || display.starts_with(steam_lib.as_str())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        const DENY_PREFIXES: &[&str] = &[
+            "C:\\Windows\\System32\\",
+            "C:\\Windows\\SysWOW64\\",
+            "C:\\Windows\\WinSxS\\",
+            "C:\\Windows\\servicing\\",
+        ];
+        for prefix in DENY_PREFIXES {
+            if display.starts_with(prefix) {
+                return false;
+            }
+        }
+        const ALLOW_PREFIXES: &[&str] = &[
+            "C:\\Program Files\\",
+            "C:\\Program Files (x86)\\",
+            "C:\\Users\\",
+        ];
+        for prefix in ALLOW_PREFIXES {
+            if display.starts_with(prefix) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        const DENY_PREFIXES: &[&str] = &[
+            "/usr/lib/",
+            "/usr/libexec/",
+            "/usr/sbin/",
+            "/sbin/",
+            "/bin/",
+            "/lib/",
+        ];
+        for prefix in DENY_PREFIXES {
+            if display.starts_with(prefix) {
+                return false;
+            }
+        }
+        const ALLOW_PREFIXES: &[&str] = &[
+            "/usr/bin/",
+            "/opt/",
+            "/snap/",
+            "/var/lib/flatpak/",
+        ];
+        for prefix in ALLOW_PREFIXES {
+            if display.starts_with(prefix) {
+                return true;
+            }
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = home.to_string_lossy();
+            if display.starts_with(&*home) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 pub fn get_focused_window() -> Result<Option<FocusedWindowInfo>, String> {

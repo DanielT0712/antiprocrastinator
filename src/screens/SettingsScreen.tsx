@@ -35,6 +35,28 @@ const statusValue: CSSProperties = {
   color: 'var(--ink)',
 };
 
+const btnSecondary: CSSProperties = {
+  padding: '7px 14px',
+  background: 'transparent',
+  color: 'var(--ink)',
+  border: '1px solid var(--line)',
+  borderRadius: 6,
+  fontSize: 12.5,
+  fontFamily: 'var(--font-sans)',
+  cursor: 'pointer',
+};
+
+const btnDanger: CSSProperties = {
+  padding: '7px 14px',
+  background: 'transparent',
+  color: 'var(--danger)',
+  border: '1px solid var(--danger)',
+  borderRadius: 6,
+  fontSize: 12.5,
+  fontFamily: 'var(--font-sans)',
+  cursor: 'pointer',
+};
+
 let activeHoverPopId: symbol | null = null;
 let closeActiveHoverPop: (() => void) | null = null;
 
@@ -601,47 +623,6 @@ function SectionTitle({ title, blurb }: { title: string; blurb: string }) {
   );
 }
 
-function KeywordList({
-  values,
-  onChange,
-}: {
-  values: string[];
-  onChange: (values: string[]) => void;
-}) {
-  const [draft, setDraft] = useState(values.join(', '));
-  useEffect(() => setDraft(values.join(', ')), [values]);
-  const commit = () => {
-    const parsed = draft
-      .split(',')
-      .map((v) => v.trim())
-      .filter((v) => v.length > 0);
-    onChange(parsed);
-  };
-  return (
-    <input
-      value={draft}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') commit();
-      }}
-      placeholder="comma, separated, keywords"
-      style={{
-        width: '100%',
-        padding: '9px 11px',
-        background: 'var(--bg)',
-        border: '1px solid var(--line)',
-        borderRadius: 6,
-        color: 'var(--ink)',
-        fontSize: 13,
-        fontFamily: 'var(--font-mono)',
-        outline: 'none',
-        boxSizing: 'border-box',
-      }}
-    />
-  );
-}
-
 export function SettingsScreen() {
   const [section, setSection] = useState<SectionId>('general');
   const [prefs, setPrefs] = useState<UserPreferences | null>(null);
@@ -1131,46 +1112,84 @@ export function SettingsScreen() {
             <>
               <SectionTitle
                 title="Data & Privacy"
-                blurb="Browser title heuristics and the per-user emergency allow list."
+                blurb="What stays on disk and what gets reset."
               />
-              <SettingsCard title="Browser title keywords">
-                <SettingsRow
-                  title="Allow list"
-                  help="Comma-separated. A tab title containing any of these keywords passes through enforcement."
-                >
-                  <KeywordList
-                    values={prefs.browserTitleAllowKeywords}
-                    onChange={(values) =>
-                      update({ browserTitleAllowKeywords: values })
-                    }
-                  />
-                </SettingsRow>
+              <SettingsCard title="Logs & analytics">
                 <SettingsRow
                   last
-                  title="Block list"
-                  help="A tab title containing any of these gets killed on sight."
-                >
-                  <KeywordList
-                    values={prefs.browserTitleBlockKeywords}
-                    onChange={(values) =>
-                      update({ browserTitleBlockKeywords: values })
-                    }
-                  />
-                </SettingsRow>
+                  title="Anonymous usage stats"
+                  help="Anonymous performance metrics. No tasks, app names, or schedule data."
+                  control={
+                    <Toggle
+                      on={false}
+                      onChange={() => {
+                        /* not wired — privacy default off */
+                      }}
+                    />
+                  }
+                />
               </SettingsCard>
-              <SettingsCard title="Emergency allow list">
+              <SettingsCard title="Backup">
+                <SettingsRow
+                  title="Export database"
+                  help="Save a .db snapshot you can re-import elsewhere."
+                  control={
+                    <button
+                      onClick={() =>
+                        alert('Export will land in a follow-up release.')
+                      }
+                      style={btnSecondary}
+                    >
+                      Export…
+                    </button>
+                  }
+                />
+                <SettingsRow
+                  title="Import database"
+                  help="Replace the current database with a .db file. Cannot be undone."
+                  control={
+                    <button
+                      onClick={() =>
+                        alert('Import will land in a follow-up release.')
+                      }
+                      style={btnSecondary}
+                    >
+                      Choose file…
+                    </button>
+                  }
+                />
                 <SettingsRow
                   last
-                  title="Allowed apps"
-                  help="Apps that always remain available during an emergency block."
-                >
-                  <KeywordList
-                    values={prefs.emergencyAllowedApps}
-                    onChange={(values) =>
-                      update({ emergencyAllowedApps: values })
-                    }
-                  />
-                </SettingsRow>
+                  title="Reset to defaults"
+                  help="Clears preferences. Keeps tasks and history."
+                  control={
+                    <button
+                      onClick={() =>
+                        alert('Reset will land in a follow-up release.')
+                      }
+                      style={btnDanger}
+                    >
+                      Reset…
+                    </button>
+                  }
+                />
+              </SettingsCard>
+              <SettingsCard title="Danger zone">
+                <SettingsRow
+                  last
+                  title="Delete all data"
+                  help="Removes tasks, schedule, rules, and logs. Cannot be undone."
+                  control={
+                    <button
+                      onClick={() =>
+                        alert('Wipe will land in a follow-up release.')
+                      }
+                      style={btnDanger}
+                    >
+                      Delete everything…
+                    </button>
+                  }
+                />
               </SettingsCard>
             </>
           )}
@@ -1178,24 +1197,58 @@ export function SettingsScreen() {
           {section === 'about' && (
             <>
               <SectionTitle title="About" blurb="The relevant facts." />
-              <SettingsCard title="AntiProcrastinator">
-                <SettingsRow
-                  title="Version"
-                  control={<span style={statusValue}>0.4 dev</span>}
-                />
-                <SettingsRow
-                  title="Stack"
-                  control={
-                    <span style={statusValue}>Tauri v2 · React · SQLite</span>
-                  }
-                />
+              <SettingsCard title="About">
+                <div style={{
+                  padding: '24px 0',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 18,
+                  borderBottom: '1px solid var(--line)',
+                }}>
+                  <div style={{
+                    width: 56,
+                    height: 56,
+                    borderRadius: 12,
+                    background: 'var(--ink)',
+                    color: 'var(--bg)',
+                    display: 'grid',
+                    placeItems: 'center',
+                    fontFamily: 'var(--font-display)',
+                    fontSize: 28,
+                    fontWeight: 500,
+                    fontStyle: 'italic',
+                  }}>
+                    A
+                  </div>
+                  <div>
+                    <div style={{
+                      fontFamily: 'var(--font-display)',
+                      fontSize: 22,
+                      color: 'var(--ink)',
+                      letterSpacing: '-0.01em',
+                    }}>
+                      Anti<span style={{ fontStyle: 'italic' }}>procrastinator</span>
+                    </div>
+                    <div style={{
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 11.5,
+                      color: 'var(--muted)',
+                      marginTop: 4,
+                    }}>
+                      Version 0.4.2 · dev build · schema v2
+                    </div>
+                  </div>
+                </div>
                 <SettingsRow
                   last
-                  title="Source"
+                  title="Check for updates"
                   control={
-                    <span style={statusValue}>
-                      github.com/DanielT0712/antiprocrastinator
-                    </span>
+                    <button
+                      onClick={() => alert('Update check not wired yet.')}
+                      style={btnSecondary}
+                    >
+                      Check now
+                    </button>
                   }
                 />
               </SettingsCard>
