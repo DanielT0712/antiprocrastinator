@@ -467,6 +467,10 @@ interface CategorySectionProps {
     subjectKey: string,
     preset: PresetId,
   ) => void;
+  onSetOverride: (
+    key: OverrideKey,
+    decision: EnforcementDecision | null,
+  ) => Promise<void> | void;
   onOpenApp: (app: KnownApp) => void;
 }
 
@@ -495,9 +499,11 @@ function CategorySection({
   emergencyBlockedCategories,
   overrides,
   onApplyPreset,
+  onSetOverride,
   onOpenApp,
 }: CategorySectionProps) {
   const [open, setOpen] = useState(false);
+  const [customEditing, setCustomEditing] = useState(false);
   const hardLocked =
     isEmergency &&
     emergencyBlockedCategories.some(
@@ -632,7 +638,10 @@ function CategorySection({
             }}>
               <div style={{ ...labelStyle, color: 'var(--muted)' }}>Category rule</div>
               {PRESETS.map((p) => {
-                const active = categoryPreset === p.id;
+                const active =
+                  p.id === 'custom'
+                    ? customEditing || categoryPreset === 'custom'
+                    : !customEditing && categoryPreset === p.id;
                 const blockedByEmergency =
                   hardLocked && p.id !== 'always-block';
                 return (
@@ -640,6 +649,11 @@ function CategorySection({
                     key={p.id}
                     onClick={() => {
                       if (blockedByEmergency) return;
+                      if (p.id === 'custom') {
+                        setCustomEditing(true);
+                        return;
+                      }
+                      setCustomEditing(false);
                       onApplyPreset('category', category.name, p.id);
                     }}
                     title={
@@ -659,37 +673,136 @@ function CategorySection({
                 );
               })}
             </div>
-            <div style={{
-              marginTop: 8,
-              fontSize: 11.5,
-              color: 'var(--muted)',
-              fontFamily: 'var(--font-mono)',
-              display: 'flex',
-              gap: 12,
-              flexWrap: 'wrap',
-            }}>
-              <span>Resolved:</span>
-              {profileNames.map((n) => {
-                const d = hardLocked
-                  ? 'block'
-                  : categoryDecisions[n] ??
-                    (categoryPreset === 'always-allow' ||
-                    (categoryPreset === 'block-work' &&
-                      (n === 'rest' || n === 'emergency'))
-                      ? 'allow'
-                      : 'block');
-                return (
-                  <span key={n}>
-                    {(PROFILE_DISPLAY[n] ?? n).toLowerCase()} →{' '}
-                    <span style={{
-                      color: d === 'block' ? 'var(--danger)' : 'var(--ok)',
+            {customEditing || categoryPreset === 'custom' ? (
+              <div style={{
+                marginTop: 10,
+                padding: '10px 12px',
+                border: '1px solid var(--line)',
+                borderRadius: 7,
+                background: 'var(--bg)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+              }}>
+                <div style={{ ...labelStyle, color: 'var(--muted)' }}>
+                  Per-profile override
+                </div>
+                {profileNames.map((n) => {
+                  const current = categoryDecisions[n];
+                  const opts: { v: EnforcementDecision | null; label: string }[] = [
+                    { v: null, label: 'Inherit' },
+                    { v: 'allow', label: 'Allow' },
+                    { v: 'block', label: 'Block' },
+                  ];
+                  const profileLockedByEmergency = hardLocked && n === 'emergency';
+                  return (
+                    <div key={n} style={{
+                      display: 'grid',
+                      gridTemplateColumns: '120px 1fr',
+                      alignItems: 'center',
+                      gap: 10,
                     }}>
-                      {d}
+                      <div style={{
+                        fontSize: 12.5,
+                        color: 'var(--ink)',
+                        fontFamily: 'var(--font-sans)',
+                      }}>
+                        {PROFILE_DISPLAY[n] ?? n}
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {opts.map((o) => {
+                          const sel = current === o.v;
+                          const disabled =
+                            profileLockedByEmergency && o.v !== 'block';
+                          return (
+                            <button
+                              key={o.label}
+                              onClick={() => {
+                                if (disabled) return;
+                                onSetOverride(
+                                  {
+                                    profile: n,
+                                    subjectType: 'category',
+                                    subjectKey: category.name,
+                                  },
+                                  o.v,
+                                );
+                              }}
+                              disabled={disabled}
+                              style={{
+                                padding: '5px 11px',
+                                borderRadius: 5,
+                                border:
+                                  '1px solid ' +
+                                  (sel
+                                    ? o.v === 'block'
+                                      ? 'var(--danger)'
+                                      : o.v === 'allow'
+                                      ? 'var(--ok)'
+                                      : 'var(--ink)'
+                                    : 'var(--line)'),
+                                background: sel
+                                  ? o.v === 'block'
+                                    ? 'color-mix(in oklch, var(--danger) 14%, transparent)'
+                                    : o.v === 'allow'
+                                    ? 'color-mix(in oklch, var(--ok) 14%, transparent)'
+                                    : 'color-mix(in oklch, var(--ink) 8%, transparent)'
+                                  : 'transparent',
+                                color: sel
+                                  ? o.v === 'block'
+                                    ? 'var(--danger)'
+                                    : o.v === 'allow'
+                                    ? 'var(--ok)'
+                                    : 'var(--ink)'
+                                  : 'var(--muted)',
+                                fontSize: 11.5,
+                                fontFamily: 'var(--font-sans)',
+                                cursor: disabled ? 'not-allowed' : 'pointer',
+                                opacity: disabled ? 0.4 : 1,
+                              }}
+                            >
+                              {o.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div style={{
+                marginTop: 8,
+                fontSize: 11.5,
+                color: 'var(--muted)',
+                fontFamily: 'var(--font-mono)',
+                display: 'flex',
+                gap: 12,
+                flexWrap: 'wrap',
+              }}>
+                <span>Resolved:</span>
+                {profileNames.map((n) => {
+                  const d = hardLocked
+                    ? 'block'
+                    : categoryDecisions[n] ??
+                      (categoryPreset === 'always-allow' ||
+                      (categoryPreset === 'block-work' &&
+                        (n === 'rest' || n === 'emergency'))
+                        ? 'allow'
+                        : 'block');
+                  return (
+                    <span key={n}>
+                      {(PROFILE_DISPLAY[n] ?? n).toLowerCase()} →{' '}
+                      <span style={{
+                        color: d === 'block' ? 'var(--danger)' : 'var(--ok)',
+                      }}>
+                        {d}
+                      </span>
                     </span>
-                  </span>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
           {apps.length === 0 ? (
             <div style={{
@@ -1624,6 +1737,7 @@ export function AppsScreen() {
                   emergencyBlockedCategories={emergencyBlockedCategories}
                   overrides={overrideMap}
                   onApplyPreset={(t, k, p) => applyPreset(t, k, p)}
+                  onSetOverride={setOverride}
                   onOpenApp={(app) => setDrawerAppKey(app.appKey)}
                 />
               ))}

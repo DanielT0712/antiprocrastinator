@@ -1,5 +1,7 @@
 use tauri::{Manager, RunEvent, WindowEvent};
 
+const APP_MENU_QUIT_ID: &str = "app_menu_quit";
+
 mod analytics;
 mod config;
 mod db;
@@ -20,6 +22,11 @@ pub fn run() {
 
             if event.id() == guard::watchdog::TRAY_REQUEST_QUIT_ID {
                 handle_quit_request(app, "tray_menu");
+                return;
+            }
+
+            if event.id() == APP_MENU_QUIT_ID {
+                handle_quit_request(app, "app_menu");
             }
         })
         .on_window_event(|window, event| {
@@ -124,6 +131,7 @@ pub fn run() {
             app.manage(processes);
             app.manage(guard);
 
+            install_app_menu(&app.handle()).map_err(std::io::Error::other)?;
             guard::watchdog::setup_system_tray(&app.handle()).map_err(std::io::Error::other)?;
             guard::watchdog::start_supervisor_runtime(&app.handle())
                 .map_err(std::io::Error::other)?;
@@ -170,7 +178,14 @@ fn handle_window_close<R: tauri::Runtime>(window: &tauri::Window<R>, api: &tauri
 
     api.prevent_close();
 
-    let minimized_to_tray = if preferences.minimize_to_tray {
+    // When strong guard is on, the close button means "I want to stop the
+    // app" — show the challenge dialog instead of silently minimizing,
+    // otherwise the user sees the window disappear and assumes the click
+    // worked. Only minimize-to-tray when strong guard is off.
+    let minimized_to_tray = if strong_guard_active {
+        let _ = guard::watchdog::show_main_window(app);
+        false
+    } else if preferences.minimize_to_tray {
         guard::watchdog::hide_main_window(app).is_ok()
     } else {
         let _ = guard::watchdog::show_main_window(app);
@@ -335,4 +350,71 @@ async fn wait_for_termination_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
         log::warn!("failed to wait for Ctrl+C: {error}");
     }
+}
+
+/// Install a custom application menu so the system Cmd+Q (and the
+/// "Quit AntiProcrastinator" item in the app menubar on macOS) is
+/// routed through our quit flow instead of bypassing it. Without this
+/// the default Tauri menu hands Cmd+Q straight to the OS, which kills
+/// the process before strong guard can intervene.
+fn install_app_menu(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
+    let quit_item = MenuItemBuilder::with_id(APP_MENU_QUIT_ID, "Quit AntiProcrastinator…")
+        .accelerator("CmdOrCtrl+Q")
+        .build(app)
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    let menu = {
+        let about_metadata = AboutMetadataBuilder::new()
+            .name(Some("AntiProcrastinator"))
+            .build();
+        let app_submenu = SubmenuBuilder::new(app, "AntiProcrastinator")
+            .about(Some(about_metadata))
+            .separator()
+            .services()
+            .separator()
+            .hide()
+            .hide_others()
+            .show_all()
+            .separator()
+            .item(&quit_item)
+            .build()
+            .map_err(|e| e.to_string())?;
+        let edit_submenu = SubmenuBuilder::new(app, "Edit")
+            .undo()
+            .redo()
+            .separator()
+            .cut()
+            .copy()
+            .paste()
+            .select_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+        let window_submenu = SubmenuBuilder::new(app, "Window")
+            .minimize()
+            .build()
+            .map_err(|e| e.to_string())?;
+        MenuBuilder::new(app)
+            .items(&[&app_submenu, &edit_submenu, &window_submenu])
+            .build()
+            .map_err(|e| e.to_string())?
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let menu = {
+        let _ = AboutMetadataBuilder::new();
+        let file_submenu = SubmenuBuilder::new(app, "File")
+            .item(&quit_item)
+            .build()
+            .map_err(|e| e.to_string())?;
+        MenuBuilder::new(app)
+            .items(&[&file_submenu])
+            .build()
+            .map_err(|e| e.to_string())?
+    };
+
+    app.set_menu(menu).map_err(|e| e.to_string())?;
+    Ok(())
 }
