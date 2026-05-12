@@ -175,9 +175,10 @@ function timeToMinutes(value: string): number | null {
 interface QuickAddProps {
   groups: TaskGroup[];
   onAdd: (task: NewTask) => Promise<void>;
+  compressed?: boolean;
 }
 
-function QuickAdd({ groups, onAdd }: QuickAddProps) {
+function QuickAdd({ groups, onAdd, compressed = false }: QuickAddProps) {
   const [name, setName] = useState('');
   const [groupId, setGroupId] = useState<string>('');
   const [priority, setPriority] = useState(3);
@@ -213,6 +214,10 @@ function QuickAdd({ groups, onAdd }: QuickAddProps) {
       alignItems: 'center',
       flexWrap: 'wrap',
       background: 'var(--bg-raise)',
+      // When compressed, cap height and vert-scroll wrapped rows so
+      // QuickAdd never dominates the screen.
+      maxHeight: compressed ? 90 : undefined,
+      overflowY: compressed ? 'auto' : 'visible',
     }}>
       <span style={{ ...labelStyle, marginRight: 4 }}>Quick add</span>
       <input
@@ -1411,6 +1416,30 @@ export function TasksScreen() {
   }, []);
   const narrowLayout = contentW > 0 && contentW < 960;
 
+  // Track the library table container width separately so we can drop
+  // columns one at a time (status -> group -> priority -> estimate)
+  // as the available width shrinks, rather than forcing a horizontal
+  // scroll. The Name + Deadline + checkbox + menu columns always
+  // stay visible.
+  const [tableScrollEl, setTableScrollEl] = useState<HTMLDivElement | null>(null);
+  const [tableW, setTableW] = useState(0);
+  useEffect(() => {
+    if (!tableScrollEl) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) setTableW(e.contentRect.width);
+    });
+    ro.observe(tableScrollEl);
+    return () => ro.disconnect();
+  }, [tableScrollEl]);
+  // Thresholds picked from cumulative column widths so each drop kicks
+  // in just before the next column would push the table past its
+  // container. Status disappears first, then Group, then Priority,
+  // then Estimate. Name + Deadline + checkbox + menu are always kept.
+  const showStatus = tableW === 0 || tableW >= 760;
+  const showGroup = tableW === 0 || tableW >= 630;
+  const showPriority = tableW === 0 || tableW >= 530;
+  const showEstimate = tableW === 0 || tableW >= 430;
+
   const refresh = useCallback(async () => {
     try {
       const horizonStart = startOfDay(Date.now());
@@ -1746,7 +1775,9 @@ export function TasksScreen() {
         <div style={{ height: 8 }} />
       </div>
 
-      {tab === 'library' && <QuickAdd groups={groups} onAdd={create} />}
+      {tab === 'library' && (
+        <QuickAdd groups={groups} onAdd={create} compressed={narrowLayout} />
+      )}
 
       {tab === 'active' ? (
         <div style={{ flex: 1, overflow: 'auto', padding: '20px 28px 40px' }}>
@@ -1914,14 +1945,9 @@ export function TasksScreen() {
               />
             </div>
           )}
-          <div style={{ flex: 1, overflow: 'auto' }}>
+          <div ref={setTableScrollEl} style={{ flex: 1, overflow: 'auto' }}>
           <table style={{
             width: '100%',
-            // Force h-scroll inside the overflow:auto parent when the
-            // window is too narrow to render all library columns
-            // comfortably. Without this, columns just squeeze and the
-            // task name + date cells become unreadable.
-            minWidth: 760,
             borderCollapse: 'separate',
             borderSpacing: 0,
             fontSize: 13,
@@ -1951,11 +1977,11 @@ export function TasksScreen() {
                   />
                 </th>
                 <th style={th}>Name</th>
-                <th style={{ ...th, width: 130 }}>Group</th>
-                <th style={{ ...th, width: 100 }}>Priority</th>
-                <th style={{ ...th, width: 110 }}>Estimate</th>
+                {showGroup && <th style={{ ...th, width: 130 }}>Group</th>}
+                {showPriority && <th style={{ ...th, width: 100 }}>Priority</th>}
+                {showEstimate && <th style={{ ...th, width: 110 }}>Estimate</th>}
                 <th style={{ ...th, width: 130 }}>Deadline</th>
-                <th style={{ ...th, width: 110 }}>Status</th>
+                {showStatus && <th style={{ ...th, width: 110 }}>Status</th>}
                 <th style={{ ...th, width: 36 }}></th>
               </tr>
             </thead>
@@ -2016,15 +2042,21 @@ export function TasksScreen() {
                         {t.name}
                       </div>
                     </td>
-                    <td style={td}>
-                      <GroupChip group={t.groupId ? groupById.get(t.groupId) : undefined} />
-                    </td>
-                    <td style={td}>
-                      <PriorityChip p={t.priority} />
-                    </td>
-                    <td style={{ ...td, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-                      {formatDuration(t.estimatedMinutes)}
-                    </td>
+                    {showGroup && (
+                      <td style={td}>
+                        <GroupChip group={t.groupId ? groupById.get(t.groupId) : undefined} />
+                      </td>
+                    )}
+                    {showPriority && (
+                      <td style={td}>
+                        <PriorityChip p={t.priority} />
+                      </td>
+                    )}
+                    {showEstimate && (
+                      <td style={{ ...td, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                        {formatDuration(t.estimatedMinutes)}
+                      </td>
+                    )}
                     <td style={{
                       ...td,
                       color: overdue ? 'var(--danger)' : 'var(--muted)',
@@ -2033,7 +2065,8 @@ export function TasksScreen() {
                     }}>
                       {formatDeadline(t.deadline, Date.now())}
                     </td>
-                    <td style={td}>
+                    {showStatus && (
+                      <td style={td}>
                       {planned ? (
                         <span style={{
                           fontFamily: 'var(--font-mono)',
@@ -2061,7 +2094,8 @@ export function TasksScreen() {
                           Library
                         </span>
                       )}
-                    </td>
+                      </td>
+                    )}
                     <td
                       style={{ padding: '6px 8px 6px 4px', verticalAlign: 'middle' }}
                       onClick={(e) => e.stopPropagation()}

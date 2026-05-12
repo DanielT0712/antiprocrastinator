@@ -1144,17 +1144,19 @@ export function ScheduleScreen() {
           overflowY: shortHeight ? 'auto' : 'visible',
           flexShrink: 0,
         }}>
-          <div style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 11.5,
-            color: 'var(--muted)',
-            textTransform: 'uppercase',
-            letterSpacing: '0.1em',
-            whiteSpace: 'nowrap',
-            flexShrink: 0,
-          }}>
-            {rangeLabel}
-          </div>
+          {!shortHeight && (
+            <div style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 11.5,
+              color: 'var(--muted)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.1em',
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
+            }}>
+              {rangeLabel}
+            </div>
+          )}
           <div style={{
             display: 'flex',
             alignItems: 'baseline',
