@@ -2634,7 +2634,7 @@ export function AppsScreen() {
           display: 'flex',
           alignItems: 'center',
           gap: 16,
-          flexWrap: 'wrap',
+          flexWrap: 'nowrap',
           minWidth: 0,
         }}>
           <div style={{
@@ -2676,8 +2676,9 @@ export function AppsScreen() {
             display: 'flex',
             alignItems: 'center',
             gap: 8,
-            flexWrap: 'wrap',
+            flexWrap: 'nowrap',
             minWidth: 0,
+            flex: '1 1 auto',
           }}>
             <div style={{
               display: 'flex',
@@ -2687,8 +2688,8 @@ export function AppsScreen() {
               border: '1px solid var(--line)',
               borderRadius: 6,
               background: 'var(--bg-raise)',
-              flex: '1 1 180px',
-              minWidth: 140,
+              flex: '1 1 80px',
+              minWidth: 0,
               maxWidth: 240,
             }}>
               <span style={{ color: 'var(--faint)' }}>
