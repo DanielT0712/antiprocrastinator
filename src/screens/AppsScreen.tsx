@@ -2419,10 +2419,7 @@ export function AppsScreen() {
           prevPanelOpen.current = categoryManagerOpen;
           return;
         }
-        // Header/toolbar wraps via flexWrap, so the APM page can shrink
-        // pretty far before things start clipping. Drop the floor low
-        // enough that the user can actually narrow the window.
-        const closedMin = 700;
+        const closedMin = 1000;
         const panelWidth = 280;
         const opening = categoryManagerOpen && !prevPanelOpen.current;
         const closing = !categoryManagerOpen && prevPanelOpen.current;
@@ -2625,18 +2622,20 @@ export function AppsScreen() {
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <div style={{
-        padding: '24px 36px 16px',
+        padding: '24px 24px 16px',
         display: 'flex',
         flexDirection: 'column',
         gap: 16,
         borderBottom: '1px solid var(--line)',
+        minWidth: 0,
       }}>
         {/* tabs + toolbar */}
         <div style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 24,
+          gap: 16,
           flexWrap: 'wrap',
+          minWidth: 0,
         }}>
           <div style={{
             display: 'flex',
@@ -2644,6 +2643,7 @@ export function AppsScreen() {
             position: 'relative',
             marginBottom: -17,
             paddingBottom: 16,
+            flexShrink: 0,
           }}>
             {(['apps', 'browser_targets'] as AppsTab[]).map((id) => {
               const sel = tab === id;
@@ -2655,7 +2655,7 @@ export function AppsScreen() {
                     background: 'transparent',
                     border: 'none',
                     padding: '10px 2px',
-                    marginRight: 20,
+                    marginRight: 16,
                     color: sel ? 'var(--ink)' : 'var(--muted)',
                     fontFamily: 'var(--font-sans)',
                     fontSize: 14,
@@ -2671,8 +2671,14 @@ export function AppsScreen() {
               );
             })}
           </div>
-          <div style={{ flex: 1 }} />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ flex: 1, minWidth: 0 }} />
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            flexWrap: 'wrap',
+            minWidth: 0,
+          }}>
             <div style={{
               display: 'flex',
               alignItems: 'center',
@@ -2681,7 +2687,9 @@ export function AppsScreen() {
               border: '1px solid var(--line)',
               borderRadius: 6,
               background: 'var(--bg-raise)',
-              width: 240,
+              flex: '1 1 180px',
+              minWidth: 140,
+              maxWidth: 240,
             }}>
               <span style={{ color: 'var(--faint)' }}>
                 <Icons.search size={13} />
@@ -2793,9 +2801,15 @@ export function AppsScreen() {
         </div>
       </div>
 
-      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-        <div style={{ flex: 1, overflow: 'auto', padding: '20px 36px 60px' }}>
-        <div style={{ maxWidth: 1080 }}>
+      <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
+        <div style={{
+          flex: 1,
+          overflow: 'auto',
+          overflowX: 'hidden',
+          padding: '20px 24px 60px',
+          minWidth: 0,
+        }}>
+        <div style={{ maxWidth: 1080, minWidth: 0 }}>
           {isEmergency && (
             <div style={{
               padding: '12px 14px',
