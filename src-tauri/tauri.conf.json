@@ -15,8 +15,8 @@
         "title": "AntiProcrastinator",
         "width": 1280,
         "height": 800,
-        "minWidth": 500,
-        "minHeight": 460,
+        "minWidth": 640,
+        "minHeight": 480,
         "resizable": true,
         "fullscreen": false,
         "dragDropEnabled": false
