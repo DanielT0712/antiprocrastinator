@@ -4,6 +4,7 @@ import { Sidebar, type Route } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { QuitChallengeModal, SuspendAppModal } from './components/Modals';
 import { SleepPromptModal } from './components/SleepPromptModal';
+import { ProcessWarningOverlay } from './components/ProcessWarningOverlay';
 import { applyTheme } from './lib/themes';
 import { HomeScreen } from './screens/HomeScreen';
 import { ScheduleScreen } from './screens/ScheduleScreen';
@@ -180,6 +181,8 @@ function App() {
         onClose={() => setQuitOpen(false)}
         onError={handleError}
       />
+
+      <ProcessWarningOverlay />
 
       {sleepPromptOpen && (
         <SleepPromptModal

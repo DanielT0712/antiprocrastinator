@@ -226,6 +226,20 @@ export interface GuardQuitRequiredEvent {
   requiredPhrase: string;
 }
 
+export interface ProcessWarningEvent {
+  processName: string;
+  secondsUntilKill: number;
+  warningCount: number;
+  windowTitle: string | null;
+  matchReason: string | null;
+}
+
+export interface ProcessKilledEvent {
+  processName: string;
+  windowTitle: string | null;
+  timestamp: number;
+}
+
 // Event subscriptions
 export type AppEventMap = {
   'timer-tick': TimerTickPayload;
@@ -233,6 +247,8 @@ export type AppEventMap = {
   'block-finished-prompt': BlockDecisionPrompt;
   'schedule-warning': ScheduleWarning[];
   'guard-quit-required': GuardQuitRequiredEvent;
+  'process-warning': ProcessWarningEvent;
+  'process-killed': ProcessKilledEvent;
 };
 
 export function onAppEvent<K extends keyof AppEventMap>(

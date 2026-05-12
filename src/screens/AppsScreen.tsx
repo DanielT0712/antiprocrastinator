@@ -1076,6 +1076,232 @@ const CLASSIFICATION_OPTIONS: { v: ClassificationAction; l: string }[] = [
   { v: 'never_ban', l: 'Never block' },
 ];
 
+interface BrowserCategorySectionProps {
+  category: AppCategory;
+  targets: KnownBrowserTarget[];
+  activeProfile: string;
+  profileNames: string[];
+  isEmergency: boolean;
+  emergencyBlockedCategories: string[];
+  overrides: Map<string, EnforcementProfileOverride>;
+  onApplyPreset: (preset: PresetId) => void;
+  onSetOverride: (
+    targetKey: string,
+    profileName: string,
+    decision: EnforcementDecision | null,
+  ) => void;
+  onUpdateTarget: (
+    targetKey: string,
+    patch: {
+      categoryName?: string | null;
+      classificationAction?: ClassificationAction;
+    },
+  ) => void;
+  onOpenCategoryManager: () => void;
+}
+
+function BrowserCategorySection({
+  category,
+  targets,
+  activeProfile,
+  profileNames,
+  isEmergency,
+  emergencyBlockedCategories,
+  overrides,
+  onApplyPreset,
+  onSetOverride,
+  onUpdateTarget,
+  onOpenCategoryManager,
+}: BrowserCategorySectionProps) {
+  const [open, setOpen] = useState(false);
+  const hardLocked =
+    isEmergency &&
+    emergencyBlockedCategories.some(
+      (c) => c.toLowerCase() === category.name.toLowerCase(),
+    );
+  const categoryDecisions = decisionsFor(
+    'category',
+    category.name,
+    profileNames,
+    overrides,
+  );
+  const categoryPreset = hardLocked
+    ? 'always-block'
+    : detectPreset(categoryDecisions, profileNames) ?? 'custom';
+
+  const verdictForActive: EnforcementDecision = hardLocked
+    ? 'block'
+    : categoryDecisions[activeProfile] ??
+      (categoryPreset === 'always-allow' ||
+      (categoryPreset === 'block-work' &&
+        (activeProfile === 'rest' || activeProfile === 'emergency'))
+        ? 'allow'
+        : 'block');
+
+  return (
+    <div style={{
+      border: '1px solid var(--line)',
+      borderRadius: 9,
+      background: 'var(--bg-raise)',
+      overflow: 'hidden',
+      marginBottom: 10,
+    }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          width: '100%',
+          padding: '14px 16px',
+          background: 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          textAlign: 'left',
+          gap: 14,
+          color: 'var(--ink)',
+          fontFamily: 'var(--font-sans)',
+        }}
+      >
+        <span style={{
+          color: 'var(--muted)',
+          transform: open ? 'rotate(90deg)' : 'none',
+          transition: 'transform 120ms ease',
+        }}>
+          <Icons.chevron size={14} />
+        </span>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{
+            fontSize: 14,
+            color: 'var(--ink)',
+            fontWeight: 500,
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 10,
+          }}>
+            {category.name}
+            <span style={{
+              fontSize: 11,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+            }}>
+              {targets.length} {targets.length === 1 ? 'target' : 'targets'}
+            </span>
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ ...labelStyle, fontSize: 10 }}>
+            {PROFILE_DISPLAY[activeProfile] ?? activeProfile}
+          </div>
+          <div style={appmgmtChip(
+            true,
+            verdictForActive === 'block' ? 'var(--danger)' : 'var(--ok)',
+          )}>
+            {verdictForActive === 'block' ? '✕ Blocked' : '✓ Allowed'}
+          </div>
+        </div>
+      </button>
+
+      {open && (
+        <div style={{ borderTop: '1px solid var(--line)' }}>
+          <div style={{
+            padding: '12px 16px',
+            background: 'color-mix(in oklch, var(--ink) 3%, transparent)',
+            borderBottom: '1px solid var(--line)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            flexWrap: 'wrap',
+          }}>
+            <div style={{ ...labelStyle, color: 'var(--muted)' }}>Category rule</div>
+            {PRESETS.map((p) => {
+              const active = categoryPreset === p.id;
+              const blockedByEmergency =
+                hardLocked && p.id !== 'always-block';
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    if (blockedByEmergency) return;
+                    onApplyPreset(p.id);
+                  }}
+                  disabled={blockedByEmergency}
+                  title={p.hint}
+                  style={{
+                    ...presetChip(active, presetColor(p.id)),
+                    opacity: blockedByEmergency ? 0.4 : 1,
+                    cursor: blockedByEmergency ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {p.label}
+                </button>
+              );
+            })}
+            <div style={{ flex: 1 }} />
+            <button
+              onClick={onOpenCategoryManager}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '7px 11px',
+                background: 'transparent',
+                color: 'var(--ink)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                fontSize: 12.5,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              <Icons.tweak size={13} /> Manage…
+            </button>
+          </div>
+
+          {targets.length === 0 ? (
+            <div style={{
+              padding: '14px 18px',
+              fontSize: 12,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+            }}>
+              No browser targets tagged in this category yet.
+            </div>
+          ) : (
+            targets.map((t) => {
+              const o = overrides.get(
+                overrideMapKey({
+                  profile: activeProfile,
+                  subjectType: 'browser_target',
+                  subjectKey: t.targetKey,
+                }),
+              );
+              return (
+                <BrowserTargetRow
+                  key={t.targetKey}
+                  target={t}
+                  categories={[]}
+                  activeProfile={activeProfile}
+                  isEmergency={isEmergency}
+                  emergencyBlockedCategories={emergencyBlockedCategories}
+                  override={o}
+                  onUpdate={onUpdateTarget}
+                  onSetOverride={(key, decision) =>
+                    onSetOverride(
+                      t.targetKey,
+                      key.profile,
+                      decision,
+                    )
+                  }
+                />
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BrowserTargetRow({
   target,
   categories,
@@ -1835,18 +2061,6 @@ function AddBrowserTargetModal({ categories, onClose, onCreate }: AddTargetModal
 }
 
 const td: CSSProperties = { padding: '8px 12px', verticalAlign: 'middle' };
-const th: CSSProperties = {
-  textAlign: 'left',
-  fontFamily: 'var(--font-mono)',
-  fontSize: 10,
-  fontWeight: 500,
-  textTransform: 'uppercase',
-  letterSpacing: '0.1em',
-  color: 'var(--faint)',
-  padding: '8px 12px',
-  borderBottom: '1px solid var(--line)',
-  background: 'var(--bg)',
-};
 
 export function AppsScreen() {
   const [tab, setTab] = useState<AppsTab>('apps');
@@ -2493,96 +2707,98 @@ export function AppsScreen() {
 
           {tab === 'browser_targets' && (
             <>
+              <PendingBanner
+                apps={[]}
+                browserTargets={pendingTargets}
+                isBrowserTab={true}
+                onOpenApp={() => {}}
+                onAcceptApp={async () => {}}
+                onAcceptBrowserTarget={async (target) => {
+                  try {
+                    await api.updateKnownBrowserTarget(target.targetKey, {
+                      classificationAction: target.classificationAction,
+                    });
+                    refresh();
+                  } catch (err) {
+                    setError(String(err));
+                  }
+                }}
+              />
+
               <div style={{
-                display: 'flex',
-                alignItems: 'center',
+                fontSize: 11.5,
+                color: 'var(--muted)',
+                fontFamily: 'var(--font-mono)',
                 marginBottom: 12,
               }}>
+                Match against active browser tab titles. Click any row to
+                edit per-profile.
+              </div>
+
+              {(() => {
+                // Group browser targets by category and render an
+                // accordion per category, mirroring the Apps tab.
+                type Bucket = { name: string; targets: KnownBrowserTarget[] };
+                const buckets: Map<string, Bucket> = new Map();
+                for (const c of categories) buckets.set(c.name, { name: c.name, targets: [] });
+                buckets.set('Uncategorized', { name: 'Uncategorized', targets: [] });
+                for (const t of filteredBrowserTargets) {
+                  const k = t.categoryName ?? 'Uncategorized';
+                  const b = buckets.get(k) ?? { name: k, targets: [] };
+                  b.targets.push(t);
+                  buckets.set(k, b);
+                }
+                return Array.from(buckets.values()).map((b) => {
+                  const catObj =
+                    categories.find((c) => c.name === b.name) ??
+                    ({
+                      name: b.name,
+                      builtin: b.name === 'Uncategorized',
+                      createdAt: 0,
+                      updatedAt: 0,
+                    } as AppCategory);
+                  return (
+                    <BrowserCategorySection
+                      key={b.name}
+                      category={catObj}
+                      targets={b.targets}
+                      activeProfile={activeProfile}
+                      profileNames={profileNames}
+                      isEmergency={isEmergency}
+                      emergencyBlockedCategories={emergencyBlockedCategories}
+                      overrides={overrideMap}
+                      onApplyPreset={(p) =>
+                        applyPreset('category', b.name, p)
+                      }
+                      onSetOverride={(targetKey, profileName, decision) =>
+                        setOverride(
+                          {
+                            profile: profileName,
+                            subjectType: 'browser_target',
+                            subjectKey: targetKey,
+                          },
+                          decision,
+                        )
+                      }
+                      onUpdateTarget={updateBrowserTarget}
+                      onOpenCategoryManager={() => setCategoryManagerOpen(true)}
+                    />
+                  );
+                });
+              })()}
+
+              {browserTargets.length === 0 && (
                 <div style={{
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 11,
+                  padding: '40px 20px',
+                  textAlign: 'center',
                   color: 'var(--muted)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.08em',
-                }}>
-                  Match against active browser tab titles
-                </div>
-                <span style={{ flex: 1 }} />
-                <button
-                  onClick={() => setAdding(true)}
-                  style={{
-                    padding: '7px 12px',
-                    background: 'var(--bg-raise)',
-                    border: '1px solid var(--line)',
-                    borderRadius: 6,
-                    color: 'var(--ink)',
-                    fontSize: 12.5,
-                    cursor: 'pointer',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 5,
-                  }}
-                >
-                  <Icons.plus size={12} /> Add target
-                </button>
-              </div>
-              <div style={{
-                border: '1px solid var(--line)',
-                borderRadius: 9,
-                overflow: 'hidden',
-                background: 'var(--bg-raise)',
-              }}>
-                <table style={{
-                  width: '100%',
-                  borderCollapse: 'separate',
-                  borderSpacing: 0,
                   fontSize: 13,
+                  border: '1px dashed var(--line)',
+                  borderRadius: 9,
                 }}>
-                  <thead>
-                    <tr>
-                      <th style={th}>Target</th>
-                      <th style={th}>Keyword</th>
-                      <th style={{ ...th, width: 160 }}>Category</th>
-                      <th style={{ ...th, width: 160 }}>Classification</th>
-                      <th style={{ ...th, width: 220 }}>Profile decision</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredBrowserTargets.map((target) => {
-                      const o = overrideMap.get(
-                        overrideMapKey({
-                          profile: activeProfile,
-                          subjectType: 'browser_target',
-                          subjectKey: target.targetKey,
-                        }),
-                      );
-                      return (
-                        <BrowserTargetRow
-                          key={target.targetKey}
-                          target={target}
-                          categories={categories}
-                          activeProfile={activeProfile}
-                          isEmergency={isEmergency}
-                          emergencyBlockedCategories={emergencyBlockedCategories}
-                          override={o}
-                          onUpdate={updateBrowserTarget}
-                          onSetOverride={setOverride}
-                        />
-                      );
-                    })}
-                  </tbody>
-                </table>
-                {browserTargets.length === 0 && (
-                  <div style={{
-                    padding: '40px 20px',
-                    textAlign: 'center',
-                    color: 'var(--muted)',
-                    fontSize: 13,
-                  }}>
-                    No browser targets yet — add one to start matching tab titles.
-                  </div>
-                )}
-              </div>
+                  No browser targets yet — add one to start matching tab titles.
+                </div>
+              )}
             </>
           )}
         </div>
