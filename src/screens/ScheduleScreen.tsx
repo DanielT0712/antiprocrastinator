@@ -1172,6 +1172,17 @@ export function ScheduleScreen() {
             <DotSep />
             <Stat n={finishLabel} l="projected finish" accent />
           </div>
+          {/* Buttons grouped together so they wrap as a single block
+              to the next row when the toolbar can't fit them all,
+              instead of splitting (e.g. view+templates on row 1 and
+              replan on row 2). */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: shortHeight ? 10 : 20,
+            flexShrink: 0,
+            flexWrap: 'nowrap',
+          }}>
           <div style={{
             display: 'inline-flex',
             border: '1px solid var(--line)',
@@ -1255,6 +1266,7 @@ export function ScheduleScreen() {
             </svg>
             Replan
           </button>
+          </div>
         </div>
 
         <div style={{ flex: 1, overflow: 'auto' }}>
