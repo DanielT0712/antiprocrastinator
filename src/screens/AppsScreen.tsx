@@ -363,59 +363,6 @@ function ProfileTabs({
   );
 }
 
-function DecisionToggle({
-  current,
-  onChange,
-  hardLock,
-}: {
-  current: EnforcementDecision | null;
-  onChange: (next: EnforcementDecision | null) => void;
-  hardLock?: { lockedTo: EnforcementDecision; reason: string };
-}) {
-  const opts: { v: EnforcementDecision | null; l: string }[] = [
-    { v: null, l: 'Inherit' },
-    { v: 'allow', l: 'Allow' },
-    { v: 'block', l: 'Block' },
-  ];
-  return (
-    <div style={{
-      display: 'inline-flex',
-      gap: 0,
-      border: '1px solid var(--line)',
-      borderRadius: 5,
-      overflow: 'hidden',
-    }}>
-      {opts.map((o) => {
-        const sel = o.v === current;
-        const blocked = hardLock != null && o.v === 'allow';
-        return (
-          <button
-            key={String(o.v)}
-            onClick={() => {
-              if (blocked) return;
-              onChange(o.v);
-            }}
-            disabled={blocked}
-            title={blocked ? hardLock!.reason : undefined}
-            style={{
-              padding: '5px 10px',
-              fontSize: 11.5,
-              background: sel ? 'var(--ink-soft)' : 'transparent',
-              color: sel ? 'var(--ink)' : blocked ? 'var(--faint)' : 'var(--muted)',
-              border: 'none',
-              borderRight: '1px solid var(--line)',
-              cursor: blocked ? 'not-allowed' : 'pointer',
-              fontFamily: 'var(--font-sans)',
-              opacity: blocked ? 0.5 : 1,
-            }}
-          >
-            {o.l}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
 
 function presetChip(active: boolean, color: string): CSSProperties {
   return {
@@ -458,13 +405,17 @@ function appmgmtChip(active: boolean, color: string): CSSProperties {
 interface CategorySectionProps {
   category: AppCategory;
   apps: KnownApp[];
+  // Subject type used when the inline AppRow quick presets are applied
+  // or cleared. 'app' for the Apps tab, 'browser_target' when the
+  // section is rendering synthesized records from KnownBrowserTarget.
+  rowSubjectType?: 'app' | 'browser_target';
   activeProfile: string;
   profileNames: string[];
   isEmergency: boolean;
   emergencyBlockedCategories: string[];
   overrides: Map<string, EnforcementProfileOverride>;
   onApplyPreset: (
-    subjectType: 'app' | 'category',
+    subjectType: 'app' | 'category' | 'browser_target',
     subjectKey: string,
     preset: PresetId,
   ) => void;
@@ -494,6 +445,7 @@ function decisionsFor(
 function CategorySection({
   category,
   apps,
+  rowSubjectType = 'app',
   activeProfile,
   profileNames,
   isEmergency,
@@ -738,13 +690,14 @@ function CategorySection({
               <AppRow
                 key={app.appKey}
                 app={app}
+                subjectType={rowSubjectType}
                 profileNames={profileNames}
                 activeProfile={activeProfile}
                 hardLocked={hardLocked}
                 overrides={overrides}
                 categoryPreset={categoryPreset}
                 onApplyAppPreset={(p) =>
-                  onApplyPreset('app', app.appKey, p)
+                  onApplyPreset(rowSubjectType, app.appKey, p)
                 }
                 onClearAppOverrides={() => onClearAppOverrides(app.appKey)}
                 onDragStartApp={onDragStartApp}
@@ -788,6 +741,7 @@ type AppRowMode = 'edit' | 'edit-custom';
 
 function AppRow({
   app,
+  subjectType = 'app',
   profileNames,
   activeProfile,
   hardLocked,
@@ -799,6 +753,10 @@ function AppRow({
   onOpenApp,
 }: {
   app: KnownApp;
+  // 'app' for real KnownApp rows. 'browser_target' when the row is a
+  // synthesized KnownApp from a KnownBrowserTarget so overrides go to
+  // the right subject type.
+  subjectType?: 'app' | 'browser_target';
   profileNames: string[];
   activeProfile: string;
   hardLocked: boolean;
@@ -811,7 +769,7 @@ function AppRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const appDecisions = decisionsFor(
-    'app',
+    subjectType,
     app.appKey,
     profileNames,
     overrides,
@@ -834,7 +792,8 @@ function AppRow({
   const [iconData, setIconData] = useState<string | null>(null);
   const [shouldFetchIcon, setShouldFetchIcon] = useState(false);
   const rowRef = useRef<HTMLDivElement | null>(null);
-  const looksLikeBundle = !!app.appPath && app.appPath.endsWith('.app');
+  const looksLikeBundle =
+    subjectType === 'app' && !!app.appPath && app.appPath.endsWith('.app');
 
   // Only fetch the icon once the row scrolls into view, otherwise opening a
   // long list would fan out hundreds of subprocess spawns on the backend.
@@ -961,7 +920,9 @@ function AppRow({
             fontFamily: 'var(--font-mono)',
             marginTop: 2,
           }}>
-            {app.executableName ?? app.appKey} · {app.classificationStatus}
+            {subjectType === 'browser_target'
+              ? app.executableName ?? app.appKey
+              : `${app.executableName ?? app.appKey} · ${app.classificationStatus}`}
           </div>
         </div>
         <div style={{
@@ -1076,398 +1037,7 @@ const CLASSIFICATION_OPTIONS: { v: ClassificationAction; l: string }[] = [
   { v: 'never_ban', l: 'Never block' },
 ];
 
-interface BrowserCategorySectionProps {
-  category: AppCategory;
-  targets: KnownBrowserTarget[];
-  activeProfile: string;
-  profileNames: string[];
-  isEmergency: boolean;
-  emergencyBlockedCategories: string[];
-  overrides: Map<string, EnforcementProfileOverride>;
-  onApplyPreset: (preset: PresetId) => void;
-  onSetOverride: (
-    targetKey: string,
-    profileName: string,
-    decision: EnforcementDecision | null,
-  ) => void;
-  onUpdateTarget: (
-    targetKey: string,
-    patch: {
-      categoryName?: string | null;
-      classificationAction?: ClassificationAction;
-    },
-  ) => void;
-  onOpenCategoryManager: () => void;
-}
 
-function BrowserCategorySection({
-  category,
-  targets,
-  activeProfile,
-  profileNames,
-  isEmergency,
-  emergencyBlockedCategories,
-  overrides,
-  onApplyPreset,
-  onSetOverride,
-  onUpdateTarget,
-  onOpenCategoryManager,
-}: BrowserCategorySectionProps) {
-  const [open, setOpen] = useState(false);
-  const hardLocked =
-    isEmergency &&
-    emergencyBlockedCategories.some(
-      (c) => c.toLowerCase() === category.name.toLowerCase(),
-    );
-  const categoryDecisions = decisionsFor(
-    'category',
-    category.name,
-    profileNames,
-    overrides,
-  );
-  const categoryPreset = hardLocked
-    ? 'always-block'
-    : detectPreset(categoryDecisions, profileNames) ?? 'custom';
-
-  const verdictForActive: EnforcementDecision = hardLocked
-    ? 'block'
-    : categoryDecisions[activeProfile] ??
-      (categoryPreset === 'always-allow' ||
-      (categoryPreset === 'block-work' &&
-        (activeProfile === 'rest' || activeProfile === 'emergency'))
-        ? 'allow'
-        : 'block');
-
-  return (
-    <div style={{
-      border: '1px solid var(--line)',
-      borderRadius: 9,
-      background: 'var(--bg-raise)',
-      overflow: 'hidden',
-      marginBottom: 10,
-    }}>
-      <button
-        onClick={() => setOpen((v) => !v)}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          width: '100%',
-          padding: '14px 16px',
-          background: 'transparent',
-          border: 'none',
-          cursor: 'pointer',
-          textAlign: 'left',
-          gap: 14,
-          color: 'var(--ink)',
-          fontFamily: 'var(--font-sans)',
-        }}
-      >
-        <span style={{
-          color: 'var(--muted)',
-          transform: open ? 'rotate(90deg)' : 'none',
-          transition: 'transform 120ms ease',
-        }}>
-          <Icons.chevron size={14} />
-        </span>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{
-            fontSize: 14,
-            color: 'var(--ink)',
-            fontWeight: 500,
-            display: 'flex',
-            alignItems: 'baseline',
-            gap: 10,
-          }}>
-            {category.name}
-            <span style={{
-              fontSize: 11,
-              color: 'var(--muted)',
-              fontFamily: 'var(--font-mono)',
-            }}>
-              {targets.length} {targets.length === 1 ? 'target' : 'targets'}
-            </span>
-          </div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ ...labelStyle, fontSize: 10 }}>
-            {PROFILE_DISPLAY[activeProfile] ?? activeProfile}
-          </div>
-          <div style={appmgmtChip(
-            true,
-            verdictForActive === 'block' ? 'var(--danger)' : 'var(--ok)',
-          )}>
-            {verdictForActive === 'block' ? '✕ Blocked' : '✓ Allowed'}
-          </div>
-        </div>
-      </button>
-
-      {open && (
-        <div style={{ borderTop: '1px solid var(--line)' }}>
-          <div style={{
-            padding: '12px 16px',
-            background: 'color-mix(in oklch, var(--ink) 3%, transparent)',
-            borderBottom: '1px solid var(--line)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            flexWrap: 'wrap',
-          }}>
-            <div style={{ ...labelStyle, color: 'var(--muted)' }}>Category rule</div>
-            {PRESETS.map((p) => {
-              const active = categoryPreset === p.id;
-              const blockedByEmergency =
-                hardLocked && p.id !== 'always-block';
-              return (
-                <button
-                  key={p.id}
-                  onClick={() => {
-                    if (blockedByEmergency) return;
-                    onApplyPreset(p.id);
-                  }}
-                  disabled={blockedByEmergency}
-                  title={p.hint}
-                  style={{
-                    ...presetChip(active, presetColor(p.id)),
-                    opacity: blockedByEmergency ? 0.4 : 1,
-                    cursor: blockedByEmergency ? 'not-allowed' : 'pointer',
-                  }}
-                >
-                  {p.label}
-                </button>
-              );
-            })}
-            <div style={{ flex: 1 }} />
-            <button
-              onClick={onOpenCategoryManager}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '7px 11px',
-                background: 'transparent',
-                color: 'var(--ink)',
-                border: '1px solid var(--line)',
-                borderRadius: 6,
-                fontSize: 12.5,
-                cursor: 'pointer',
-                fontFamily: 'var(--font-sans)',
-              }}
-            >
-              <Icons.tweak size={13} /> Manage…
-            </button>
-          </div>
-
-          {targets.length === 0 ? (
-            <div style={{
-              padding: '14px 18px',
-              fontSize: 12,
-              color: 'var(--muted)',
-              fontFamily: 'var(--font-mono)',
-            }}>
-              No browser targets tagged in this category yet.
-            </div>
-          ) : (
-            targets.map((t) => {
-              const o = overrides.get(
-                overrideMapKey({
-                  profile: activeProfile,
-                  subjectType: 'browser_target',
-                  subjectKey: t.targetKey,
-                }),
-              );
-              return (
-                <BrowserTargetRow
-                  key={t.targetKey}
-                  target={t}
-                  categories={[]}
-                  activeProfile={activeProfile}
-                  isEmergency={isEmergency}
-                  emergencyBlockedCategories={emergencyBlockedCategories}
-                  override={o}
-                  onUpdate={onUpdateTarget}
-                  onSetOverride={(key, decision) =>
-                    onSetOverride(
-                      t.targetKey,
-                      key.profile,
-                      decision,
-                    )
-                  }
-                />
-              );
-            })
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function BrowserTargetRow({
-  target,
-  categories,
-  activeProfile,
-  isEmergency,
-  emergencyBlockedCategories,
-  override,
-  onUpdate,
-  onSetOverride,
-}: {
-  target: KnownBrowserTarget;
-  categories: AppCategory[];
-  activeProfile: string;
-  isEmergency: boolean;
-  emergencyBlockedCategories: string[];
-  override: EnforcementProfileOverride | undefined;
-  onUpdate: (
-    key: string,
-    patch: { categoryName?: string | null; classificationAction?: ClassificationAction },
-  ) => void;
-  onSetOverride: (
-    key: { profile: string; subjectType: 'browser_target'; subjectKey: string },
-    decision: EnforcementDecision | null,
-  ) => void;
-}) {
-  const overrideKey = {
-    profile: activeProfile,
-    subjectType: 'browser_target' as const,
-    subjectKey: target.targetKey,
-  };
-  const decision = override?.decision ?? null;
-  const hardLocked =
-    isEmergency &&
-    target.categoryName != null &&
-    emergencyBlockedCategories.some(
-      (c) => c.toLowerCase() === target.categoryName!.toLowerCase(),
-    );
-
-  return (
-    <tr style={{ borderBottom: '1px solid var(--line)' }}>
-      <td style={td}>
-        <div style={{
-          color: 'var(--ink)',
-          fontWeight: 500,
-          fontSize: 13,
-        }}>
-          {target.displayName}
-        </div>
-        <div style={{
-          color: 'var(--muted)',
-          fontFamily: 'var(--font-mono)',
-          fontSize: 11,
-          marginTop: 2,
-        }}>
-          {target.targetKey}
-          {target.builtin && (
-            <span style={{
-              marginLeft: 8,
-              padding: '0 5px',
-              border: '1px solid var(--line)',
-              borderRadius: 3,
-              fontSize: 10,
-              textTransform: 'uppercase',
-              letterSpacing: '0.08em',
-              color: 'var(--faint)',
-            }}>
-              builtin
-            </span>
-          )}
-        </div>
-      </td>
-      <td style={td}>
-        <input
-          defaultValue={target.keyword}
-          onBlur={(e) => {
-            const val = e.target.value.trim();
-            if (val !== target.keyword)
-              onUpdate(target.targetKey, { categoryName: target.categoryName });
-            // keyword update wired via separate updateKnownBrowserTarget if needed
-          }}
-          style={{
-            background: 'var(--bg)',
-            border: '1px solid var(--line)',
-            borderRadius: 5,
-            padding: '6px 8px',
-            fontSize: 12,
-            color: 'var(--ink)',
-            outline: 'none',
-            fontFamily: 'var(--font-mono)',
-            width: '100%',
-            boxSizing: 'border-box',
-          }}
-        />
-      </td>
-      <td style={td}>
-        <select
-          value={target.categoryName ?? ''}
-          onChange={(e) =>
-            onUpdate(target.targetKey, {
-              categoryName: e.target.value === '' ? null : e.target.value,
-            })
-          }
-          style={{
-            background: 'var(--bg)',
-            border: '1px solid var(--line)',
-            borderRadius: 5,
-            padding: '6px 8px',
-            fontSize: 12,
-            color: 'var(--ink)',
-            outline: 'none',
-            width: '100%',
-            boxSizing: 'border-box',
-          }}
-        >
-          <option value="">Uncategorized</option>
-          {categories.map((c) => (
-            <option key={c.name} value={c.name}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-      </td>
-      <td style={td}>
-        <select
-          value={target.classificationAction}
-          onChange={(e) =>
-            onUpdate(target.targetKey, {
-              classificationAction: e.target.value as ClassificationAction,
-            })
-          }
-          style={{
-            background: 'var(--bg)',
-            border: '1px solid var(--line)',
-            borderRadius: 5,
-            padding: '6px 8px',
-            fontSize: 12,
-            color: 'var(--ink)',
-            outline: 'none',
-            width: '100%',
-            boxSizing: 'border-box',
-          }}
-        >
-          {CLASSIFICATION_OPTIONS.map((o) => (
-            <option key={o.v} value={o.v}>
-              {o.l}
-            </option>
-          ))}
-        </select>
-      </td>
-      <td style={td}>
-        <DecisionToggle
-          current={decision}
-          hardLock={
-            hardLocked
-              ? {
-                  lockedTo: 'block',
-                  reason: `${target.categoryName} targets cannot be allowed during emergency.`,
-                }
-              : undefined
-          }
-          onChange={(next) => onSetOverride(overrideKey, next)}
-        />
-      </td>
-    </tr>
-  );
-}
 
 interface AddTargetModalProps {
   categories: AppCategory[];
@@ -2060,8 +1630,6 @@ function AddBrowserTargetModal({ categories, onClose, onCreate }: AddTargetModal
   );
 }
 
-const td: CSSProperties = { padding: '8px 12px', verticalAlign: 'middle' };
-
 export function AppsScreen() {
   const [tab, setTab] = useState<AppsTab>('apps');
   const [profiles, setProfiles] = useState<EnforcementProfile[]>([]);
@@ -2221,26 +1789,6 @@ export function AppsScreen() {
     return map;
   }, [filteredApps, categories]);
 
-  const setOverride = async (
-    key: OverrideKey,
-    decision: EnforcementDecision | null,
-  ) => {
-    try {
-      if (decision == null) {
-        await api.deleteEnforcementProfileOverride(
-          key.profile,
-          key.subjectType,
-          key.subjectKey,
-        );
-      } else {
-        await api.setEnforcementProfileOverride({ ...key, profileName: key.profile, decision });
-      }
-      refresh();
-    } catch (err) {
-      setError(String(err));
-    }
-  };
-
   const profileNames = useMemo(() => profiles.map((p) => p.name), [profiles]);
 
   const applyPreset = async (
@@ -2289,19 +1837,22 @@ export function AppsScreen() {
     }
   };
 
-  const isEmergency = activeProfile === 'emergency';
-
-  const updateBrowserTarget = async (
-    key: string,
-    patch: { categoryName?: string | null; classificationAction?: ClassificationAction },
-  ) => {
+  const clearTargetOverrides = async (targetKey: string) => {
     try {
-      await api.updateKnownBrowserTarget(key, patch);
+      for (const profile of profileNames) {
+        await api.deleteEnforcementProfileOverride(
+          profile,
+          'browser_target',
+          targetKey,
+        );
+      }
       refresh();
     } catch (err) {
       setError(String(err));
     }
   };
+
+  const isEmergency = activeProfile === 'emergency';
 
   const createBrowserTarget = async (target: {
     displayName: string;
@@ -2726,65 +2277,105 @@ export function AppsScreen() {
               />
 
               <div style={{
-                fontSize: 11.5,
-                color: 'var(--muted)',
-                fontFamily: 'var(--font-mono)',
+                display: 'flex',
+                alignItems: 'center',
                 marginBottom: 12,
               }}>
-                Match against active browser tab titles. Click any row to
-                edit per-profile.
+                <span style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--muted)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
+                }}>
+                  Categories
+                </span>
+                <span style={{ flex: 1 }} />
+                <button
+                  onClick={() => setCategoryManagerOpen(true)}
+                  style={{
+                    padding: '6px 12px',
+                    background: 'var(--bg-raise)',
+                    border: '1px solid var(--line)',
+                    borderRadius: 6,
+                    color: 'var(--ink)',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Manage categories
+                </button>
               </div>
 
               {(() => {
-                // Group browser targets by category and render an
-                // accordion per category, mirroring the Apps tab.
-                type Bucket = { name: string; targets: KnownBrowserTarget[] };
-                const buckets: Map<string, Bucket> = new Map();
-                for (const c of categories) buckets.set(c.name, { name: c.name, targets: [] });
-                buckets.set('Uncategorized', { name: 'Uncategorized', targets: [] });
-                for (const t of filteredBrowserTargets) {
-                  const k = t.categoryName ?? 'Uncategorized';
-                  const b = buckets.get(k) ?? { name: k, targets: [] };
-                  b.targets.push(t);
-                  buckets.set(k, b);
+                // Browser targets render through the same CategorySection
+                // + AppRow components as the Apps tab. Synthesize a
+                // KnownApp-shaped record per target: keyword goes in the
+                // executableName slot (mono line), classificationStatus
+                // cleared so AppRow shows only the keyword.
+                const targetsAsApps: KnownApp[] = filteredBrowserTargets.map(
+                  (t) => ({
+                    appKey: t.targetKey,
+                    displayName: t.displayName,
+                    executableName: t.keyword,
+                    executablePath: null,
+                    appPath: null,
+                    platform: 'browser',
+                    source: 'browser_target',
+                    categoryGuess: t.categoryName,
+                    categoryOverride: null,
+                    effectiveCategory: t.categoryName,
+                    categories: t.categoryName ? [t.categoryName] : [],
+                    classificationAction: t.classificationAction,
+                    confidence: t.confidence,
+                    classificationStatus: '',
+                    firstSeenAt: t.firstSeenAt ?? 0,
+                    lastSeenRunningAt: null,
+                    updatedAt: t.updatedAt,
+                  } as KnownApp),
+                );
+                const byCat = new Map<string, KnownApp[]>();
+                for (const c of categories) byCat.set(c.name, []);
+                byCat.set('Uncategorized', []);
+                for (const t of targetsAsApps) {
+                  const k = t.effectiveCategory ?? 'Uncategorized';
+                  const list = byCat.get(k) ?? [];
+                  list.push(t);
+                  byCat.set(k, list);
                 }
-                return Array.from(buckets.values()).map((b) => {
-                  const catObj =
-                    categories.find((c) => c.name === b.name) ??
-                    ({
-                      name: b.name,
-                      builtin: b.name === 'Uncategorized',
-                      createdAt: 0,
-                      updatedAt: 0,
-                    } as AppCategory);
-                  return (
-                    <BrowserCategorySection
-                      key={b.name}
-                      category={catObj}
-                      targets={b.targets}
-                      activeProfile={activeProfile}
-                      profileNames={profileNames}
-                      isEmergency={isEmergency}
-                      emergencyBlockedCategories={emergencyBlockedCategories}
-                      overrides={overrideMap}
-                      onApplyPreset={(p) =>
-                        applyPreset('category', b.name, p)
-                      }
-                      onSetOverride={(targetKey, profileName, decision) =>
-                        setOverride(
-                          {
-                            profile: profileName,
-                            subjectType: 'browser_target',
-                            subjectKey: targetKey,
-                          },
-                          decision,
-                        )
-                      }
-                      onUpdateTarget={updateBrowserTarget}
-                      onOpenCategoryManager={() => setCategoryManagerOpen(true)}
-                    />
-                  );
-                });
+                return [
+                  ...categories,
+                  {
+                    name: 'Uncategorized',
+                    builtin: false,
+                    createdAt: 0,
+                    updatedAt: 0,
+                  } as AppCategory,
+                ].map((cat) => (
+                  <CategorySection
+                    key={cat.name}
+                    category={cat as AppCategory}
+                    apps={byCat.get(cat.name) ?? []}
+                    rowSubjectType="browser_target"
+                    activeProfile={activeProfile}
+                    profileNames={profileNames}
+                    isEmergency={isEmergency}
+                    emergencyBlockedCategories={emergencyBlockedCategories}
+                    overrides={overrideMap}
+                    onApplyPreset={(t, k, p) => applyPreset(t, k, p)}
+                    onClearAppOverrides={(targetKey) =>
+                      clearTargetOverrides(targetKey)
+                    }
+                    onOpenCategoryManager={() => setCategoryManagerOpen(true)}
+                    onOpenCategoryDrawer={(c) =>
+                      setDrawerCategory({ category: c })
+                    }
+                    onDragStartApp={() => setCategoryManagerOpen(true)}
+                    onOpenApp={(targetKey, mode) =>
+                      setOpenApp({ appKey: targetKey, mode })
+                    }
+                  />
+                ));
               })()}
 
               {browserTargets.length === 0 && (
