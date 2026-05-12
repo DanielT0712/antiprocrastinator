@@ -1,5 +1,5 @@
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -88,6 +88,12 @@ pub struct GuardSupervisorState {
     pub restart_count_window: u32,
     pub restart_window_started_at_epoch_secs: Option<u64>,
     pub main_executable_path: Option<String>,
+    #[serde(default)]
+    pub dev_relaunch_cwd: Option<String>,
+    #[serde(default)]
+    pub dev_relaunch_program: Option<String>,
+    #[serde(default)]
+    pub dev_relaunch_args: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +123,9 @@ impl Default for GuardSupervisorState {
             restart_count_window: 0,
             restart_window_started_at_epoch_secs: None,
             main_executable_path: None,
+            dev_relaunch_cwd: None,
+            dev_relaunch_program: None,
+            dev_relaunch_args: Vec::new(),
         }
     }
 }
@@ -365,7 +374,17 @@ fn run_guard_helper(config: HelperConfig) -> Result<(), String> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| config.main_executable.clone());
 
-            if executable.exists() {
+            if let Some((program, args, cwd)) = dev_relaunch_command(&state) {
+                spawn_process_with_cwd(
+                    OsStr::new(&program),
+                    &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                    cwd.as_deref().map(Path::new),
+                )?;
+                state.last_launch_at_epoch_secs = Some(now);
+                state.last_heartbeat_at_epoch_secs = None;
+                state.main_pid = None;
+                state.session_id = None;
+            } else if executable.exists() {
                 spawn_process(&executable, &[])?;
                 state.last_launch_at_epoch_secs = Some(now);
                 state.last_heartbeat_at_epoch_secs = None;
@@ -389,6 +408,25 @@ fn register_main_instance(app: &AppHandle) -> Result<(), String> {
     state.session_id = Some(generate_session_id());
     state.last_heartbeat_at_epoch_secs = Some(now_epoch_secs());
     state.main_executable_path = Some(main_binary_path(&current_executable).display().to_string());
+    #[cfg(debug_assertions)]
+    {
+        if let Some(project_root) = dev_project_root(&current_executable) {
+            state.dev_relaunch_cwd = Some(project_root.display().to_string());
+            state.dev_relaunch_program = Some("npm".to_string());
+            state.dev_relaunch_args = vec![
+                "run".to_string(),
+                "tauri".to_string(),
+                "--".to_string(),
+                "dev".to_string(),
+            ];
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        state.dev_relaunch_cwd = None;
+        state.dev_relaunch_program = None;
+        state.dev_relaunch_args = Vec::new();
+    }
     write_supervisor_state_for_app(app, &state)
 }
 
@@ -512,8 +550,19 @@ fn can_attempt_restart(state: &mut GuardSupervisorState, now: u64) -> bool {
 }
 
 fn spawn_process(executable: &Path, args: &[OsString]) -> Result<(), String> {
+    spawn_process_with_cwd(executable.as_os_str(), args, None)
+}
+
+fn spawn_process_with_cwd(
+    executable: &OsStr,
+    args: &[OsString],
+    cwd: Option<&Path>,
+) -> Result<(), String> {
     let mut command = Command::new(executable);
     command.args(args);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     command
         .spawn()
         .map(|_| ())
@@ -568,6 +617,32 @@ fn sibling_binary_path(current_executable: &Path, binary_name: &str) -> PathBuf 
 
     path.push(executable_name);
     path
+}
+
+fn dev_relaunch_command(
+    state: &GuardSupervisorState,
+) -> Option<(String, Vec<String>, Option<PathBuf>)> {
+    let program = state.dev_relaunch_program.clone()?;
+    if state.dev_relaunch_args.is_empty() {
+        return None;
+    }
+
+    let cwd = state.dev_relaunch_cwd.as_ref().map(PathBuf::from);
+    Some((program, state.dev_relaunch_args.clone(), cwd))
+}
+
+#[cfg(debug_assertions)]
+fn dev_project_root(current_executable: &Path) -> Option<PathBuf> {
+    let mut path = current_executable.parent()?.to_path_buf();
+    while let Some(name) = path.file_name().and_then(|value| value.to_str()) {
+        if name == "src-tauri" {
+            return path.parent().map(PathBuf::from);
+        }
+        if !path.pop() {
+            break;
+        }
+    }
+    None
 }
 
 fn guard_state_path(identifier: &str) -> Result<PathBuf, String> {
