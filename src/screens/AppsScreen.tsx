@@ -422,7 +422,6 @@ interface CategorySectionProps {
     preset: PresetId,
   ) => void;
   onClearAppOverrides: (appKey: string) => void;
-  onOpenCategoryManager: () => void;
   onOpenCategoryDrawer: (category: AppCategory) => void;
   onDragStartApp: () => void;
   onOpenApp: (appKey: string, mode: AppRowMode) => void;
@@ -455,7 +454,6 @@ function CategorySection({
   overrides,
   onApplyPreset,
   onClearAppOverrides,
-  onOpenCategoryManager,
   onOpenCategoryDrawer,
   onDragStartApp,
   onOpenApp,
@@ -625,26 +623,6 @@ function CategorySection({
                   </button>
                 );
               })}
-              <div style={{ flex: 1 }} />
-              <button
-                onClick={onOpenCategoryManager}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  padding: '7px 11px',
-                  background: 'transparent',
-                  color: 'var(--ink)',
-                  border: '1px solid var(--line)',
-                  borderRadius: 6,
-                  fontSize: 12.5,
-                  cursor: 'pointer',
-                  fontFamily: 'var(--font-sans)',
-                }}
-                title="Open category manager"
-              >
-                <Icons.tweak size={13} /> Manage…
-              </button>
             </div>
             <div style={{
               marginTop: 8,
@@ -1006,24 +984,29 @@ function AppRow({
             Custom…
           </button>
           <div style={{ flex: 1 }} />
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onOpenApp('edit');
-            }}
-            style={{
-              padding: '5px 10px',
-              borderRadius: 5,
-              border: '1px solid var(--line)',
-              background: 'transparent',
-              color: 'var(--muted)',
-              fontSize: 11.5,
-              cursor: 'pointer',
-              fontFamily: 'var(--font-sans)',
-            }}
-          >
-            Edit settings →
-          </button>
+          {subjectType === 'browser_target' && (
+            // Browser targets keep an Edit settings → link: opens an
+            // editor for the keyword/category/rule fields (not the
+            // per-profile drawer — that's what Custom… opens).
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenApp('edit');
+              }}
+              style={{
+                padding: '5px 10px',
+                borderRadius: 5,
+                border: '1px solid var(--line)',
+                background: 'transparent',
+                color: 'var(--muted)',
+                fontSize: 11.5,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-sans)',
+              }}
+            >
+              Edit settings →
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -2111,6 +2094,336 @@ function AddBrowserTargetModal({
   );
 }
 
+interface EditBrowserTargetModalProps {
+  target: KnownBrowserTarget;
+  categories: AppCategory[];
+  onClose: () => void;
+  onSave: (patch: {
+    displayName: string;
+    keyword: string;
+    categoryName: string | null;
+    classificationAction: ClassificationAction;
+  }) => Promise<void>;
+}
+
+function EditBrowserTargetModal({
+  target,
+  categories,
+  onClose,
+  onSave,
+}: EditBrowserTargetModalProps) {
+  const [displayName, setDisplayName] = useState(target.displayName);
+  const [keyword, setKeyword] = useState(target.keyword);
+  const [categoryName, setCategoryName] = useState<string>(
+    target.categoryName ?? '',
+  );
+  const [newCat, setNewCat] = useState(false);
+  const [newCatName, setNewCatName] = useState('');
+  const ruleFromAction =
+    target.classificationAction === 'never_ban'
+      ? 'always-allow'
+      : target.classificationAction === 'always_ban'
+      ? 'always-block'
+      : target.classificationAction === 'ban_during_work'
+      ? 'block-work'
+      : 'custom';
+  const [rule, setRule] = useState<PresetId>(ruleFromAction);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', h);
+    return () => document.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  const canSubmit =
+    displayName.trim().length > 0 && keyword.trim().length > 0;
+
+  const submit = async () => {
+    if (!canSubmit || busy) return;
+    setBusy(true);
+    try {
+      const resolvedCategory =
+        categoryName === '__new__'
+          ? newCatName.trim() || null
+          : categoryName || null;
+      const action: ClassificationAction =
+        rule === 'always-allow'
+          ? 'never_ban'
+          : rule === 'always-block'
+          ? 'always_ban'
+          : rule === 'block-work'
+          ? 'ban_during_work'
+          : 'unclassified';
+      await onSave({
+        displayName: displayName.trim(),
+        keyword: keyword.trim(),
+        categoryName: resolvedCategory,
+        classificationAction: action,
+      });
+      onClose();
+    } catch {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 70,
+        background: 'rgba(0,0,0,0.55)',
+        display: 'grid',
+        placeItems: 'center',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 480,
+          maxWidth: 'calc(100vw - 48px)',
+          maxHeight: 'calc(100vh - 48px)',
+          background: 'var(--bg-raise)',
+          border: '1px solid var(--line)',
+          borderRadius: 12,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        <div style={{
+          padding: '20px 24px 16px',
+          borderBottom: '1px solid var(--line)',
+        }}>
+          <div style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10.5,
+            textTransform: 'uppercase',
+            letterSpacing: '0.12em',
+            color: 'var(--muted)',
+            marginBottom: 6,
+          }}>
+            Browser target
+          </div>
+          <div style={{
+            fontFamily: 'var(--font-display)',
+            fontSize: 22,
+            color: 'var(--ink)',
+            letterSpacing: '-0.015em',
+          }}>
+            Edit settings
+          </div>
+        </div>
+
+        <div style={{
+          flex: 1,
+          overflow: 'auto',
+          padding: '18px 24px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 18,
+        }}>
+          <div>
+            <label style={fLabelStyle}>Display name</label>
+            <input
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '9px 11px',
+                background: 'var(--bg)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                color: 'var(--ink)',
+                fontSize: 13,
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
+          </div>
+
+          <div>
+            <label style={fLabelStyle}>Tab title pattern</label>
+            <input
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              placeholder="e.g. YouTube, Twitter, Reddit"
+              style={{
+                width: '100%',
+                padding: '9px 11px',
+                background: 'var(--bg)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                color: 'var(--ink)',
+                fontSize: 13,
+                fontFamily: 'var(--font-mono)',
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
+            <div style={{
+              marginTop: 6,
+              fontSize: 11,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+              lineHeight: 1.55,
+            }}>
+              Matched against the browser tab title, not the URL.
+              Case-insensitive.
+            </div>
+          </div>
+
+          <div>
+            <label style={fLabelStyle}>Category</label>
+            {newCat ? (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input
+                  autoFocus
+                  value={newCatName}
+                  onChange={(e) => setNewCatName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newCatName.trim()) {
+                      setCategoryName('__new__');
+                      setNewCat(false);
+                    }
+                    if (e.key === 'Escape') setNewCat(false);
+                  }}
+                  placeholder="New category name…"
+                  style={{
+                    flex: 1,
+                    padding: '9px 11px',
+                    background: 'var(--bg)',
+                    border: '1px solid var(--accent)',
+                    borderRadius: 6,
+                    color: 'var(--ink)',
+                    fontSize: 13,
+                    outline: 'none',
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    if (newCatName.trim()) {
+                      setCategoryName('__new__');
+                      setNewCat(false);
+                    }
+                  }}
+                  style={btnPrimaryStyle}
+                >
+                  Create
+                </button>
+                <button onClick={() => setNewCat(false)} style={btnGhostStyle}>
+                  ✕
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <StyledSelect
+                  value={categoryName}
+                  onChange={setCategoryName}
+                  options={[
+                    { value: '', label: 'Uncategorized' },
+                    ...categories.map((c) => ({ value: c.name, label: c.name })),
+                    ...(categoryName === '__new__'
+                      ? [{ value: '__new__', label: newCatName + ' (new)' }]
+                      : []),
+                  ]}
+                />
+                <button
+                  onClick={() => setNewCat(true)}
+                  style={{ ...btnGhostStyle, whiteSpace: 'nowrap' }}
+                >
+                  <Icons.plus size={13} /> New
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label style={fLabelStyle}>Rule</label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {ADD_RULES.map((r) => {
+                const isActive = rule === r.id;
+                const color = rulePresetColor(r.id);
+                return (
+                  <button
+                    key={r.id}
+                    type="button"
+                    title={r.hint}
+                    onClick={() => setRule(r.id)}
+                    style={{
+                      flex: 1,
+                      padding: '9px 6px',
+                      borderRadius: 7,
+                      textAlign: 'center',
+                      border:
+                        '1px solid ' + (isActive ? color : 'var(--line)'),
+                      background: isActive
+                        ? `color-mix(in oklch, ${color} 14%, transparent)`
+                        : 'var(--bg)',
+                      color: isActive ? color : 'var(--muted)',
+                      fontSize: 12.5,
+                      fontFamily: 'var(--font-sans)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <div style={{ fontWeight: isActive ? 500 : 400 }}>
+                      {r.label}
+                    </div>
+                    <div style={{
+                      fontSize: 10.5,
+                      color: 'var(--muted)',
+                      marginTop: 3,
+                      fontFamily: 'var(--font-mono)',
+                    }}>
+                      {r.hint}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{
+              marginTop: 6,
+              fontSize: 11,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+              lineHeight: 1.55,
+            }}>
+              Custom per-profile rules live in the Custom… popup on the
+              row.
+            </div>
+          </div>
+        </div>
+
+        <div style={{
+          padding: '14px 24px',
+          borderTop: '1px solid var(--line)',
+          display: 'flex',
+          justifyContent: 'flex-end',
+          gap: 8,
+        }}>
+          <button onClick={onClose} style={btnGhostStyle}>Cancel</button>
+          <button
+            disabled={!canSubmit || busy}
+            onClick={submit}
+            style={{
+              ...btnPrimaryStyle,
+              opacity: canSubmit ? 1 : 0.4,
+              cursor: canSubmit ? 'pointer' : 'not-allowed',
+            }}
+          >
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function AppsScreen() {
   const [tab, setTab] = useState<AppsTab>('apps');
   const [profiles, setProfiles] = useState<EnforcementProfile[]>([]);
@@ -2137,11 +2450,9 @@ export function AppsScreen() {
   const [creatingProfile, setCreatingProfile] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // When the categories side panel opens, push the window wider so the
-  // panel is never clipped. Always grow by the panel width on the
-  // open transition (previous logic only triggered when current width
-  // already happened to be below the new min — so a 1280 default
-  // window stayed 1280 and the 280-wide panel ate the main content).
+  // Grow the window on open transition; shrink it back on close.
+  // Match the rail/panel width exactly so the main content area
+  // keeps its previous width across the toggle.
   const prevPanelOpen = useRef(false);
   useEffect(() => {
     (async () => {
@@ -2154,6 +2465,7 @@ export function AppsScreen() {
         const closedMin = 1000;
         const panelWidth = 280;
         const opening = categoryManagerOpen && !prevPanelOpen.current;
+        const closing = !categoryManagerOpen && prevPanelOpen.current;
         const targetMin = categoryManagerOpen
           ? closedMin + panelWidth
           : closedMin;
@@ -2163,11 +2475,16 @@ export function AppsScreen() {
         const logicalWidth = currentSize.width / factor;
         const logicalHeight = currentSize.height / factor;
         if (opening) {
-          // Grow by panel width on every open so the main content area
-          // keeps its previous width.
           await win.setSize(
             new LogicalSize(
               Math.max(targetMin, logicalWidth + panelWidth),
+              Math.max(680, logicalHeight),
+            ),
+          );
+        } else if (closing) {
+          await win.setSize(
+            new LogicalSize(
+              Math.max(closedMin, logicalWidth - panelWidth),
               Math.max(680, logicalHeight),
             ),
           );
@@ -2428,15 +2745,21 @@ export function AppsScreen() {
               />
             </div>
             <button
-              onClick={() => setCategoryManagerOpen(true)}
+              onClick={() => setCategoryManagerOpen((v) => !v)}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 7,
                 padding: '7px 11px',
-                background: 'transparent',
-                color: 'var(--ink)',
-                border: '1px solid var(--line)',
+                background: categoryManagerOpen
+                  ? 'var(--accent-soft)'
+                  : 'transparent',
+                color: categoryManagerOpen
+                  ? 'var(--accent-ink)'
+                  : 'var(--ink)',
+                border:
+                  '1px solid ' +
+                  (categoryManagerOpen ? 'var(--accent)' : 'var(--line)'),
                 borderRadius: 6,
                 fontSize: 12.5,
                 cursor: 'pointer',
@@ -2566,36 +2889,6 @@ export function AppsScreen() {
                   }
                 }}
               />
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                marginBottom: 12,
-              }}>
-                <span style={{
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 11,
-                  color: 'var(--muted)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.08em',
-                }}>
-                  Categories
-                </span>
-                <span style={{ flex: 1 }} />
-                <button
-                  onClick={() => setCategoryManagerOpen(true)}
-                  style={{
-                    padding: '6px 12px',
-                    background: 'var(--bg-raise)',
-                    border: '1px solid var(--line)',
-                    borderRadius: 6,
-                    color: 'var(--ink)',
-                    fontSize: 12,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Manage categories
-                </button>
-              </div>
               {[
                 ...categories,
                 { name: 'Uncategorized', builtin: false, createdAt: 0, updatedAt: 0 },
@@ -2611,7 +2904,6 @@ export function AppsScreen() {
                   overrides={overrideMap}
                   onApplyPreset={(t, k, p) => applyPreset(t, k, p)}
                   onClearAppOverrides={(appKey) => clearAppOverrides(appKey)}
-                  onOpenCategoryManager={() => setCategoryManagerOpen(true)}
                   onOpenCategoryDrawer={(c) =>
                     setDrawerCategory({ category: c })
                   }
@@ -2755,37 +3047,6 @@ export function AppsScreen() {
                 }}
               />
 
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                marginBottom: 12,
-              }}>
-                <span style={{
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 11,
-                  color: 'var(--muted)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.08em',
-                }}>
-                  Categories
-                </span>
-                <span style={{ flex: 1 }} />
-                <button
-                  onClick={() => setCategoryManagerOpen(true)}
-                  style={{
-                    padding: '6px 12px',
-                    background: 'var(--bg-raise)',
-                    border: '1px solid var(--line)',
-                    borderRadius: 6,
-                    color: 'var(--ink)',
-                    fontSize: 12,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Manage categories
-                </button>
-              </div>
-
               {(() => {
                 // Browser targets render through the same CategorySection
                 // + AppRow components as the Apps tab. Synthesize a
@@ -2845,8 +3106,7 @@ export function AppsScreen() {
                     onClearAppOverrides={(targetKey) =>
                       clearTargetOverrides(targetKey)
                     }
-                    onOpenCategoryManager={() => setCategoryManagerOpen(true)}
-                    onOpenCategoryDrawer={(c) =>
+                      onOpenCategoryDrawer={(c) =>
                       setDrawerCategory({ category: c })
                     }
                     onDragStartApp={() => setCategoryManagerOpen(true)}
@@ -3018,6 +3278,35 @@ export function AppsScreen() {
           lastSeenRunningAt: null,
           updatedAt: target!.updatedAt,
         } as KnownApp);
+        // Browser target row "Edit settings →" opens the
+        // EditBrowserTargetModal (keyword / category / rule editor),
+        // not the per-profile drawer. Custom… still routes through
+        // AppDrawer in 'edit-custom' mode for the per-profile matrix.
+        if (target && openApp.mode === 'edit') {
+          return (
+            <EditBrowserTargetModal
+              target={target}
+              categories={categories}
+              onClose={() => setOpenApp(null)}
+              onSave={async (patch) => {
+                if (patch.categoryName) {
+                  try {
+                    await api.upsertAppCategory({ name: patch.categoryName });
+                  } catch {
+                    // ignore
+                  }
+                }
+                await api.updateKnownBrowserTarget(target.targetKey, {
+                  displayName: patch.displayName,
+                  keyword: patch.keyword,
+                  categoryName: patch.categoryName,
+                  classificationAction: patch.classificationAction,
+                });
+                refresh();
+              }}
+            />
+          );
+        }
         return (
           <AppDrawer
             app={appForDrawer}

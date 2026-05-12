@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, onAppEvent } from '../api';
 import type {
   BlockDecisionPrompt,
@@ -50,10 +50,9 @@ export function HomeScreen({ onError }: Props) {
     localStorage.setItem('ap-home-rail-open', railOpen ? '1' : '0');
   }, [railOpen]);
 
-  // Dynamic window minimum: when the Today rail is expanded the window
-  // needs room for it; when collapsed we can let the user shrink further.
-  // We also auto-extend the window if it's currently narrower than the
-  // new minimum so the rail never appears overlapping the hero.
+  // Grow on rail open, shrink back on close. Same dance as the
+  // categories side panel on the Apps screen.
+  const prevRailOpen = useRef(false);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -65,21 +64,35 @@ export function HomeScreen({ onError }: Props) {
         const win = getCurrentWebviewWindow();
         const closedMin = 900;
         const railWidth = 320;
+        const opening = railOpen && !prevRailOpen.current;
+        const closing = !railOpen && prevRailOpen.current;
         const targetMin = railOpen ? closedMin + railWidth : closedMin;
         await win.setMinSize(new LogicalSize(targetMin, 680));
         const currentSize = await win.innerSize();
         const factor = await win.scaleFactor();
         const logicalWidth = currentSize.width / factor;
-        if (railOpen && logicalWidth < targetMin) {
+        const logicalHeight = currentSize.height / factor;
+        if (opening) {
           await win.setSize(
             new LogicalSize(
-              targetMin,
-              Math.max(680, currentSize.height / factor),
+              Math.max(targetMin, logicalWidth + railWidth),
+              Math.max(680, logicalHeight),
             ),
           );
+        } else if (closing) {
+          await win.setSize(
+            new LogicalSize(
+              Math.max(closedMin, logicalWidth - railWidth),
+              Math.max(680, logicalHeight),
+            ),
+          );
+        } else if (railOpen && logicalWidth < targetMin) {
+          await win.setSize(
+            new LogicalSize(targetMin, Math.max(680, logicalHeight)),
+          );
         }
+        prevRailOpen.current = railOpen;
       } catch (err) {
-        // Browser preview / capability-denied — surface so we can debug.
         console.warn('[home] dynamic window resize failed:', err);
       }
       if (cancelled) return;
