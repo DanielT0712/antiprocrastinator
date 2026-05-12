@@ -3136,9 +3136,13 @@ pub fn png_to_data_url(bytes: &[u8]) -> String {
     format!("data:image/png;base64,{}", STANDARD.encode(bytes))
 }
 
+/// Cache schema version. Bump when the resolver behaviour changes so old
+/// stale PNGs get re-rendered automatically.
+const ICON_CACHE_VERSION: u32 = 2;
+
 /// Sanitize app_key for use as a filename (alphanumeric + a few safe chars).
 fn icon_cache_filename(app_key: &str) -> String {
-    let mut out = String::with_capacity(app_key.len() + 4);
+    let mut out = String::with_capacity(app_key.len() + 8);
     for ch in app_key.chars() {
         if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
             out.push(ch);
@@ -3146,7 +3150,7 @@ fn icon_cache_filename(app_key: &str) -> String {
             out.push('_');
         }
     }
-    out.push_str(".png");
+    out.push_str(&format!(".v{}.png", ICON_CACHE_VERSION));
     out
 }
 
