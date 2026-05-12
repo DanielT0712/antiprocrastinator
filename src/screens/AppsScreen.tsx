@@ -2401,6 +2401,26 @@ export function AppsScreen() {
   const [creatingProfile, setCreatingProfile] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Track container width so toolbar can collapse labels at narrow
+  // widths instead of clipping. Components fit within window bounds
+  // at every width past the OS-enforced floor.
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const [contentWidth, setContentWidth] = useState<number>(0);
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) {
+        setContentWidth(e.contentRect.width);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  // Toolbar collapse thresholds.
+  const narrow = contentWidth > 0 && contentWidth < 620;
+  const veryNarrow = contentWidth > 0 && contentWidth < 480;
+
   // Grow the window on open transition; shrink it back on close.
   // Order matters: we measure innerSize BEFORE updating setMinSize,
   // because setMinSize can snap the window up to the new min and
@@ -2429,7 +2449,10 @@ export function AppsScreen() {
           prevPanelOpen.current = categoryManagerOpen;
           return;
         }
-        const closedMin = 1000;
+        // Window floor — only used here to derive setMinSize. The page
+        // content is responsive past this point too; this is just the
+        // smallest size we let the OS shrink the window via setMinSize.
+        const closedMin = 480;
         const panelWidth = 280;
         const opening = categoryManagerOpen && !prevPanelOpen.current;
         const closing = !categoryManagerOpen && prevPanelOpen.current;
@@ -2630,9 +2653,12 @@ export function AppsScreen() {
   const isEmergency = activeProfile === 'emergency';
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+    <div
+      ref={contentRef}
+      style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}
+    >
       <div style={{
-        padding: '24px 12px 16px 24px',
+        padding: veryNarrow ? '20px 12px 14px 16px' : '24px 12px 16px 24px',
         display: 'flex',
         flexDirection: 'column',
         gap: 16,
@@ -2676,7 +2702,11 @@ export function AppsScreen() {
                       '2px solid ' + (sel ? 'var(--accent)' : 'transparent'),
                   }}
                 >
-                  {id === 'apps' ? 'Apps' : 'Browser Targets'}
+                  {id === 'apps'
+                    ? 'Apps'
+                    : narrow
+                      ? 'Browsers'
+                      : 'Browser Targets'}
                 </button>
               );
             })}
@@ -2694,40 +2724,45 @@ export function AppsScreen() {
               display: 'flex',
               alignItems: 'center',
               gap: 8,
-              padding: '7px 11px',
+              padding: veryNarrow ? '7px 9px' : '7px 11px',
               border: '1px solid var(--line)',
               borderRadius: 6,
               background: 'var(--bg-raise)',
-              flex: '1 1 80px',
+              flex: veryNarrow ? '0 0 auto' : '1 1 60px',
               minWidth: 0,
               maxWidth: 240,
             }}>
-              <span style={{ color: 'var(--faint)' }}>
+              <span style={{ color: 'var(--faint)', flexShrink: 0 }}>
                 <Icons.search size={13} />
               </span>
-              <input
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder={
-                  tab === 'apps' ? 'Search apps…' : 'Search sites…'
-                }
-                style={{
-                  flex: 1,
-                  background: 'transparent',
-                  border: 'none',
-                  outline: 'none',
-                  color: 'var(--ink)',
-                  fontSize: 12.5,
-                }}
-              />
+              {!veryNarrow && (
+                <input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder={
+                    tab === 'apps' ? 'Search apps…' : 'Search sites…'
+                  }
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    width: '100%',
+                    background: 'transparent',
+                    border: 'none',
+                    outline: 'none',
+                    color: 'var(--ink)',
+                    fontSize: 12.5,
+                  }}
+                />
+              )}
             </div>
             <button
               onClick={() => setCategoryManagerOpen((v) => !v)}
+              title="Manage categories"
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 7,
-                padding: '7px 11px',
+                padding: veryNarrow ? '7px 9px' : '7px 11px',
                 background: categoryManagerOpen
                   ? 'var(--accent-soft)'
                   : 'transparent',
@@ -2741,20 +2776,24 @@ export function AppsScreen() {
                 fontSize: 12.5,
                 cursor: 'pointer',
                 fontFamily: 'var(--font-sans)',
+                flexShrink: 0,
               }}
             >
-              <Icons.tweak size={13} /> Manage
+              <Icons.tweak size={13} />
+              {!narrow && ' Manage'}
             </button>
             <button
               onClick={() => setAdding(true)}
+              title={tab === 'apps' ? 'Add app' : 'Add site'}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 7,
-                padding: '8px 12px',
+                padding: veryNarrow ? '8px 10px' : '8px 12px',
                 background: 'var(--ink)',
                 color: 'var(--bg)',
                 border: 'none',
+                flexShrink: 0,
                 borderRadius: 6,
                 fontSize: 12.5,
                 fontWeight: 500,
@@ -2762,7 +2801,8 @@ export function AppsScreen() {
                 fontFamily: 'var(--font-sans)',
               }}
             >
-              <Icons.plus size={13} /> Add
+              <Icons.plus size={13} />
+              {!narrow && ' Add'}
             </button>
           </div>
         </div>
