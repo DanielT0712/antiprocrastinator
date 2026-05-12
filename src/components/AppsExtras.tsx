@@ -400,7 +400,8 @@ export function AppDrawer({
         onClick={(e) => e.stopPropagation()}
         style={{
           width: 500,
-          maxHeight: '88vh',
+          maxWidth: 'calc(100vw - 48px)',
+          maxHeight: 'calc(100vh - 48px)',
           background: 'var(--bg-raise)',
           border: '1px solid var(--line)',
           borderRadius: 12,
@@ -1707,7 +1708,8 @@ export function CategoryDrawer({
         onClick={(e) => e.stopPropagation()}
         style={{
           width: 500,
-          maxHeight: '88vh',
+          maxWidth: 'calc(100vw - 48px)',
+          maxHeight: 'calc(100vh - 48px)',
           background: 'var(--bg-raise)',
           border: '1px solid var(--line)',
           borderRadius: 12,

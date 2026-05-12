@@ -1125,8 +1125,8 @@ function AddAppModal({
   const [customRules, setCustomRules] = useState<
     Record<string, EnforcementDecision>
   >({});
-  const [enforcement, setEnforcement] = useState<'kill' | 'warn'>('kill');
-  const [warnSecs, setWarnSecs] = useState('30');
+  // Enforcement (kill vs warn-then-close) is set globally in
+  // Settings → Enforcement; not exposed per-app/site in the Add modal.
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -1144,8 +1144,6 @@ function AddAppModal({
     : apps;
 
   const canSubmit = selectedApp != null || manualPath != null;
-  const isBlocking = rule !== 'always-allow';
-
   const browseInFinder = async () => {
     try {
       const picked = await openFileDialog({
@@ -1210,7 +1208,8 @@ function AddAppModal({
         onClick={(e) => e.stopPropagation()}
         style={{
           width: 560,
-          maxHeight: '88vh',
+          maxWidth: 'calc(100vw - 48px)',
+          maxHeight: 'calc(100vh - 48px)',
           background: 'var(--bg-raise)',
           border: '1px solid var(--line)',
           borderRadius: 12,
@@ -1683,109 +1682,6 @@ function AddAppModal({
             </div>
           )}
 
-          {/* enforcement */}
-          {isBlocking && rule !== 'custom' && (
-            <div style={{
-              padding: '13px 14px',
-              border: '1px solid var(--line)',
-              borderRadius: 8,
-              background: 'var(--bg)',
-            }}>
-              <label style={{ ...fLabelStyle, marginBottom: 10 }}>
-                When blocked — enforcement
-              </label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {(
-                  [
-                    {
-                      id: 'kill',
-                      label: 'Close immediately',
-                      hint: 'Force-quit as soon as the app or tab is detected.',
-                    },
-                    {
-                      id: 'warn',
-                      label: 'Warn, then close',
-                      hint: 'Show a countdown — user can save work before it closes.',
-                    },
-                  ] as const
-                ).map((opt) => (
-                  <label
-                    key={opt.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: 9,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <input
-                      type="radio"
-                      name="add-app-enforcement"
-                      value={opt.id}
-                      checked={enforcement === opt.id}
-                      onChange={() => setEnforcement(opt.id)}
-                      style={{
-                        marginTop: 3,
-                        accentColor: 'var(--accent)',
-                        flexShrink: 0,
-                      }}
-                    />
-                    <div>
-                      <div style={{
-                        fontSize: 13,
-                        color: 'var(--ink)',
-                        fontWeight: enforcement === opt.id ? 500 : 400,
-                      }}>
-                        {opt.label}
-                      </div>
-                      <div style={{
-                        fontSize: 11.5,
-                        color: 'var(--muted)',
-                        marginTop: 1,
-                      }}>
-                        {opt.hint}
-                      </div>
-                    </div>
-                  </label>
-                ))}
-                {enforcement === 'warn' && (
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    marginTop: 2,
-                    paddingLeft: 22,
-                  }}>
-                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                      Warn for
-                    </span>
-                    <input
-                      type="number"
-                      min={5}
-                      max={300}
-                      value={warnSecs}
-                      onChange={(e) => setWarnSecs(e.target.value)}
-                      style={{
-                        width: 60,
-                        padding: '5px 8px',
-                        textAlign: 'center',
-                        background: 'var(--bg-raise)',
-                        border: '1px solid var(--line)',
-                        borderRadius: 5,
-                        color: 'var(--ink)',
-                        fontSize: 13,
-                        fontFamily: 'var(--font-mono)',
-                        outline: 'none',
-                      }}
-                    />
-                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                      seconds before closing
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
         </div>
 
         {/* footer */}
@@ -1845,8 +1741,8 @@ function AddBrowserTargetModal({
   const [customRules, setCustomRules] = useState<
     Record<string, EnforcementDecision>
   >({});
-  const [enforcement, setEnforcement] = useState<'kill' | 'warn'>('kill');
-  const [warnSecs, setWarnSecs] = useState('30');
+  // Enforcement (kill vs warn-then-close) is set globally in
+  // Settings → Enforcement; not exposed per-app/site in the Add modal.
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -1858,7 +1754,6 @@ function AddBrowserTargetModal({
   }, [onClose]);
 
   const canSubmit = tabPattern.trim().length > 0;
-  const isBlocking = rule !== 'always-allow';
 
   const submit = async () => {
     if (!canSubmit || busy) return;
@@ -1906,7 +1801,8 @@ function AddBrowserTargetModal({
         onClick={(e) => e.stopPropagation()}
         style={{
           width: 480,
-          maxHeight: '88vh',
+          maxWidth: 'calc(100vw - 48px)',
+          maxHeight: 'calc(100vh - 48px)',
           background: 'var(--bg-raise)',
           border: '1px solid var(--line)',
           borderRadius: 12,
@@ -2188,108 +2084,6 @@ function AddBrowserTargetModal({
             </div>
           )}
 
-          {isBlocking && rule !== 'custom' && (
-            <div style={{
-              padding: '13px 14px',
-              border: '1px solid var(--line)',
-              borderRadius: 8,
-              background: 'var(--bg)',
-            }}>
-              <label style={{ ...fLabelStyle, marginBottom: 10 }}>
-                When blocked — enforcement
-              </label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {(
-                  [
-                    {
-                      id: 'kill',
-                      label: 'Close immediately',
-                      hint: 'Force-quit as soon as the app or tab is detected.',
-                    },
-                    {
-                      id: 'warn',
-                      label: 'Warn, then close',
-                      hint: 'Show a countdown — user can save work before it closes.',
-                    },
-                  ] as const
-                ).map((opt) => (
-                  <label
-                    key={opt.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: 9,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <input
-                      type="radio"
-                      name="add-site-enforcement"
-                      value={opt.id}
-                      checked={enforcement === opt.id}
-                      onChange={() => setEnforcement(opt.id)}
-                      style={{
-                        marginTop: 3,
-                        accentColor: 'var(--accent)',
-                        flexShrink: 0,
-                      }}
-                    />
-                    <div>
-                      <div style={{
-                        fontSize: 13,
-                        color: 'var(--ink)',
-                        fontWeight: enforcement === opt.id ? 500 : 400,
-                      }}>
-                        {opt.label}
-                      </div>
-                      <div style={{
-                        fontSize: 11.5,
-                        color: 'var(--muted)',
-                        marginTop: 1,
-                      }}>
-                        {opt.hint}
-                      </div>
-                    </div>
-                  </label>
-                ))}
-                {enforcement === 'warn' && (
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    marginTop: 2,
-                    paddingLeft: 22,
-                  }}>
-                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                      Warn for
-                    </span>
-                    <input
-                      type="number"
-                      min={5}
-                      max={300}
-                      value={warnSecs}
-                      onChange={(e) => setWarnSecs(e.target.value)}
-                      style={{
-                        width: 60,
-                        padding: '5px 8px',
-                        textAlign: 'center',
-                        background: 'var(--bg-raise)',
-                        border: '1px solid var(--line)',
-                        borderRadius: 5,
-                        color: 'var(--ink)',
-                        fontSize: 13,
-                        fontFamily: 'var(--font-mono)',
-                        outline: 'none',
-                      }}
-                    />
-                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                      seconds before closing
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
         </div>
 
         <div style={{
@@ -2343,9 +2137,12 @@ export function AppsScreen() {
   const [creatingProfile, setCreatingProfile] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Same dynamic-min-size dance as the Today rail on Home: when the
-  // category side panel opens we widen the minimum and pull the window
-  // out if it's too narrow, so the panel never gets clipped.
+  // When the categories side panel opens, push the window wider so the
+  // panel is never clipped. Always grow by the panel width on the
+  // open transition (previous logic only triggered when current width
+  // already happened to be below the new min — so a 1280 default
+  // window stayed 1280 and the 280-wide panel ate the main content).
+  const prevPanelOpen = useRef(false);
   useEffect(() => {
     (async () => {
       try {
@@ -2356,6 +2153,7 @@ export function AppsScreen() {
         const win = getCurrentWebviewWindow();
         const closedMin = 1000;
         const panelWidth = 280;
+        const opening = categoryManagerOpen && !prevPanelOpen.current;
         const targetMin = categoryManagerOpen
           ? closedMin + panelWidth
           : closedMin;
@@ -2363,14 +2161,22 @@ export function AppsScreen() {
         const currentSize = await win.innerSize();
         const factor = await win.scaleFactor();
         const logicalWidth = currentSize.width / factor;
-        if (categoryManagerOpen && logicalWidth < targetMin) {
+        const logicalHeight = currentSize.height / factor;
+        if (opening) {
+          // Grow by panel width on every open so the main content area
+          // keeps its previous width.
           await win.setSize(
             new LogicalSize(
-              targetMin,
-              Math.max(680, currentSize.height / factor),
+              Math.max(targetMin, logicalWidth + panelWidth),
+              Math.max(680, logicalHeight),
             ),
           );
+        } else if (categoryManagerOpen && logicalWidth < targetMin) {
+          await win.setSize(
+            new LogicalSize(targetMin, Math.max(680, logicalHeight)),
+          );
         }
+        prevPanelOpen.current = categoryManagerOpen;
       } catch (err) {
         console.warn('[apps] dynamic window resize failed:', err);
       }
@@ -2682,7 +2488,8 @@ export function AppsScreen() {
               letterSpacing: '0.12em',
               color: 'var(--muted)',
             }}>
-              Active profile
+              {/* User explicitly wants "Profiles" not "Active profile". Do not change back. */}
+              Profiles
             </div>
             <ProfileTabs
               profiles={profiles}
@@ -3177,70 +2984,112 @@ export function AppsScreen() {
         />
       )}
 
-      {openApp && (
-        <AppDrawer
-          app={apps.find((a) => a.appKey === openApp.appKey)!}
-          profiles={profiles}
-          overrides={overrides}
-          emergencyBlockedCategories={emergencyBlockedCategories}
-          categories={categories}
-          initialPreset={openApp.mode === 'edit-custom' ? 'custom' : undefined}
-          onClose={() => setOpenApp(null)}
-          onSetOverride={async (profileName, decision) => {
-            try {
-              if (decision == null) {
-                await api.deleteEnforcementProfileOverride(
-                  profileName,
-                  'app',
-                  openApp.appKey,
-                );
-              } else {
-                await api.setEnforcementProfileOverride({
-                  profileName,
-                  subjectType: 'app',
-                  subjectKey: openApp.appKey,
-                  decision,
-                });
-              }
-              refresh();
-            } catch (err) {
-              setError(String(err));
-            }
-          }}
-          onApplyPreset={async (preset) => {
-            try {
-              if (preset === 'inherit') {
-                for (const profileName of profileNames) {
+      {openApp && (() => {
+        // openApp.appKey can refer to either a real KnownApp or a
+        // KnownBrowserTarget (browser tab renders targets through the
+        // same CategorySection + AppRow). Resolve the right subject so
+        // the modal doesn't blackscreen when called from a browser
+        // target Custom… click.
+        const realApp = apps.find((a) => a.appKey === openApp.appKey);
+        const target = realApp
+          ? null
+          : browserTargets.find((t) => t.targetKey === openApp.appKey);
+        if (!realApp && !target) return null;
+        const subjectType: 'app' | 'browser_target' = realApp
+          ? 'app'
+          : 'browser_target';
+        const subjectKey = openApp.appKey;
+        const appForDrawer: KnownApp = realApp ?? ({
+          appKey: target!.targetKey,
+          displayName: target!.displayName,
+          executableName: target!.keyword,
+          executablePath: null,
+          appPath: null,
+          platform: 'browser',
+          source: 'browser_target',
+          categoryGuess: target!.categoryName,
+          categoryOverride: null,
+          effectiveCategory: target!.categoryName,
+          categories: target!.categoryName ? [target!.categoryName] : [],
+          classificationAction: target!.classificationAction,
+          confidence: target!.confidence,
+          classificationStatus: '',
+          firstSeenAt: target!.firstSeenAt ?? 0,
+          lastSeenRunningAt: null,
+          updatedAt: target!.updatedAt,
+        } as KnownApp);
+        return (
+          <AppDrawer
+            app={appForDrawer}
+            profiles={profiles}
+            overrides={overrides}
+            emergencyBlockedCategories={emergencyBlockedCategories}
+            categories={categories}
+            initialPreset={openApp.mode === 'edit-custom' ? 'custom' : undefined}
+            onClose={() => setOpenApp(null)}
+            onSetOverride={async (profileName, decision) => {
+              try {
+                if (decision == null) {
                   await api.deleteEnforcementProfileOverride(
                     profileName,
-                    'app',
-                    openApp.appKey,
+                    subjectType,
+                    subjectKey,
                   );
+                } else {
+                  await api.setEnforcementProfileOverride({
+                    profileName,
+                    subjectType,
+                    subjectKey,
+                    decision,
+                  });
                 }
-              } else {
-                await applyPreset('app', openApp.appKey, preset);
-                return;
+                refresh();
+              } catch (err) {
+                setError(String(err));
               }
-              refresh();
-            } catch (err) {
-              setError(String(err));
-            }
-          }}
-          onUpdateApp={async (appKey, patch) => {
-            try {
-              await api.updateKnownApp(appKey, {
-                categoryOverride:
-                  patch.categoryOverride === undefined
-                    ? undefined
-                    : { value: patch.categoryOverride },
-              });
-              refresh();
-            } catch (err) {
-              setError(String(err));
-            }
-          }}
-        />
-      )}
+            }}
+            onApplyPreset={async (preset) => {
+              try {
+                if (preset === 'inherit') {
+                  for (const profileName of profileNames) {
+                    await api.deleteEnforcementProfileOverride(
+                      profileName,
+                      subjectType,
+                      subjectKey,
+                    );
+                  }
+                } else {
+                  await applyPreset(subjectType, subjectKey, preset);
+                  return;
+                }
+                refresh();
+              } catch (err) {
+                setError(String(err));
+              }
+            }}
+            onUpdateApp={async (_appKey, patch) => {
+              try {
+                if (subjectType === 'app') {
+                  await api.updateKnownApp(subjectKey, {
+                    categoryOverride:
+                      patch.categoryOverride === undefined
+                        ? undefined
+                        : { value: patch.categoryOverride },
+                  });
+                } else {
+                  // Browser target: persist the category change directly.
+                  await api.updateKnownBrowserTarget(subjectKey, {
+                    categoryName: patch.categoryOverride ?? null,
+                  });
+                }
+                refresh();
+              } catch (err) {
+                setError(String(err));
+              }
+            }}
+          />
+        );
+      })()}
 
       {drawerCategory && (
         <CategoryDrawer
