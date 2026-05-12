@@ -359,14 +359,20 @@ function SettingsRow({
 }) {
   return (
     <div style={{
-      display: 'grid',
-      gridTemplateColumns: '1fr auto',
-      gap: 24,
+      // Flex+wrap rather than grid so the control can drop below the
+      // title block when the row is too narrow to fit both side by
+      // side. Title block flexes 1 1 200px; control sits at the right
+      // with marginLeft: auto.
+      display: 'flex',
+      flexWrap: 'wrap',
       alignItems: 'center',
+      columnGap: 24,
+      rowGap: 8,
       padding: '12px 0',
       borderBottom: last ? 'none' : '1px solid var(--line)',
+      minWidth: 0,
     }}>
-      <div style={{ minWidth: 0 }}>
+      <div style={{ minWidth: 0, flex: '1 1 200px' }}>
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -383,7 +389,11 @@ function SettingsRow({
         </div>
         {children && <div style={{ marginTop: 10 }}>{children}</div>}
       </div>
-      {control && <div style={{ flexShrink: 0 }}>{control}</div>}
+      {control && (
+        <div style={{ flexShrink: 0, marginLeft: 'auto', minWidth: 0 }}>
+          {control}
+        </div>
+      )}
     </div>
   );
 }
@@ -398,18 +408,22 @@ function SettingsCard({
   children: ReactNode;
 }) {
   return (
-    <section style={{ marginBottom: 28 }}>
+    <section style={{ marginBottom: 28, minWidth: 0 }}>
       <div style={{
         display: 'flex',
         alignItems: 'baseline',
         justifyContent: 'space-between',
         marginBottom: 10,
+        gap: 12,
+        flexWrap: 'wrap',
+        minWidth: 0,
       }}>
         <div style={{
           fontFamily: 'var(--font-display)',
           fontSize: 18,
           color: 'var(--ink)',
           letterSpacing: '-0.015em',
+          minWidth: 0,
         }}>
           {title}
         </div>
@@ -418,8 +432,9 @@ function SettingsCard({
       <div style={{
         border: '1px solid var(--line)',
         borderRadius: 10,
-        padding: '0 20px',
+        padding: '0 clamp(12px, 3vw, 20px)',
         background: 'var(--bg-raise)',
+        minWidth: 0,
       }}>
         {children}
       </div>
@@ -765,7 +780,7 @@ export function SettingsScreen() {
       )}
 
       <div style={{ flex: 1, overflow: 'auto', padding: narrowLayout ? '20px 18px 60px' : '32px 36px 60px', minWidth: 0 }}>
-        <div style={{ maxWidth: 760 }}>
+        <div style={{ maxWidth: 760, minWidth: 0 }}>
           {section === 'general' && (
             <>
               <SectionTitle
@@ -843,7 +858,7 @@ export function SettingsScreen() {
                           <div style={{
                             display: 'grid',
                             gridTemplateColumns:
-                              'repeat(auto-fill, minmax(240px, 1fr))',
+                              'repeat(auto-fill, minmax(min(240px, 100%), 1fr))',
                             gap: 12,
                           }}>
                             {items.map((theme) => (
