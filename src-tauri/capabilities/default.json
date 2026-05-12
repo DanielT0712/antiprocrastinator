@@ -12,6 +12,7 @@
     "core:window:allow-inner-size",
     "core:window:allow-scale-factor",
     "shell:allow-open",
-    "dialog:default"
+    "dialog:default",
+    "window-state:default"
   ]
 }

@@ -17,6 +17,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_window_state::Builder::new().build())
         .on_menu_event(|app, event| {
             if event.id() == guard::watchdog::TRAY_SHOW_ID {
                 let _ = guard::watchdog::show_main_window(app);
