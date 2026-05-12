@@ -2644,7 +2644,7 @@ export function AppsScreen() {
           display: 'flex',
           alignItems: 'center',
           gap: 16,
-          flexWrap: 'wrap',
+          flexWrap: 'nowrap',
           minWidth: 0,
         }}>
           <div style={{
@@ -2743,7 +2743,7 @@ export function AppsScreen() {
                 fontFamily: 'var(--font-sans)',
               }}
             >
-              <Icons.tweak size={13} /> Manage categories
+              <Icons.tweak size={13} /> Manage
             </button>
             <button
               onClick={() => setAdding(true)}
@@ -2762,7 +2762,7 @@ export function AppsScreen() {
                 fontFamily: 'var(--font-sans)',
               }}
             >
-              <Icons.plus size={13} /> Add {tab === 'apps' ? 'app' : 'site'}
+              <Icons.plus size={13} /> Add
             </button>
           </div>
         </div>
