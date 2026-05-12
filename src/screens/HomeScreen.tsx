@@ -50,8 +50,9 @@ export function HomeScreen({ onError }: Props) {
     localStorage.setItem('ap-home-rail-open', railOpen ? '1' : '0');
   }, [railOpen]);
 
-  // Grow on rail open, shrink back on close. Same dance as the
-  // categories side panel on the Apps screen.
+  // Grow on rail open, shrink back on close. Skipped in
+  // fullscreen/maximised — user owns the entire viewport, don't fight
+  // them.
   const prevRailOpen = useRef(false);
   useEffect(() => {
     let cancelled = false;
@@ -62,6 +63,12 @@ export function HomeScreen({ onError }: Props) {
         );
         const { LogicalSize } = await import('@tauri-apps/api/dpi');
         const win = getCurrentWebviewWindow();
+        const isFullscreen = await win.isFullscreen().catch(() => false);
+        const isMaximized = await win.isMaximized().catch(() => false);
+        if (isFullscreen || isMaximized) {
+          prevRailOpen.current = railOpen;
+          return;
+        }
         const closedMin = 900;
         const railWidth = 320;
         const opening = railOpen && !prevRailOpen.current;

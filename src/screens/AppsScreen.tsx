@@ -424,6 +424,7 @@ interface CategorySectionProps {
   onClearAppOverrides: (appKey: string) => void;
   onOpenCategoryDrawer: (category: AppCategory) => void;
   onDragStartApp: () => void;
+  onAddToCategory: (categoryName: string) => void;
   onOpenApp: (appKey: string, mode: AppRowMode) => void;
 }
 
@@ -456,6 +457,7 @@ function CategorySection({
   onClearAppOverrides,
   onOpenCategoryDrawer,
   onDragStartApp,
+  onAddToCategory,
   onOpenApp,
 }: CategorySectionProps) {
   const [open, setOpen] = useState(false);
@@ -686,13 +688,7 @@ function CategorySection({
             ))
           )}
           <button
-            onClick={() =>
-              alert(
-                'Use Refresh installed apps below to import apps into ' +
-                  category.name +
-                  ', or open an app drawer to retag it.',
-              )
-            }
+            onClick={() => onAddToCategory(category.name)}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -1076,6 +1072,7 @@ interface AddAppModalProps {
   categories: AppCategory[];
   apps: KnownApp[];
   profiles: EnforcementProfile[];
+  initialCategory?: string | null;
   onClose: () => void;
   onCreate: (input: {
     displayName: string;
@@ -1092,6 +1089,7 @@ function AddAppModal({
   categories,
   apps,
   profiles,
+  initialCategory,
   onClose,
   onCreate,
 }: AddAppModalProps) {
@@ -1100,7 +1098,10 @@ function AddAppModal({
   const [manualPath, setManualPath] = useState<string | null>(null);
   const [manualName, setManualName] = useState<string>('');
   const [categoryName, setCategoryName] = useState<string>(
-    categories.find((c) => !c.builtin)?.name ?? categories[0]?.name ?? '',
+    initialCategory ??
+      categories.find((c) => !c.builtin)?.name ??
+      categories[0]?.name ??
+      '',
   );
   const [newCat, setNewCat] = useState(false);
   const [newCatName, setNewCatName] = useState('');
@@ -1697,6 +1698,7 @@ function AddAppModal({
 interface AddBrowserTargetModalProps {
   categories: AppCategory[];
   profiles: EnforcementProfile[];
+  initialCategory?: string | null;
   onClose: () => void;
   onCreate: (target: {
     displayName: string;
@@ -1711,12 +1713,16 @@ interface AddBrowserTargetModalProps {
 function AddBrowserTargetModal({
   categories,
   profiles,
+  initialCategory,
   onClose,
   onCreate,
 }: AddBrowserTargetModalProps) {
   const [tabPattern, setTabPattern] = useState('');
   const [categoryName, setCategoryName] = useState<string>(
-    categories.find((c) => !c.builtin)?.name ?? categories[0]?.name ?? '',
+    initialCategory ??
+      categories.find((c) => !c.builtin)?.name ??
+      categories[0]?.name ??
+      '',
   );
   const [newCat, setNewCat] = useState(false);
   const [newCatName, setNewCatName] = useState('');
@@ -2119,15 +2125,9 @@ function EditBrowserTargetModal({
   );
   const [newCat, setNewCat] = useState(false);
   const [newCatName, setNewCatName] = useState('');
-  const ruleFromAction =
-    target.classificationAction === 'never_ban'
-      ? 'always-allow'
-      : target.classificationAction === 'always_ban'
-      ? 'always-block'
-      : target.classificationAction === 'ban_during_work'
-      ? 'block-work'
-      : 'custom';
-  const [rule, setRule] = useState<PresetId>(ruleFromAction);
+  // Rule is set via the inline AppRow chip strip on the row itself —
+  // not in this editor — so we don't display a rule control here.
+  // Preserve the existing classificationAction on save.
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -2149,19 +2149,11 @@ function EditBrowserTargetModal({
         categoryName === '__new__'
           ? newCatName.trim() || null
           : categoryName || null;
-      const action: ClassificationAction =
-        rule === 'always-allow'
-          ? 'never_ban'
-          : rule === 'always-block'
-          ? 'always_ban'
-          : rule === 'block-work'
-          ? 'ban_during_work'
-          : 'unclassified';
       await onSave({
         displayName: displayName.trim(),
         keyword: keyword.trim(),
         categoryName: resolvedCategory,
-        classificationAction: action,
+        classificationAction: target.classificationAction,
       });
       onClose();
     } catch {
@@ -2343,60 +2335,6 @@ function EditBrowserTargetModal({
             )}
           </div>
 
-          <div>
-            <label style={fLabelStyle}>Rule</label>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {ADD_RULES.map((r) => {
-                const isActive = rule === r.id;
-                const color = rulePresetColor(r.id);
-                return (
-                  <button
-                    key={r.id}
-                    type="button"
-                    title={r.hint}
-                    onClick={() => setRule(r.id)}
-                    style={{
-                      flex: 1,
-                      padding: '9px 6px',
-                      borderRadius: 7,
-                      textAlign: 'center',
-                      border:
-                        '1px solid ' + (isActive ? color : 'var(--line)'),
-                      background: isActive
-                        ? `color-mix(in oklch, ${color} 14%, transparent)`
-                        : 'var(--bg)',
-                      color: isActive ? color : 'var(--muted)',
-                      fontSize: 12.5,
-                      fontFamily: 'var(--font-sans)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <div style={{ fontWeight: isActive ? 500 : 400 }}>
-                      {r.label}
-                    </div>
-                    <div style={{
-                      fontSize: 10.5,
-                      color: 'var(--muted)',
-                      marginTop: 3,
-                      fontFamily: 'var(--font-mono)',
-                    }}>
-                      {r.hint}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-            <div style={{
-              marginTop: 6,
-              fontSize: 11,
-              color: 'var(--muted)',
-              fontFamily: 'var(--font-mono)',
-              lineHeight: 1.55,
-            }}>
-              Custom per-profile rules live in the Custom… popup on the
-              row.
-            </div>
-          </div>
         </div>
 
         <div style={{
@@ -2436,6 +2374,9 @@ export function AppsScreen() {
   const [pendingApps, setPendingApps] = useState<KnownApp[]>([]);
   const [pendingTargets, setPendingTargets] = useState<KnownBrowserTarget[]>([]);
   const [adding, setAdding] = useState(false);
+  const [addInitialCategory, setAddInitialCategory] = useState<string | null>(
+    null,
+  );
   const [q, setQ] = useState('');
   const [openApp, setOpenApp] = useState<{
     appKey: string;
@@ -2451,8 +2392,9 @@ export function AppsScreen() {
   const [error, setError] = useState<string | null>(null);
 
   // Grow the window on open transition; shrink it back on close.
-  // Match the rail/panel width exactly so the main content area
-  // keeps its previous width across the toggle.
+  // Skipped entirely in fullscreen/maximised: the user has chosen full
+  // viewport, the main content should keep the panel inside it (panel
+  // overlays/inlines without stealing screen real estate).
   const prevPanelOpen = useRef(false);
   useEffect(() => {
     (async () => {
@@ -2462,6 +2404,12 @@ export function AppsScreen() {
         );
         const { LogicalSize } = await import('@tauri-apps/api/dpi');
         const win = getCurrentWebviewWindow();
+        const isFullscreen = await win.isFullscreen().catch(() => false);
+        const isMaximized = await win.isMaximized().catch(() => false);
+        if (isFullscreen || isMaximized) {
+          prevPanelOpen.current = categoryManagerOpen;
+          return;
+        }
         const closedMin = 1000;
         const panelWidth = 280;
         const opening = categoryManagerOpen && !prevPanelOpen.current;
@@ -2908,6 +2856,10 @@ export function AppsScreen() {
                     setDrawerCategory({ category: c })
                   }
                   onDragStartApp={() => setCategoryManagerOpen(true)}
+                  onAddToCategory={(name) => {
+                    setAddInitialCategory(name === 'Uncategorized' ? '' : name);
+                    setAdding(true);
+                  }}
                   onOpenApp={(appKey, mode) =>
                     setOpenApp({ appKey, mode })
                   }
@@ -3106,10 +3058,14 @@ export function AppsScreen() {
                     onClearAppOverrides={(targetKey) =>
                       clearTargetOverrides(targetKey)
                     }
-                      onOpenCategoryDrawer={(c) =>
+                    onOpenCategoryDrawer={(c) =>
                       setDrawerCategory({ category: c })
                     }
                     onDragStartApp={() => setCategoryManagerOpen(true)}
+                    onAddToCategory={(name) => {
+                      setAddInitialCategory(name === 'Uncategorized' ? '' : name);
+                      setAdding(true);
+                    }}
                     onOpenApp={(targetKey, mode) =>
                       setOpenApp({ appKey: targetKey, mode })
                     }
@@ -3148,7 +3104,11 @@ export function AppsScreen() {
         <AddBrowserTargetModal
           categories={categories}
           profiles={profiles}
-          onClose={() => setAdding(false)}
+          initialCategory={addInitialCategory}
+          onClose={() => {
+            setAdding(false);
+            setAddInitialCategory(null);
+          }}
           onCreate={async ({
             displayName,
             keyword,
@@ -3193,7 +3153,11 @@ export function AppsScreen() {
           categories={categories}
           apps={apps}
           profiles={profiles}
-          onClose={() => setAdding(false)}
+          initialCategory={addInitialCategory}
+          onClose={() => {
+            setAdding(false);
+            setAddInitialCategory(null);
+          }}
           onCreate={async ({
             displayName,
             executableName,
