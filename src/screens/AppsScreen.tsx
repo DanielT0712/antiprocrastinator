@@ -2644,7 +2644,7 @@ export function AppsScreen() {
           display: 'flex',
           alignItems: 'center',
           gap: 16,
-          flexWrap: 'nowrap',
+          flexWrap: 'wrap',
           minWidth: 0,
         }}>
           <div style={{
@@ -2829,7 +2829,7 @@ export function AppsScreen() {
           padding: '20px 24px 60px',
           minWidth: 0,
         }}>
-        <div style={{ maxWidth: 1080, minWidth: 0 }}>
+        <div style={{ minWidth: 0 }}>
           {isEmergency && (
             <div style={{
               padding: '12px 14px',
