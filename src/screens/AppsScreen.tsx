@@ -2466,21 +2466,21 @@ export function AppsScreen() {
           await win.setSize(
             new LogicalSize(
               logicalWidth + panelWidth,
-              Math.max(540, logicalHeight),
+              Math.max(420, logicalHeight),
             ),
           );
         } else if (closing) {
           await win.setSize(
             new LogicalSize(
               Math.max(closedMin, logicalWidth - panelWidth),
-              Math.max(540, logicalHeight),
+              Math.max(420, logicalHeight),
             ),
           );
         }
         const targetMin = categoryManagerOpen
           ? closedMin + panelWidth
           : closedMin;
-        await win.setMinSize(new LogicalSize(targetMin, 540));
+        await win.setMinSize(new LogicalSize(targetMin, 420));
         prevPanelOpen.current = categoryManagerOpen;
       } catch (err) {
         console.warn('[apps] dynamic window resize failed:', err);

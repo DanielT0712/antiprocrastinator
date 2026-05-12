@@ -80,7 +80,7 @@ export function HomeScreen({ onError }: Props) {
         // window can shrink that far too. Height floor 540 matches
         // tauri.conf.json minHeight.
         const closedMin = 480;
-        const minH = 540;
+        const minH = 420;
         const railWidth = 320;
         const opening = railOpen && !prevRailOpen.current;
         const closing = !railOpen && prevRailOpen.current;
