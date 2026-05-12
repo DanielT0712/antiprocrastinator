@@ -46,6 +46,9 @@ interface GroupRailProps {
   selected: Set<string>;
   onToggle: (id: string) => void;
   onManageGroups: (focus?: number | 'new') => void;
+  // When true, render as a horizontal scrolling tab strip above the
+  // task list instead of a 200px wide aside.
+  horizontal?: boolean;
 }
 
 export function TasksGroupRail({
@@ -54,6 +57,7 @@ export function TasksGroupRail({
   selected,
   onToggle,
   onManageGroups,
+  horizontal = false,
 }: GroupRailProps) {
   const counts = useMemo(() => {
     const c: Record<string, number> = { __all__: tasks.length, __none__: 0 };
@@ -173,6 +177,58 @@ export function TasksGroupRail({
     );
   };
 
+  if (horizontal) {
+    return (
+      <div style={{
+        flexShrink: 0,
+        borderBottom: '1px solid var(--line)',
+        padding: '8px 16px',
+        background: 'var(--bg-rail)',
+        display: 'flex',
+        gap: 6,
+        overflowX: 'auto',
+        alignItems: 'center',
+      }}>
+        <span style={{ ...labelStyle, flexShrink: 0, marginRight: 4 }}>
+          Groups
+        </span>
+        <HRow id="__all__" label="All" color="var(--muted)" count={counts.__all__} selected={selected} onToggle={onToggle} />
+        <HRow id="__none__" label="No group" dashed count={counts.__none__} selected={selected} onToggle={onToggle} />
+        {groups.map((g) => (
+          <HRow
+            key={g.id}
+            id={String(g.id)}
+            label={g.name}
+            color={g.color}
+            count={counts[String(g.id)] ?? 0}
+            selected={selected}
+            onToggle={onToggle}
+          />
+        ))}
+        <button
+          onClick={() => onManageGroups('new')}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+            padding: '5px 9px',
+            borderRadius: 6,
+            background: 'transparent',
+            border: '1px dashed var(--line)',
+            color: 'var(--muted)',
+            fontSize: 11.5,
+            cursor: 'pointer',
+            fontFamily: 'var(--font-sans)',
+            flexShrink: 0,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          <Icons.plus size={10} /> New
+        </button>
+      </div>
+    );
+  }
+
   return (
     <aside style={{
       width: 200,
@@ -218,6 +274,67 @@ export function TasksGroupRail({
         <Icons.plus size={11} /> New group
       </button>
     </aside>
+  );
+}
+
+function HRow({
+  id,
+  label,
+  color,
+  count,
+  dashed,
+  selected,
+  onToggle,
+}: {
+  id: string;
+  label: string;
+  color?: string | null;
+  count: number;
+  dashed?: boolean;
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+}) {
+  const active = selected.has(id);
+  return (
+    <button
+      onClick={() => onToggle(id)}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '5px 10px',
+        borderRadius: 6,
+        background: active ? 'var(--ink-soft)' : 'transparent',
+        color: active ? 'var(--ink)' : 'var(--muted)',
+        border: '1px solid ' + (active ? 'var(--line)' : 'transparent'),
+        cursor: 'pointer',
+        fontSize: 12,
+        fontFamily: 'var(--font-sans)',
+        flexShrink: 0,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <span style={{
+        width: 7,
+        height: 7,
+        borderRadius: 2,
+        flexShrink: 0,
+        background: color ?? 'transparent',
+        border: dashed
+          ? '1px dashed var(--line)'
+          : color
+            ? 'none'
+            : '1px solid var(--line)',
+      }} />
+      <span>{label}</span>
+      <span style={{
+        fontFamily: 'var(--font-mono)',
+        fontSize: 10,
+        color: 'var(--faint)',
+      }}>
+        {count}
+      </span>
+    </button>
   );
 }
 

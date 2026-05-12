@@ -1394,6 +1394,17 @@ export function TasksScreen() {
   >('pressure');
   const [error, setError] = useState<string | null>(null);
 
+  // Track narrow width so the group rail collapses to a horizontal
+  // tab strip and the library/active layouts switch to single-column.
+  const [narrowLayout, setNarrowLayout] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth < 720,
+  );
+  useEffect(() => {
+    const onResize = () => setNarrowLayout(window.innerWidth < 720);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const horizonStart = startOfDay(Date.now());
@@ -1775,6 +1786,8 @@ export function TasksScreen() {
                 alignItems: 'center',
                 gap: 14,
                 paddingBottom: 10,
+                flexWrap: 'wrap',
+                minWidth: 0,
               }}>
                 <span style={{
                   fontFamily: 'var(--font-mono)',
@@ -1794,11 +1807,11 @@ export function TasksScreen() {
                   {activeTasks.length}{' '}
                   {activeTasks.length === 1 ? 'task' : 'tasks'}
                 </span>
-                <span style={{ flex: 1 }} />
                 <span style={{
                   fontSize: 11,
                   color: 'var(--faint)',
                   fontFamily: 'var(--font-mono)',
+                  marginLeft: 'auto',
                 }}>
                   Sort
                 </span>
@@ -1862,13 +1875,20 @@ export function TasksScreen() {
           ))}
         </div>
       ) : (
-        <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
+        <div style={{
+          flex: 1,
+          display: 'flex',
+          flexDirection: narrowLayout ? 'column' : 'row',
+          minHeight: 0,
+          minWidth: 0,
+        }}>
           <TasksGroupRail
             groups={groups}
             tasks={tasks}
             selected={groupFilter}
             onToggle={toggleGroupFilter}
             onManageGroups={(focus) => setGroupManagerFocus(focus ?? 'new')}
+            horizontal={narrowLayout}
           />
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
           {selectedRows.size > 0 && (
