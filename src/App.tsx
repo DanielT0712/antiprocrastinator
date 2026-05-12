@@ -39,6 +39,13 @@ function App() {
   const [narrowForce, setNarrowForce] = useState(
     () => typeof window !== 'undefined' && window.innerWidth < 720,
   );
+  // Hide the TopBar (route title + profile pill) at small heights to
+  // free vertical space for the actual screen content. The TopBar is
+  // ~56px tall and is mostly chrome — at 460-540 window heights it's
+  // worth more than that to give content room.
+  const [shortHeight, setShortHeight] = useState(
+    () => typeof window !== 'undefined' && window.innerHeight < 600,
+  );
   const collapsed = userCollapsed || narrowForce;
   const locked = userLocked || narrowForce;
   const setCollapsed = setUserCollapsed;
@@ -86,7 +93,10 @@ function App() {
   // Tracks separately from the user's saved preference; toggling at
   // narrow widths doesn't clobber the saved state.
   useEffect(() => {
-    const onResize = () => setNarrowForce(window.innerWidth < 720);
+    const onResize = () => {
+      setNarrowForce(window.innerWidth < 720);
+      setShortHeight(window.innerHeight < 600);
+    };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
@@ -172,7 +182,7 @@ function App() {
       />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-        <TopBar route={route} activeProfile={activeProfile} />
+        {!shortHeight && <TopBar route={route} activeProfile={activeProfile} />}
 
         {route === 'home' && <HomeScreen onError={handleError} />}
         {route === 'schedule' && (

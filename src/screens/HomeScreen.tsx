@@ -79,8 +79,8 @@ export function HomeScreen({ onError }: Props) {
         // Floor matches APM: content is responsive past 480 so the OS
         // window can shrink that far too. Height floor 540 matches
         // tauri.conf.json minHeight.
-        const closedMin = 480;
-        const minH = 420;
+        const closedMin = 500;
+        const minH = 460;
         const railWidth = 320;
         const opening = railOpen && !prevRailOpen.current;
         const closing = !railOpen && prevRailOpen.current;

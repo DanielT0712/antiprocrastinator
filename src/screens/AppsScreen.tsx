@@ -2452,7 +2452,7 @@ export function AppsScreen() {
         // Window floor — only used here to derive setMinSize. The page
         // content is responsive past this point too; this is just the
         // smallest size we let the OS shrink the window via setMinSize.
-        const closedMin = 480;
+        const closedMin = 500;
         const panelWidth = 280;
         const opening = categoryManagerOpen && !prevPanelOpen.current;
         const closing = !categoryManagerOpen && prevPanelOpen.current;
@@ -2466,21 +2466,21 @@ export function AppsScreen() {
           await win.setSize(
             new LogicalSize(
               logicalWidth + panelWidth,
-              Math.max(420, logicalHeight),
+              Math.max(460, logicalHeight),
             ),
           );
         } else if (closing) {
           await win.setSize(
             new LogicalSize(
               Math.max(closedMin, logicalWidth - panelWidth),
-              Math.max(420, logicalHeight),
+              Math.max(460, logicalHeight),
             ),
           );
         }
         const targetMin = categoryManagerOpen
           ? closedMin + panelWidth
           : closedMin;
-        await win.setMinSize(new LogicalSize(targetMin, 420));
+        await win.setMinSize(new LogicalSize(targetMin, 460));
         prevPanelOpen.current = categoryManagerOpen;
       } catch (err) {
         console.warn('[apps] dynamic window resize failed:', err);

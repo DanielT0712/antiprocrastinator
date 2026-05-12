@@ -944,6 +944,17 @@ interface MutationHistoryEntry {
 
 export function ScheduleScreen() {
   const [view, setView] = useState<ViewMode>('5d');
+  // Track short window height so the toolbar can collapse to a single
+  // horizontally-scrollable row instead of wrapping to 3-4 rows of
+  // chrome that eat the actual schedule grid.
+  const [shortHeight, setShortHeight] = useState(
+    () => typeof window !== 'undefined' && window.innerHeight < 600,
+  );
+  useEffect(() => {
+    const onResize = () => setShortHeight(window.innerHeight < 600);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
   const [blocks, setBlocks] = useState<TimeBlock[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
@@ -1119,12 +1130,17 @@ export function ScheduleScreen() {
     <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}>
         <div style={{
-          padding: '14px 28px 14px',
+          padding: shortHeight ? '8px 16px' : '14px 28px',
           borderBottom: '1px solid var(--line)',
           display: 'flex',
           alignItems: 'center',
-          gap: 20,
-          flexWrap: 'wrap',
+          gap: shortHeight ? 12 : 20,
+          // Wrap normally so items stay left-aligned. At short height,
+          // force single row + horizontal scroll so the toolbar never
+          // pushes the grid off-screen.
+          flexWrap: shortHeight ? 'nowrap' : 'wrap',
+          overflowX: shortHeight ? 'auto' : 'visible',
+          flexShrink: 0,
         }}>
           <div style={{
             fontFamily: 'var(--font-mono)',
@@ -1133,6 +1149,7 @@ export function ScheduleScreen() {
             textTransform: 'uppercase',
             letterSpacing: '0.1em',
             whiteSpace: 'nowrap',
+            flexShrink: 0,
           }}>
             {rangeLabel}
           </div>
@@ -1142,6 +1159,8 @@ export function ScheduleScreen() {
             gap: 18,
             fontFamily: 'var(--font-mono)',
             fontSize: 11.5,
+            flexShrink: 0,
+            whiteSpace: 'nowrap',
           }}>
             <Stat n={stats.blockCount} l="blocks today" />
             <DotSep />
@@ -1149,13 +1168,13 @@ export function ScheduleScreen() {
             <DotSep />
             <Stat n={finishLabel} l="projected finish" accent />
           </div>
-          <span style={{ flex: 1 }} />
           <div style={{
             display: 'inline-flex',
             border: '1px solid var(--line)',
             borderRadius: 6,
             overflow: 'hidden',
             background: 'var(--bg-raise)',
+            flexShrink: 0,
           }}>
             {(['day', '5d', 'week'] as ViewMode[]).map((v) => (
               <button
@@ -1189,6 +1208,8 @@ export function ScheduleScreen() {
               fontSize: 12.5,
               cursor: 'pointer',
               fontFamily: 'var(--font-sans)',
+              flexShrink: 0,
+              whiteSpace: 'nowrap',
             }}
           >
             {showHistory ? 'Hide log' : 'Replan log'}
@@ -1209,6 +1230,8 @@ export function ScheduleScreen() {
               gap: 6,
               fontFamily: 'var(--font-sans)',
               fontWeight: 500,
+              flexShrink: 0,
+              whiteSpace: 'nowrap',
             }}
           >
             <svg
