@@ -857,11 +857,22 @@ function AppRow({
           requestAnimationFrame(() => {
             ghost.remove();
           });
-          onDragStartApp();
+          // Defer side effects (opening categories panel + window
+          // resize) until after dragstart returns. If we open the
+          // panel synchronously, the resulting re-render + Tauri
+          // setSize call can abort the drag mid-gesture and the
+          // browser falls back to text selection. setTimeout(0)
+          // pushes it to the next event loop tick so the drag is
+          // already in flight.
+          setTimeout(() => onDragStartApp(), 0);
         }}
         onClick={() => setExpanded((v) => !v)}
         style={{
           display: 'grid',
+          // No text-selection during drag attempts; browser falls
+          // back to selecting label text otherwise.
+          userSelect: 'none',
+          WebkitUserSelect: 'none',
           gridTemplateColumns:
             '28px minmax(0, 1fr) minmax(0, max-content) auto 16px',
           alignItems: 'center',
