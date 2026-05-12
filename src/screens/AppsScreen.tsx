@@ -895,6 +895,9 @@ function AppRow({
             color: 'var(--muted)',
             fontFamily: 'var(--font-mono)',
             marginTop: 2,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
           }}>
             {subjectType === 'browser_target'
               ? app.executableName ?? app.appKey
