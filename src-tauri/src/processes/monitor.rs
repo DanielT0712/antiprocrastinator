@@ -2154,11 +2154,12 @@ fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<Str
         }
     }
 
-    let haystack = format!(
-        "{} {}",
-        normalized,
-        path.map(normalize_process_name).unwrap_or_default()
-    );
+    // Keyword sweep matches only against the display name (path strips
+    // produced too many false positives — Electron apps ship Chromium
+    // frameworks, etc). Spaces are removed from both sides so a keyword
+    // like "block work" still matches "Block for Work" without false
+    // partial-word hits on short tokens.
+    let haystack = normalized.replace(' ', "");
     for (category, keywords) in [
         (
             "Games",
@@ -2199,9 +2200,9 @@ fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<Str
         (
             "Browsers",
             &[
-                "chrome", "firefox", "safari", "edge", "arc", "brave", "browser",
-                "opera", "vivaldi", "chromium", "tor", "duckduckgo", "orion",
-                "thorium", "zen",
+                "chrome", "firefox", "safari", "microsoftedge", "arc",
+                "bravebrowser", "opera", "vivaldi", "chromium", "torbrowser",
+                "duckduckgo", "orion", "thorium", "zenbrowser",
             ][..],
         ),
         (
@@ -3216,6 +3217,25 @@ pub fn render_and_cache_icon(
 
 #[cfg(target_os = "macos")]
 fn find_icns_in_resources(resources: &Path) -> Option<PathBuf> {
+    // First, ask Info.plist for the bundle's declared icon. Most apps
+    // (VSCode, Slack, Notion, etc.) pick a non-standard .icns name; the
+    // preferred-names fallback misses them entirely.
+    let bundle_root = resources.parent().and_then(|p| p.parent());
+    if let Some(root) = bundle_root {
+        let plist = root.join("Contents/Info.plist");
+        if plist.exists() {
+            if let Some(name) = read_plist_icon_name(&plist) {
+                let mut candidate = resources.join(&name);
+                if candidate.extension().and_then(|e| e.to_str()) != Some("icns") {
+                    candidate.set_extension("icns");
+                }
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
     let entries = fs::read_dir(resources).ok()?;
     let mut candidates: Vec<PathBuf> = Vec::new();
     for entry in entries.flatten() {
@@ -3224,8 +3244,14 @@ fn find_icns_in_resources(resources: &Path) -> Option<PathBuf> {
             candidates.push(path);
         }
     }
-    // Prefer common names first.
-    for preferred in ["AppIcon.icns", "Icon.icns", "app.icns", "icon.icns"] {
+    // Prefer common names next.
+    for preferred in [
+        "AppIcon.icns",
+        "Icon.icns",
+        "app.icns",
+        "icon.icns",
+        "electron.icns",
+    ] {
         if let Some(found) = candidates
             .iter()
             .find(|p| p.file_name().map(|n| n == preferred).unwrap_or(false))
@@ -3233,7 +3259,37 @@ fn find_icns_in_resources(resources: &Path) -> Option<PathBuf> {
             return Some(found.clone());
         }
     }
-    candidates.into_iter().next()
+    // Else: prefer the largest .icns file (usually the main app icon).
+    candidates.sort_by_key(|p| {
+        std::fs::metadata(p)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    });
+    candidates.into_iter().next_back()
+}
+
+#[cfg(target_os = "macos")]
+fn read_plist_icon_name(plist: &Path) -> Option<String> {
+    // plutil works on both XML and binary plists and prints just the
+    // value. Falls back to PrimaryIconName for newer assets-style
+    // bundles that don't ship a CFBundleIconFile.
+    for key in ["CFBundleIconFile", "CFBundleIconName"] {
+        let out = Command::new("plutil")
+            .args(["-extract", key, "raw", "-o", "-"])
+            .arg(plist)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            continue;
+        }
+        let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
 }
 
 pub fn get_emergency_allowlist(connection: &Connection) -> Result<Vec<KnownApp>, String> {

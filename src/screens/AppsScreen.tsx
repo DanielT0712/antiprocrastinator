@@ -471,6 +471,7 @@ interface CategorySectionProps {
   onClearAppOverrides: (appKey: string) => void;
   onOpenCategoryManager: () => void;
   onOpenCategoryDrawer: (category: AppCategory) => void;
+  onDragStartApp: () => void;
   onOpenApp: (appKey: string, mode: AppRowMode) => void;
 }
 
@@ -502,6 +503,7 @@ function CategorySection({
   onClearAppOverrides,
   onOpenCategoryManager,
   onOpenCategoryDrawer,
+  onDragStartApp,
   onOpenApp,
 }: CategorySectionProps) {
   const [open, setOpen] = useState(false);
@@ -745,6 +747,7 @@ function CategorySection({
                   onApplyPreset('app', app.appKey, p)
                 }
                 onClearAppOverrides={() => onClearAppOverrides(app.appKey)}
+                onDragStartApp={onDragStartApp}
                 onOpenApp={(mode) => onOpenApp(app.appKey, mode)}
               />
             ))
@@ -792,6 +795,7 @@ function AppRow({
   categoryPreset,
   onApplyAppPreset,
   onClearAppOverrides,
+  onDragStartApp,
   onOpenApp,
 }: {
   app: KnownApp;
@@ -802,6 +806,7 @@ function AppRow({
   categoryPreset: PresetId;
   onApplyAppPreset: (preset: PresetId) => void;
   onClearAppOverrides: () => void;
+  onDragStartApp: () => void;
   onOpenApp: (mode: AppRowMode) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -889,6 +894,7 @@ function AppRow({
         onDragStart={(e) => {
           e.dataTransfer.setData('text/app-key', app.appKey);
           e.dataTransfer.effectAllowed = 'move';
+          onDragStartApp();
         }}
         onClick={() => setExpanded((v) => !v)}
         style={{
@@ -1868,6 +1874,40 @@ export function AppsScreen() {
   const [creatingProfile, setCreatingProfile] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Same dynamic-min-size dance as the Today rail on Home: when the
+  // category side panel opens we widen the minimum and pull the window
+  // out if it's too narrow, so the panel never gets clipped.
+  useEffect(() => {
+    (async () => {
+      try {
+        const { getCurrentWebviewWindow } = await import(
+          '@tauri-apps/api/webviewWindow'
+        );
+        const { LogicalSize } = await import('@tauri-apps/api/dpi');
+        const win = getCurrentWebviewWindow();
+        const closedMin = 1000;
+        const panelWidth = 280;
+        const targetMin = categoryManagerOpen
+          ? closedMin + panelWidth
+          : closedMin;
+        await win.setMinSize(new LogicalSize(targetMin, 680));
+        const currentSize = await win.innerSize();
+        const factor = await win.scaleFactor();
+        const logicalWidth = currentSize.width / factor;
+        if (categoryManagerOpen && logicalWidth < targetMin) {
+          await win.setSize(
+            new LogicalSize(
+              targetMin,
+              Math.max(680, currentSize.height / factor),
+            ),
+          );
+        }
+      } catch (err) {
+        console.warn('[apps] dynamic window resize failed:', err);
+      }
+    })();
+  }, [categoryManagerOpen]);
+
   const refresh = useCallback(async () => {
     try {
       const [p, a, c, o, eb, bt, pending] = await Promise.all([
@@ -1885,8 +1925,27 @@ export function AppsScreen() {
       setOverrides(o);
       setEmergencyBlocked(eb);
       setBrowserTargets(bt);
-      setPendingApps(pending.apps ?? []);
-      setPendingTargets(pending.browserTargets ?? []);
+      // Pending banner should only surface apps detected AFTER the
+      // first inventory sweep. On the very first launch we initialise
+      // the marker to now so the user isn't greeted by a banner full of
+      // apps they already knew were installed; later sweeps add new
+      // arrivals (first_seen_at > marker) to the banner.
+      const FIRST_SWEEP_KEY = 'ap-first-sweep-ms';
+      let firstSweepAt = Number(localStorage.getItem(FIRST_SWEEP_KEY));
+      if (!firstSweepAt || Number.isNaN(firstSweepAt)) {
+        firstSweepAt = Date.now();
+        localStorage.setItem(FIRST_SWEEP_KEY, String(firstSweepAt));
+      }
+      setPendingApps(
+        (pending.apps ?? []).filter(
+          (app) => (app.firstSeenAt ?? 0) > firstSweepAt,
+        ),
+      );
+      setPendingTargets(
+        (pending.browserTargets ?? []).filter(
+          (t) => (t.firstSeenAt ?? 0) > firstSweepAt,
+        ),
+      );
       if (!p.find((profile) => profile.name === activeProfile) && p.length > 0) {
         setActiveProfile(p[0].name);
       }
@@ -2312,6 +2371,7 @@ export function AppsScreen() {
                   onOpenCategoryDrawer={(c) =>
                     setDrawerCategory({ category: c })
                   }
+                  onDragStartApp={() => setCategoryManagerOpen(true)}
                   onOpenApp={(appKey, mode) =>
                     setOpenApp({ appKey, mode })
                   }
