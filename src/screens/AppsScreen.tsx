@@ -834,7 +834,8 @@ function AppRow({
         onClick={() => setExpanded((v) => !v)}
         style={{
           display: 'grid',
-          gridTemplateColumns: '28px 1fr auto auto 16px',
+          gridTemplateColumns:
+            '28px minmax(0, 1fr) minmax(0, max-content) auto 16px',
           alignItems: 'center',
           gap: 12,
           padding: '11px 16px',
@@ -842,6 +843,8 @@ function AppRow({
           background: expanded
             ? 'color-mix(in oklch, var(--ink) 3%, transparent)'
             : 'transparent',
+          minWidth: 0,
+          overflow: 'hidden',
         }}
         onMouseEnter={(e) => {
           if (!expanded)
@@ -909,6 +912,10 @@ function AppRow({
           color: inherited ? 'var(--muted)' : presetColor(effectivePreset),
           fontFamily: 'var(--font-mono)',
           fontStyle: inherited ? 'italic' : 'normal',
+          minWidth: 0,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
         }}>
           {presetText}
         </div>
@@ -2674,14 +2681,14 @@ export function AppsScreen() {
               );
             })}
           </div>
-          <div style={{ flex: 1, minWidth: 0 }} />
           <div style={{
             display: 'flex',
             alignItems: 'center',
             gap: 8,
             flexWrap: 'nowrap',
             minWidth: 0,
-            flex: '1 1 auto',
+            flex: '0 1 auto',
+            marginLeft: 'auto',
           }}>
             <div style={{
               display: 'flex',
