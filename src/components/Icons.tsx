@@ -209,6 +209,29 @@ export const Icons = {
       }
     />
   ),
+  pin: (p: IconProps) => (
+    <Icon
+      {...p}
+      d={
+        <>
+          <path d="M12 17v5" />
+          <path d="M9 10V4h6v6l3 3H6l3-3z" />
+        </>
+      }
+    />
+  ),
+  pinOff: (p: IconProps) => (
+    <Icon
+      {...p}
+      d={
+        <>
+          <path d="M3 3l18 18" />
+          <path d="M12 17v5" />
+          <path d="M9 10V4h6v6l3 3H8" />
+        </>
+      }
+    />
+  ),
 };
 
 export type IconKey = keyof typeof Icons;

@@ -1098,8 +1098,8 @@ export function ScheduleScreen() {
     : '—';
 
   return (
-    <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+    <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}>
         <div style={{
           padding: '14px 28px 14px',
           borderBottom: '1px solid var(--line)',

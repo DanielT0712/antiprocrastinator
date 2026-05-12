@@ -15,7 +15,12 @@ interface Props {
   current: Route;
   onNav: (route: Route) => void;
   collapsed: boolean;
+  locked: boolean;
+  // True when the lock is forced on by a narrow window — pin button is
+  // disabled in this case so the user can't desync state.
+  lockForced: boolean;
   onToggleCollapse: () => void;
+  onToggleLocked: () => void;
   onSuspendApp: () => void;
   onRequestQuit: () => void;
 }
@@ -24,12 +29,16 @@ export function Sidebar({
   current,
   onNav,
   collapsed,
+  locked,
+  lockForced,
   onToggleCollapse,
+  onToggleLocked,
   onSuspendApp,
   onRequestQuit,
 }: Props) {
   const [hovered, setHovered] = useState(false);
-  const compact = collapsed && !hovered;
+  // Locked sidebar never hover-expands. Window-narrow forces locked.
+  const compact = collapsed && (locked || !hovered);
 
   const sbStyle: CSSProperties = {
     width: compact ? 56 : 220,
@@ -47,7 +56,7 @@ export function Sidebar({
   return (
     <aside
       style={sbStyle}
-      onMouseEnter={() => collapsed && setHovered(true)}
+      onMouseEnter={() => collapsed && !locked && setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
       <div style={{
@@ -166,8 +175,44 @@ export function Sidebar({
         })}
       </div>
 
+      <div style={{ marginTop: 'auto' }}>
+        {collapsed && (
+          <button
+            onClick={lockForced ? undefined : onToggleLocked}
+            disabled={lockForced}
+            title={
+              lockForced
+                ? 'Sidebar locked because window is narrow'
+                : locked
+                  ? 'Unlock (allow hover-expand)'
+                  : 'Lock collapsed (no hover-expand)'
+            }
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              padding: compact ? '6px 0' : '6px 10px',
+              marginBottom: 6,
+              width: '100%',
+              background: 'transparent',
+              border: 'none',
+              color: locked ? 'var(--accent)' : 'var(--faint)',
+              cursor: lockForced ? 'not-allowed' : 'pointer',
+              fontSize: 11.5,
+              fontFamily: 'var(--font-sans)',
+              opacity: lockForced ? 0.4 : 1,
+              transition: 'color 180ms ease, opacity 180ms ease',
+            }}
+          >
+            {locked ? <Icons.pin size={13} /> : <Icons.pinOff size={13} />}
+            {!compact && (
+              <span>{locked ? 'Locked compact' : 'Lock compact'}</span>
+            )}
+          </button>
+        )}
+
       <div style={{
-        marginTop: 'auto',
         paddingTop: 14,
         borderTop: '1px solid var(--line)',
         display: compact ? 'flex' : 'grid',
@@ -223,6 +268,7 @@ export function Sidebar({
           <Icons.x size={15} />
           {!compact && <span>Quit…</span>}
         </button>
+      </div>
       </div>
     </aside>
   );

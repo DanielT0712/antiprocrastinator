@@ -14,6 +14,7 @@ import { SettingsScreen } from './screens/SettingsScreen';
 
 const ROUTE_KEY = 'ap-route';
 const COLLAPSED_KEY = 'ap-sidebar-collapsed';
+const LOCKED_KEY = 'ap-sidebar-locked';
 
 const ROUTES: Route[] = ['home', 'schedule', 'tasks', 'apps', 'settings'];
 
@@ -25,15 +26,21 @@ function App() {
     return saved && ROUTES.includes(saved) ? saved : 'home';
   });
   // userCollapsed = user's explicit preference (persisted).
-  // narrowForce  = forced true by narrow window (transient).
-  // Effective `collapsed` = userCollapsed || narrowForce.
+  // userLocked    = "no hover-expand when collapsed" (persisted).
+  // narrowForce   = forced true by narrow window (transient).
+  // Effective collapsed = userCollapsed || narrowForce.
+  // Effective locked    = userLocked    || narrowForce.
   const [userCollapsed, setUserCollapsed] = useState(
     () => localStorage.getItem(COLLAPSED_KEY) === '1',
+  );
+  const [userLocked, setUserLocked] = useState(
+    () => localStorage.getItem(LOCKED_KEY) === '1',
   );
   const [narrowForce, setNarrowForce] = useState(
     () => typeof window !== 'undefined' && window.innerWidth < 720,
   );
   const collapsed = userCollapsed || narrowForce;
+  const locked = userLocked || narrowForce;
   const setCollapsed = setUserCollapsed;
   const [suspendOpen, setSuspendOpen] = useState(false);
   const [quitOpen, setQuitOpen] = useState(false);
@@ -71,6 +78,9 @@ function App() {
   useEffect(() => {
     localStorage.setItem(COLLAPSED_KEY, userCollapsed ? '1' : '0');
   }, [userCollapsed]);
+  useEffect(() => {
+    localStorage.setItem(LOCKED_KEY, userLocked ? '1' : '0');
+  }, [userLocked]);
 
   // Auto-collapse sidebar at narrow window widths so content has room.
   // Tracks separately from the user's saved preference; toggling at
@@ -149,7 +159,10 @@ function App() {
         current={route}
         onNav={setRoute}
         collapsed={collapsed}
+        locked={locked}
+        lockForced={narrowForce}
         onToggleCollapse={() => setCollapsed((c) => !c)}
+        onToggleLocked={() => setUserLocked((l) => !l)}
         onSuspendApp={() => setSuspendOpen(true)}
         onRequestQuit={() => {
           setQuitSource('sidebar');
@@ -163,22 +176,22 @@ function App() {
 
         {route === 'home' && <HomeScreen onError={handleError} />}
         {route === 'schedule' && (
-          <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+          <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
             <ScheduleScreen />
           </div>
         )}
         {route === 'tasks' && (
-          <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+          <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
             <TasksScreen />
           </div>
         )}
         {route === 'apps' && (
-          <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+          <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
             <AppsScreen />
           </div>
         )}
         {route === 'settings' && (
-          <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+          <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
             <SettingsScreen />
           </div>
         )}
