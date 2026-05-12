@@ -2419,7 +2419,10 @@ export function AppsScreen() {
           prevPanelOpen.current = categoryManagerOpen;
           return;
         }
-        const closedMin = 1000;
+        // Header/toolbar wraps via flexWrap, so the APM page can shrink
+        // pretty far before things start clipping. Drop the floor low
+        // enough that the user can actually narrow the window.
+        const closedMin = 700;
         const panelWidth = 280;
         const opening = categoryManagerOpen && !prevPanelOpen.current;
         const closing = !categoryManagerOpen && prevPanelOpen.current;
