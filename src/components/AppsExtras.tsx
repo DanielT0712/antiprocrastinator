@@ -790,6 +790,9 @@ export function CategoryManagerModal({
                 key={c.name}
                 onDragOver={(e) => {
                   e.preventDefault();
+                  // Move semantics — suppresses macOS "+" copy badge
+                  // on the system drag cursor.
+                  e.dataTransfer.dropEffect = 'move';
                   if (dragOverCategory !== c.name) setDragOverCategory(c.name);
                 }}
                 onDragLeave={() => {

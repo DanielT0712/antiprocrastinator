@@ -829,6 +829,34 @@ function AppRow({
         onDragStart={(e) => {
           e.dataTransfer.setData('text/app-key', app.appKey);
           e.dataTransfer.effectAllowed = 'move';
+          // Custom drag image: clone of the row, semi-transparent,
+          // floating offscreen so the OS can rasterize it. Removed on
+          // next tick once the drag has captured the image.
+          const source = e.currentTarget as HTMLElement;
+          const rect = source.getBoundingClientRect();
+          const ghost = source.cloneNode(true) as HTMLElement;
+          ghost.style.position = 'fixed';
+          ghost.style.top = '-10000px';
+          ghost.style.left = '0';
+          ghost.style.width = rect.width + 'px';
+          ghost.style.pointerEvents = 'none';
+          ghost.style.opacity = '0.72';
+          ghost.style.background = 'var(--bg-raise)';
+          ghost.style.border = '1px solid var(--accent)';
+          ghost.style.borderRadius = '8px';
+          ghost.style.boxShadow =
+            '0 14px 28px -10px rgba(0,0,0,0.45), 0 6px 14px -6px rgba(0,0,0,0.3)';
+          document.body.appendChild(ghost);
+          e.dataTransfer.setDragImage(
+            ghost,
+            e.clientX - rect.left,
+            e.clientY - rect.top,
+          );
+          // Browser snapshots the drag image at the next paint; remove
+          // a tick later so it doesn't stick around in the DOM.
+          requestAnimationFrame(() => {
+            ghost.remove();
+          });
           onDragStartApp();
         }}
         onClick={() => setExpanded((v) => !v)}
