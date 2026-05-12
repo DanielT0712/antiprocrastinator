@@ -50,10 +50,12 @@ export function HomeScreen({ onError }: Props) {
     localStorage.setItem('ap-home-rail-open', railOpen ? '1' : '0');
   }, [railOpen]);
 
-  // Grow on rail open, shrink back on close. Skipped in
-  // fullscreen/maximised — user owns the entire viewport, don't fight
-  // them.
+  // Grow on rail open, shrink back on close. Skipped on initial mount
+  // and in fullscreen / maximised. Measure innerSize BEFORE updating
+  // setMinSize so a min bump can't silently clobber the current
+  // logical width before we compute the new size.
   const prevRailOpen = useRef(false);
+  const railDidMount = useRef(false);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -63,6 +65,11 @@ export function HomeScreen({ onError }: Props) {
         );
         const { LogicalSize } = await import('@tauri-apps/api/dpi');
         const win = getCurrentWebviewWindow();
+        if (!railDidMount.current) {
+          railDidMount.current = true;
+          prevRailOpen.current = railOpen;
+          return;
+        }
         const isFullscreen = await win.isFullscreen().catch(() => false);
         const isMaximized = await win.isMaximized().catch(() => false);
         if (isFullscreen || isMaximized) {
@@ -73,8 +80,6 @@ export function HomeScreen({ onError }: Props) {
         const railWidth = 320;
         const opening = railOpen && !prevRailOpen.current;
         const closing = !railOpen && prevRailOpen.current;
-        const targetMin = railOpen ? closedMin + railWidth : closedMin;
-        await win.setMinSize(new LogicalSize(targetMin, 680));
         const currentSize = await win.innerSize();
         const factor = await win.scaleFactor();
         const logicalWidth = currentSize.width / factor;
@@ -82,7 +87,7 @@ export function HomeScreen({ onError }: Props) {
         if (opening) {
           await win.setSize(
             new LogicalSize(
-              Math.max(targetMin, logicalWidth + railWidth),
+              logicalWidth + railWidth,
               Math.max(680, logicalHeight),
             ),
           );
@@ -93,11 +98,9 @@ export function HomeScreen({ onError }: Props) {
               Math.max(680, logicalHeight),
             ),
           );
-        } else if (railOpen && logicalWidth < targetMin) {
-          await win.setSize(
-            new LogicalSize(targetMin, Math.max(680, logicalHeight)),
-          );
         }
+        const targetMin = railOpen ? closedMin + railWidth : closedMin;
+        await win.setMinSize(new LogicalSize(targetMin, 680));
         prevRailOpen.current = railOpen;
       } catch (err) {
         console.warn('[home] dynamic window resize failed:', err);

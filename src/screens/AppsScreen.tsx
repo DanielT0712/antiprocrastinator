@@ -2392,10 +2392,14 @@ export function AppsScreen() {
   const [error, setError] = useState<string | null>(null);
 
   // Grow the window on open transition; shrink it back on close.
-  // Skipped entirely in fullscreen/maximised: the user has chosen full
-  // viewport, the main content should keep the panel inside it (panel
-  // overlays/inlines without stealing screen real estate).
+  // Order matters: we measure innerSize BEFORE updating setMinSize,
+  // because setMinSize can snap the window up to the new min and
+  // clobber the user's previous logical width. Skip entirely on the
+  // initial mount, and in fullscreen / maximised, so a stale state
+  // restore from localStorage doesn't yank the window back to some
+  // default.
   const prevPanelOpen = useRef(false);
+  const panelDidMount = useRef(false);
   useEffect(() => {
     (async () => {
       try {
@@ -2404,6 +2408,11 @@ export function AppsScreen() {
         );
         const { LogicalSize } = await import('@tauri-apps/api/dpi');
         const win = getCurrentWebviewWindow();
+        if (!panelDidMount.current) {
+          panelDidMount.current = true;
+          prevPanelOpen.current = categoryManagerOpen;
+          return;
+        }
         const isFullscreen = await win.isFullscreen().catch(() => false);
         const isMaximized = await win.isMaximized().catch(() => false);
         if (isFullscreen || isMaximized) {
@@ -2414,10 +2423,8 @@ export function AppsScreen() {
         const panelWidth = 280;
         const opening = categoryManagerOpen && !prevPanelOpen.current;
         const closing = !categoryManagerOpen && prevPanelOpen.current;
-        const targetMin = categoryManagerOpen
-          ? closedMin + panelWidth
-          : closedMin;
-        await win.setMinSize(new LogicalSize(targetMin, 680));
+        // Read the current width first so a later setMinSize call
+        // doesn't influence what we treat as "current".
         const currentSize = await win.innerSize();
         const factor = await win.scaleFactor();
         const logicalWidth = currentSize.width / factor;
@@ -2425,7 +2432,7 @@ export function AppsScreen() {
         if (opening) {
           await win.setSize(
             new LogicalSize(
-              Math.max(targetMin, logicalWidth + panelWidth),
+              logicalWidth + panelWidth,
               Math.max(680, logicalHeight),
             ),
           );
@@ -2436,11 +2443,11 @@ export function AppsScreen() {
               Math.max(680, logicalHeight),
             ),
           );
-        } else if (categoryManagerOpen && logicalWidth < targetMin) {
-          await win.setSize(
-            new LogicalSize(targetMin, Math.max(680, logicalHeight)),
-          );
         }
+        const targetMin = categoryManagerOpen
+          ? closedMin + panelWidth
+          : closedMin;
+        await win.setMinSize(new LogicalSize(targetMin, 680));
         prevPanelOpen.current = categoryManagerOpen;
       } catch (err) {
         console.warn('[apps] dynamic window resize failed:', err);
