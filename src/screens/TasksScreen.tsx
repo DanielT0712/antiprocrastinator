@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { api } from '../api';
@@ -1394,16 +1395,21 @@ export function TasksScreen() {
   >('pressure');
   const [error, setError] = useState<string | null>(null);
 
-  // Track narrow width so the group rail collapses to a horizontal
-  // tab strip and the library/active layouts switch to single-column.
-  const [narrowLayout, setNarrowLayout] = useState(
-    () => typeof window !== 'undefined' && window.innerWidth < 720,
-  );
+  // Track content area width via ResizeObserver. Threshold accounts
+  // for the active-grid min (~724px) + 200px rail + padding, so the
+  // rail collapses BEFORE the active grid begins to clip.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [contentW, setContentW] = useState(0);
   useEffect(() => {
-    const onResize = () => setNarrowLayout(window.innerWidth < 720);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    const el = rootRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) setContentW(e.contentRect.width);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
   }, []);
+  const narrowLayout = contentW > 0 && contentW < 960;
 
   const refresh = useCallback(async () => {
     try {
@@ -1617,7 +1623,10 @@ export function TasksScreen() {
   }, [tasks, blocksByTaskId, activeSort]);
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+    <div
+      ref={rootRef}
+      style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}
+    >
       <div style={{
         padding: '14px 24px 0',
         borderBottom: '1px solid var(--line)',
@@ -1908,6 +1917,11 @@ export function TasksScreen() {
           <div style={{ flex: 1, overflow: 'auto' }}>
           <table style={{
             width: '100%',
+            // Force h-scroll inside the overflow:auto parent when the
+            // window is too narrow to render all library columns
+            // comfortably. Without this, columns just squeeze and the
+            // task name + date cells become unreadable.
+            minWidth: 760,
             borderCollapse: 'separate',
             borderSpacing: 0,
             fontSize: 13,

@@ -646,18 +646,20 @@ export function SettingsScreen() {
 
   // At narrow widths the 200px section aside eats too much room;
   // collapse it to a horizontal scrolling tab strip above content.
-  const rootRef = useRef<HTMLDivElement | null>(null);
+  // Callback ref pattern because the main container is rendered
+  // conditionally (after prefs load), so a plain useRef + useEffect
+  // wouldn't catch the mount.
+  const [rootEl, setRootEl] = useState<HTMLDivElement | null>(null);
   const [w, setW] = useState(0);
   useEffect(() => {
-    const el = rootRef.current;
-    if (!el) return;
+    if (!rootEl) return;
     const ro = new ResizeObserver((entries) => {
       for (const e of entries) setW(e.contentRect.width);
     });
-    ro.observe(el);
+    ro.observe(rootEl);
     return () => ro.disconnect();
-  }, []);
-  const narrowLayout = w > 0 && w < 720;
+  }, [rootEl]);
+  const narrowLayout = w > 0 && w < 760;
 
   useEffect(() => {
     api.getPreferences().then(setPrefs).catch((e) => setError(String(e)));
@@ -695,7 +697,7 @@ export function SettingsScreen() {
 
   return (
     <div
-      ref={rootRef}
+      ref={setRootEl}
       style={{
         flex: 1,
         display: 'flex',
