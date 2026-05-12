@@ -76,7 +76,11 @@ export function HomeScreen({ onError }: Props) {
           prevRailOpen.current = railOpen;
           return;
         }
-        const closedMin = 900;
+        // Floor matches APM: content is responsive past 480 so the OS
+        // window can shrink that far too. Height floor 540 matches
+        // tauri.conf.json minHeight.
+        const closedMin = 480;
+        const minH = 540;
         const railWidth = 320;
         const opening = railOpen && !prevRailOpen.current;
         const closing = !railOpen && prevRailOpen.current;
@@ -88,19 +92,19 @@ export function HomeScreen({ onError }: Props) {
           await win.setSize(
             new LogicalSize(
               logicalWidth + railWidth,
-              Math.max(680, logicalHeight),
+              Math.max(minH, logicalHeight),
             ),
           );
         } else if (closing) {
           await win.setSize(
             new LogicalSize(
               Math.max(closedMin, logicalWidth - railWidth),
-              Math.max(680, logicalHeight),
+              Math.max(minH, logicalHeight),
             ),
           );
         }
         const targetMin = railOpen ? closedMin + railWidth : closedMin;
-        await win.setMinSize(new LogicalSize(targetMin, 680));
+        await win.setMinSize(new LogicalSize(targetMin, minH));
         prevRailOpen.current = railOpen;
       } catch (err) {
         console.warn('[home] dynamic window resize failed:', err);
@@ -288,7 +292,7 @@ export function HomeScreen({ onError }: Props) {
       <div style={{ flex: 1, display: 'flex', minHeight: 0, minWidth: 0 }}>
         <main style={{
           flex: 1,
-          minWidth: 640,
+          minWidth: 0,
           padding: '32px 36px',
           overflow: 'auto',
           position: 'relative',

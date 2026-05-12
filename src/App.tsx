@@ -24,9 +24,17 @@ function App() {
     const saved = localStorage.getItem(ROUTE_KEY) as Route | null;
     return saved && ROUTES.includes(saved) ? saved : 'home';
   });
-  const [collapsed, setCollapsed] = useState(
+  // userCollapsed = user's explicit preference (persisted).
+  // narrowForce  = forced true by narrow window (transient).
+  // Effective `collapsed` = userCollapsed || narrowForce.
+  const [userCollapsed, setUserCollapsed] = useState(
     () => localStorage.getItem(COLLAPSED_KEY) === '1',
   );
+  const [narrowForce, setNarrowForce] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth < 720,
+  );
+  const collapsed = userCollapsed || narrowForce;
+  const setCollapsed = setUserCollapsed;
   const [suspendOpen, setSuspendOpen] = useState(false);
   const [quitOpen, setQuitOpen] = useState(false);
   const [quitSource, setQuitSource] = useState<string | undefined>(undefined);
@@ -61,8 +69,17 @@ function App() {
     localStorage.setItem(ROUTE_KEY, route);
   }, [route]);
   useEffect(() => {
-    localStorage.setItem(COLLAPSED_KEY, collapsed ? '1' : '0');
-  }, [collapsed]);
+    localStorage.setItem(COLLAPSED_KEY, userCollapsed ? '1' : '0');
+  }, [userCollapsed]);
+
+  // Auto-collapse sidebar at narrow window widths so content has room.
+  // Tracks separately from the user's saved preference; toggling at
+  // narrow widths doesn't clobber the saved state.
+  useEffect(() => {
+    const onResize = () => setNarrowForce(window.innerWidth < 720);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

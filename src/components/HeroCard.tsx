@@ -1,4 +1,10 @@
-import { type CSSProperties, type ReactNode, useEffect, useState } from 'react';
+import {
+  type CSSProperties,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { Icons } from './Icons';
 import type { Task, TaskGroup, TimeBlock } from '../api/types';
 import {
@@ -20,7 +26,15 @@ interface Props {
   onAction: (kind: 'done' | 'extend' | 'pause') => void;
 }
 
-const PrimaryBtn = ({ children, onClick }: { children: ReactNode; onClick: () => void }) => (
+const PrimaryBtn = ({
+  children,
+  onClick,
+  narrow,
+}: {
+  children: ReactNode;
+  onClick: () => void;
+  narrow: boolean;
+}) => (
   <button
     onClick={onClick}
     style={{
@@ -28,23 +42,32 @@ const PrimaryBtn = ({ children, onClick }: { children: ReactNode; onClick: () =>
       alignItems: 'center',
       justifyContent: 'center',
       gap: 9,
-      padding: '14px 18px',
+      padding: narrow ? '12px 12px' : '14px 18px',
       background: 'var(--btn-primary-bg)',
       color: 'var(--btn-primary-fg)',
       border: 'none',
       borderRadius: 7,
-      fontSize: 15,
+      fontSize: narrow ? 13 : 15,
       fontFamily: 'var(--font-sans)',
       fontWeight: 500,
       cursor: 'pointer',
       letterSpacing: '-0.005em',
+      minWidth: 0,
     }}
   >
     {children}
   </button>
 );
 
-const SecondaryBtn = ({ children, onClick }: { children: ReactNode; onClick: () => void }) => (
+const SecondaryBtn = ({
+  children,
+  onClick,
+  narrow,
+}: {
+  children: ReactNode;
+  onClick: () => void;
+  narrow: boolean;
+}) => (
   <button
     onClick={onClick}
     style={{
@@ -52,14 +75,15 @@ const SecondaryBtn = ({ children, onClick }: { children: ReactNode; onClick: () 
       alignItems: 'center',
       justifyContent: 'center',
       gap: 9,
-      padding: '14px 16px',
+      padding: narrow ? '12px 10px' : '14px 16px',
       background: 'transparent',
       color: 'var(--ink)',
       border: '1px solid var(--line)',
       borderRadius: 7,
-      fontSize: 15,
+      fontSize: narrow ? 13 : 15,
       fontFamily: 'var(--font-sans)',
       cursor: 'pointer',
+      minWidth: 0,
     }}
   >
     {children}
@@ -103,22 +127,44 @@ function HeroBody({
     }
   }
 
+  // Responsive collapse: track card width so timer + buttons + progress
+  // shrink instead of overflowing at narrow window sizes.
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const [cardWidth, setCardWidth] = useState(0);
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) setCardWidth(e.contentRect.width);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const narrow = cardWidth > 0 && cardWidth < 560;
+  const veryNarrow = cardWidth > 0 && cardWidth < 420;
+  const timerFontSize = veryNarrow ? 64 : narrow ? 84 : 112;
+
   return (
-    <div style={{
-      position: 'relative',
-      border: '1px solid var(--line)',
-      borderRadius: 14,
-      padding: '30px 32px 28px',
-      background: 'var(--bg-raise)',
-      overflow: 'hidden',
-      minWidth: 600,
-    }}>
+    <div
+      ref={cardRef}
+      style={{
+        position: 'relative',
+        border: '1px solid var(--line)',
+        borderRadius: 14,
+        padding: veryNarrow ? '22px 18px 20px' : '30px 32px 28px',
+        background: 'var(--bg-raise)',
+        overflow: 'hidden',
+        minWidth: 0,
+      }}
+    >
       <div style={{
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
         marginBottom: 20,
         gap: 16,
+        flexWrap: 'wrap',
+        minWidth: 0,
       }}>
         <span style={{
           fontFamily: 'var(--font-mono)',
@@ -134,6 +180,7 @@ function HeroBody({
           fontFamily: 'var(--font-mono)',
           fontSize: 11.5,
           color: 'var(--muted)',
+          flexWrap: 'wrap',
         }}>
           {block && (
             <>
@@ -152,14 +199,15 @@ function HeroBody({
         </div>
       </div>
 
-      <div style={{ marginBottom: 26 }}>
+      <div style={{ marginBottom: 26, minWidth: 0 }}>
         <div style={{
           fontFamily: 'var(--font-display)',
-          fontSize: 30,
+          fontSize: veryNarrow ? 22 : narrow ? 26 : 30,
           fontWeight: 400,
           color: 'var(--ink)',
           letterSpacing: '-0.02em',
           lineHeight: 1.1,
+          wordBreak: 'break-word',
         }}>
           {taskName}
         </div>
@@ -179,10 +227,12 @@ function HeroBody({
         display: 'flex',
         alignItems: 'flex-end',
         justifyContent: 'space-between',
-        gap: 30,
+        gap: veryNarrow ? 14 : 30,
         marginBottom: 24,
+        flexWrap: veryNarrow ? 'wrap' : 'nowrap',
+        minWidth: 0,
       }}>
-        <div>
+        <div style={{ minWidth: 0 }}>
           <div style={{
             fontFamily: 'var(--font-mono)',
             fontSize: 10.5,
@@ -193,7 +243,7 @@ function HeroBody({
           }}>Remaining</div>
           <div style={{
             fontFamily: 'var(--font-mono)',
-            fontSize: 112,
+            fontSize: timerFontSize,
             fontWeight: 500,
             color: 'var(--ink)',
             lineHeight: 0.95,
@@ -204,10 +254,10 @@ function HeroBody({
           </div>
         </div>
         <div style={{
-          flex: 1,
+          flex: '1 1 160px',
           paddingBottom: 8,
           maxWidth: 260,
-          minWidth: 220,
+          minWidth: 0,
         }}>
           <div style={{
             display: 'flex',
@@ -254,20 +304,21 @@ function HeroBody({
         <div style={{
           display: 'grid',
           gridTemplateColumns: '1fr 1fr 1fr',
-          gap: 10,
+          gap: veryNarrow ? 6 : 10,
+          minWidth: 0,
         }}>
-          <PrimaryBtn onClick={() => onAction('done')}>
-            <Icons.check size={18} />
+          <PrimaryBtn narrow={narrow} onClick={() => onAction('done')}>
+            <Icons.check size={veryNarrow ? 14 : 18} />
             <span>Done</span>
-            <kbd style={kbdStyle}>⌘D</kbd>
+            {!narrow && <kbd style={kbdStyle}>⌘D</kbd>}
           </PrimaryBtn>
-          <SecondaryBtn onClick={() => onAction('extend')}>
-            <Icons.plus size={18} />
-            <span>Extend</span>
+          <SecondaryBtn narrow={narrow} onClick={() => onAction('extend')}>
+            <Icons.plus size={veryNarrow ? 14 : 18} />
+            {!veryNarrow && <span>Extend</span>}
           </SecondaryBtn>
-          <SecondaryBtn onClick={() => onAction('pause')}>
-            <Icons.pause size={17} />
-            <span>Pause</span>
+          <SecondaryBtn narrow={narrow} onClick={() => onAction('pause')}>
+            <Icons.pause size={veryNarrow ? 13 : 17} />
+            {!veryNarrow && <span>Pause</span>}
           </SecondaryBtn>
         </div>
         <div style={{
