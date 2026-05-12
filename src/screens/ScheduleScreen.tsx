@@ -44,6 +44,24 @@ function startOfDay(epoch: number): number {
   return d.getTime();
 }
 
+// Monday-anchored start of the week containing `epoch`. JS getDay() is
+// 0=Sun..6=Sat; (day + 6) % 7 maps Mon->0..Sun->6.
+function startOfWeek(epoch: number): number {
+  const d = new Date(epoch);
+  d.setHours(0, 0, 0, 0);
+  const offsetDays = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - offsetDays);
+  return d.getTime();
+}
+
+// Anchor for the schedule grid given the active view. Week + 5d both
+// anchor to Monday of the current week (Mon-Sun and Mon-Fri). Day
+// stays on today.
+function viewStartDay(view: ViewMode, now: number): number {
+  if (view === 'day') return startOfDay(now);
+  return startOfWeek(now);
+}
+
 function dayKey(epoch: number): string {
   return new Date(epoch).toLocaleDateString('en-US', {
     weekday: 'short',
@@ -939,7 +957,7 @@ export function ScheduleScreen() {
   const refresh = useCallback(async () => {
     try {
       const now = Date.now();
-      const from = startOfDay(now);
+      const from = viewStartDay(view, now);
       const to = from + daysToShow * 86_400_000;
       const [list, taskList, historyList] = await Promise.all([
         api.getScheduleRange(from, to),
@@ -952,7 +970,7 @@ export function ScheduleScreen() {
     } catch (err) {
       setError(String(err));
     }
-  }, [daysToShow]);
+  }, [view, daysToShow]);
 
   useEffect(() => {
     refresh();
@@ -960,9 +978,9 @@ export function ScheduleScreen() {
 
   const dayBuckets = useMemo(() => {
     const buckets: { day: number; blocks: TimeBlock[] }[] = [];
-    const today = startOfDay(Date.now());
+    const start = viewStartDay(view, Date.now());
     for (let i = 0; i < daysToShow; i++) {
-      const day = today + i * 86_400_000;
+      const day = start + i * 86_400_000;
       buckets.push({
         day,
         blocks: blocks.filter(
@@ -971,7 +989,7 @@ export function ScheduleScreen() {
       });
     }
     return buckets;
-  }, [blocks, daysToShow]);
+  }, [blocks, view, daysToShow]);
 
   const stats = useMemo(() => {
     let workMinutes = 0;
@@ -1077,14 +1095,14 @@ export function ScheduleScreen() {
   };
 
   const rangeLabel = useMemo(() => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const last = new Date(today.getTime() + (daysToShow - 1) * 86_400_000);
+    const startMs = viewStartDay(view, Date.now());
+    const first = new Date(startMs);
+    const last = new Date(startMs + (daysToShow - 1) * 86_400_000);
     const fmt = (d: Date) =>
       d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    if (daysToShow === 1) return fmt(today);
-    return `${fmt(today)} – ${fmt(last)}`;
-  }, [daysToShow]);
+    if (daysToShow === 1) return fmt(first);
+    return `${fmt(first)} – ${fmt(last)}`;
+  }, [view, daysToShow]);
 
   const finishLabel = projectedFinish
     ? new Date(projectedFinish).toLocaleString('en-US', {
