@@ -2420,6 +2420,14 @@ export function AppsScreen() {
   // Toolbar collapse thresholds.
   const narrow = contentWidth > 0 && contentWidth < 620;
   const veryNarrow = contentWidth > 0 && contentWidth < 480;
+  const [shortHeight, setShortHeight] = useState(
+    () => typeof window !== 'undefined' && window.innerHeight < 600,
+  );
+  useEffect(() => {
+    const onResize = () => setShortHeight(window.innerHeight < 600);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   // Grow the window on open transition; shrink it back on close.
   // Order matters: we measure innerSize BEFORE updating setMinSize,
@@ -2807,7 +2815,9 @@ export function AppsScreen() {
           </div>
         </div>
 
-        {/* profile selector + rules-shown-for */}
+        {/* profile selector + rules-shown-for. At short height the
+            profiles row is capped + vert-scrollable so a long profile
+            list can't dominate the page. */}
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -2815,6 +2825,8 @@ export function AppsScreen() {
           flexWrap: 'wrap',
           gap: 14,
           minWidth: 0,
+          maxHeight: shortHeight ? 60 : undefined,
+          overflowY: shortHeight ? 'auto' : 'visible',
         }}>
           <div style={{
             display: 'flex',

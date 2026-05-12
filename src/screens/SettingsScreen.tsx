@@ -629,6 +629,21 @@ export function SettingsScreen() {
   const [guard, setGuard] = useState<GuardStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // At narrow widths the 200px section aside eats too much room;
+  // collapse it to a horizontal scrolling tab strip above content.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [w, setW] = useState(0);
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) setW(e.contentRect.width);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const narrowLayout = w > 0 && w < 720;
+
   useEffect(() => {
     api.getPreferences().then(setPrefs).catch((e) => setError(String(e)));
     api.getGuardStatus().then(setGuard).catch(() => {});
@@ -664,44 +679,92 @@ export function SettingsScreen() {
   }
 
   return (
-    <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-      <aside style={{
-        width: 200,
-        flexShrink: 0,
-        borderRight: '1px solid var(--line)',
-        padding: '18px 12px',
+    <div
+      ref={rootRef}
+      style={{
+        flex: 1,
         display: 'flex',
-        flexDirection: 'column',
-        gap: 2,
-        background: 'var(--bg-rail)',
-      }}>
-        <div style={{ ...sLabel, padding: '6px 10px 8px' }}>Sections</div>
-        {SECTIONS.map((s) => {
-          const active = section === s.id;
-          return (
-            <button
-              key={s.id}
-              onClick={() => setSection(s.id)}
-              style={{
-                padding: '8px 12px',
-                textAlign: 'left',
-                background: active ? 'var(--ink-soft)' : 'transparent',
-                color: active ? 'var(--ink)' : 'var(--muted)',
-                border: 'none',
-                borderRadius: 6,
-                fontSize: 13,
-                fontFamily: 'var(--font-sans)',
-                fontWeight: active ? 500 : 400,
-                cursor: 'pointer',
-              }}
-            >
-              {s.label}
-            </button>
-          );
-        })}
-      </aside>
+        flexDirection: narrowLayout ? 'column' : 'row',
+        minHeight: 0,
+        minWidth: 0,
+      }}
+    >
+      {!narrowLayout && (
+        <aside style={{
+          width: 200,
+          flexShrink: 0,
+          borderRight: '1px solid var(--line)',
+          padding: '18px 12px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 2,
+          background: 'var(--bg-rail)',
+        }}>
+          <div style={{ ...sLabel, padding: '6px 10px 8px' }}>Sections</div>
+          {SECTIONS.map((s) => {
+            const active = section === s.id;
+            return (
+              <button
+                key={s.id}
+                onClick={() => setSection(s.id)}
+                style={{
+                  padding: '8px 12px',
+                  textAlign: 'left',
+                  background: active ? 'var(--ink-soft)' : 'transparent',
+                  color: active ? 'var(--ink)' : 'var(--muted)',
+                  border: 'none',
+                  borderRadius: 6,
+                  fontSize: 13,
+                  fontFamily: 'var(--font-sans)',
+                  fontWeight: active ? 500 : 400,
+                  cursor: 'pointer',
+                }}
+              >
+                {s.label}
+              </button>
+            );
+          })}
+        </aside>
+      )}
 
-      <div style={{ flex: 1, overflow: 'auto', padding: '32px 36px 60px' }}>
+      {narrowLayout && (
+        <div style={{
+          flexShrink: 0,
+          borderBottom: '1px solid var(--line)',
+          padding: '8px 16px',
+          background: 'var(--bg-rail)',
+          display: 'flex',
+          gap: 4,
+          overflowX: 'auto',
+        }}>
+          {SECTIONS.map((s) => {
+            const active = section === s.id;
+            return (
+              <button
+                key={s.id}
+                onClick={() => setSection(s.id)}
+                style={{
+                  padding: '6px 12px',
+                  flexShrink: 0,
+                  whiteSpace: 'nowrap',
+                  background: active ? 'var(--ink-soft)' : 'transparent',
+                  color: active ? 'var(--ink)' : 'var(--muted)',
+                  border: '1px solid ' + (active ? 'var(--line)' : 'transparent'),
+                  borderRadius: 6,
+                  fontSize: 12.5,
+                  fontFamily: 'var(--font-sans)',
+                  fontWeight: active ? 500 : 400,
+                  cursor: 'pointer',
+                }}
+              >
+                {s.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <div style={{ flex: 1, overflow: 'auto', padding: narrowLayout ? '20px 18px 60px' : '32px 36px 60px', minWidth: 0 }}>
         <div style={{ maxWidth: 760 }}>
           {section === 'general' && (
             <>

@@ -1134,12 +1134,14 @@ export function ScheduleScreen() {
           borderBottom: '1px solid var(--line)',
           display: 'flex',
           alignItems: 'center',
-          gap: shortHeight ? 12 : 20,
-          // Wrap normally so items stay left-aligned. At short height,
-          // force single row + horizontal scroll so the toolbar never
-          // pushes the grid off-screen.
-          flexWrap: shortHeight ? 'nowrap' : 'wrap',
-          overflowX: shortHeight ? 'auto' : 'visible',
+          gap: shortHeight ? 10 : 20,
+          // Items always wrap left-to-right so they stay left-aligned.
+          // At short height we cap the toolbar's height and let it
+          // scroll vertically inside that cap, so toolbar chrome can't
+          // dominate the page.
+          flexWrap: 'wrap',
+          maxHeight: shortHeight ? 76 : undefined,
+          overflowY: shortHeight ? 'auto' : 'visible',
           flexShrink: 0,
         }}>
           <div style={{

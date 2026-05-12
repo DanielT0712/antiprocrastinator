@@ -1618,6 +1618,8 @@ export function TasksScreen() {
           display: 'flex',
           alignItems: 'center',
           gap: 8,
+          flexWrap: 'wrap',
+          minWidth: 0,
         }}>
           {(['active', 'library'] as TasksTab[]).map((id) => {
             const sel = tab === id;
@@ -1659,7 +1661,6 @@ export function TasksScreen() {
               </button>
             );
           })}
-          <span style={{ flex: 1 }} />
           {tab === 'library' && (
             <div style={{
               display: 'flex',
@@ -1669,19 +1670,22 @@ export function TasksScreen() {
               border: '1px solid var(--line)',
               borderRadius: 6,
               background: 'var(--bg-raise)',
-              minWidth: 320,
+              minWidth: 0,
               maxWidth: 480,
-              flex: '1 0 280px',
+              flex: '1 1 160px',
+              marginLeft: 'auto',
             }}>
-              <span style={{ color: 'var(--faint)' }}>
+              <span style={{ color: 'var(--faint)', flexShrink: 0 }}>
                 <Icons.search size={13} />
               </span>
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search… try group:work  planned:true  p:>=4  deadline:overdue"
+                placeholder="Search…"
                 style={{
                   flex: 1,
+                  minWidth: 0,
+                  width: '100%',
                   background: 'transparent',
                   border: 'none',
                   outline: 'none',
@@ -1710,6 +1714,9 @@ export function TasksScreen() {
             fontSize: 11.5,
             color: 'var(--muted)',
             fontFamily: 'var(--font-mono)',
+            flexShrink: 0,
+            whiteSpace: 'nowrap',
+            marginLeft: tab === 'library' ? 0 : 'auto',
           }}>
             {tab === 'library'
               ? `${filtered.length} of ${tasks.length}`
