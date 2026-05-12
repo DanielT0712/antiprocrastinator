@@ -6,6 +6,8 @@ mod analytics;
 mod config;
 mod db;
 pub mod guard;
+#[cfg(target_os = "macos")]
+mod macos_quit;
 mod processes;
 mod schedule;
 mod tasks;
@@ -14,6 +16,7 @@ mod tasks;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .on_menu_event(|app, event| {
             if event.id() == guard::watchdog::TRAY_SHOW_ID {
                 let _ = guard::watchdog::show_main_window(app);
@@ -132,6 +135,8 @@ pub fn run() {
             app.manage(guard);
 
             install_app_menu(&app.handle()).map_err(std::io::Error::other)?;
+            #[cfg(target_os = "macos")]
+            macos_quit::install(app.handle().clone()).map_err(std::io::Error::other)?;
             guard::watchdog::setup_system_tray(&app.handle()).map_err(std::io::Error::other)?;
             guard::watchdog::start_supervisor_runtime(&app.handle())
                 .map_err(std::io::Error::other)?;
@@ -230,12 +235,8 @@ fn handle_exit_request(app: &tauri::AppHandle, api: &tauri::ExitRequestApi, code
     }
 
     api.prevent_exit();
-    let minimized_to_tray = if preferences.minimize_to_tray {
-        guard::watchdog::hide_main_window(app).is_ok()
-    } else {
-        false
-    };
-    let _ = guard::watchdog::emit_quit_required(app, "app_exit", minimized_to_tray);
+    let _ = guard::watchdog::show_main_window(app);
+    let _ = guard::watchdog::emit_quit_required(app, "app_exit", false);
 }
 
 fn handle_quit_request(app: &tauri::AppHandle, source: &str) {
@@ -283,42 +284,43 @@ fn handle_quit_request(app: &tauri::AppHandle, source: &str) {
 /// like every other quit path.
 fn spawn_termination_signal_listener(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        wait_for_termination_signal().await;
-        log::info!(
-            "termination signal received; emitting quit-required (supervisor stays active)"
-        );
-        let preferences = match app
-            .state::<config::manager::ConfigState>()
-            .get_preferences()
-        {
-            Ok(p) => Some(p),
-            Err(error) => {
-                log::warn!("failed to load preferences on termination: {error}");
-                None
+        loop {
+            wait_for_termination_signal().await;
+            log::info!(
+                "termination signal received; emitting quit-required (supervisor stays active)"
+            );
+            let preferences = match app
+                .state::<config::manager::ConfigState>()
+                .get_preferences()
+            {
+                Ok(p) => Some(p),
+                Err(error) => {
+                    log::warn!("failed to load preferences on termination: {error}");
+                    None
+                }
+            };
+            let guard = app.state::<guard::watchdog::GuardState>();
+            let strong_guard_active = preferences
+                .as_ref()
+                .map(|p| p.strong_guard_enabled)
+                .unwrap_or(true)
+                && guard.is_active().unwrap_or(false);
+
+            if strong_guard_active {
+                let _ = guard::watchdog::show_main_window(&app);
+                let _ = guard::watchdog::emit_quit_required(&app, "signal", false);
+                continue;
             }
-        };
-        let guard = app.state::<guard::watchdog::GuardState>();
-        let strong_guard_active = preferences
-            .as_ref()
-            .map(|p| p.strong_guard_enabled)
-            .unwrap_or(true)
-            && guard.is_active().unwrap_or(false);
 
-        if strong_guard_active {
-            // Show the challenge dialog if the UI is up; OS will SIGKILL
-            // shortly if we do not respond, and the helper will recover.
-            let _ = guard::watchdog::show_main_window(&app);
-            let _ = guard::watchdog::emit_quit_required(&app, "signal", false);
-            return;
+            // Strong guard is off (developer toggled it, or release-mode user
+            // explicitly disabled). Exit cleanly so the helper can stop too.
+            let _ = guard::watchdog::disable_supervisor(&app);
+            if let Err(error) = guard.allow_exit_once() {
+                log::warn!("failed to allow termination exit: {error}");
+            }
+            app.exit(0);
+            break;
         }
-
-        // Strong guard is off (developer toggled it, or release-mode user
-        // explicitly disabled). Exit cleanly so the helper can stop too.
-        let _ = guard::watchdog::disable_supervisor(&app);
-        if let Err(error) = guard.allow_exit_once() {
-            log::warn!("failed to allow termination exit: {error}");
-        }
-        app.exit(0);
     });
 }
 

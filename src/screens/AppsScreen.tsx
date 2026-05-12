@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import { api } from '../api';
 import type {
   AppCategory,
@@ -24,6 +25,7 @@ import {
   CategoryManagerModal,
   PendingBanner,
   ProfileMenu,
+  StyledSelect,
 } from '../components/AppsExtras';
 
 const labelStyle: CSSProperties = {
@@ -1030,35 +1032,74 @@ function AppRow({
 
 type AppsTab = 'apps' | 'browser_targets';
 
-const CLASSIFICATION_OPTIONS: { v: ClassificationAction; l: string }[] = [
-  { v: 'unclassified', l: 'Unclassified' },
-  { v: 'always_ban', l: 'Always block' },
-  { v: 'ban_during_work', l: 'Block during work' },
-  { v: 'never_ban', l: 'Never block' },
+// ──────────────────────────────────────────────────────────────────
+// Add app / Add site modals — design-verbatim from Home.html
+// ──────────────────────────────────────────────────────────────────
+
+const ADD_RULES: { id: PresetId; label: string; hint: string }[] = [
+  { id: 'always-allow', label: 'Always allow', hint: 'Never blocked.' },
+  { id: 'block-work', label: 'Block for work', hint: 'Blocked during Work and Deep Work.' },
+  { id: 'always-block', label: 'Always block', hint: 'Blocked in every profile.' },
+  { id: 'custom', label: 'Custom', hint: 'Set per-profile below.' },
 ];
 
+const fLabelStyle: CSSProperties = {
+  display: 'block',
+  fontSize: 10.5,
+  color: 'var(--muted)',
+  fontFamily: 'var(--font-mono)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.1em',
+  marginBottom: 7,
+};
 
+const btnGhostStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+  padding: '7px 11px',
+  background: 'transparent',
+  color: 'var(--ink)',
+  border: '1px solid var(--line)',
+  borderRadius: 6,
+  fontSize: 12.5,
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+};
 
-interface AddTargetModalProps {
-  categories: AppCategory[];
-  onClose: () => void;
-  onCreate: (target: {
-    displayName: string;
-    keyword: string;
-    categoryName: string | null;
-    classificationAction: ClassificationAction;
-  }) => Promise<void>;
+const btnPrimaryStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+  padding: '7px 12px',
+  background: 'var(--ink)',
+  color: 'var(--bg)',
+  border: 'none',
+  borderRadius: 6,
+  fontSize: 12.5,
+  fontWeight: 500,
+  cursor: 'pointer',
+  fontFamily: 'var(--font-sans)',
+};
+
+function rulePresetColor(id: PresetId): string {
+  if (id === 'always-allow') return 'var(--ok)';
+  if (id === 'block-work') return 'var(--accent)';
+  if (id === 'always-block') return 'var(--danger)';
+  return 'var(--muted)';
 }
 
 interface AddAppModalProps {
   categories: AppCategory[];
+  apps: KnownApp[];
   profiles: EnforcementProfile[];
-  emergencyBlockedCategories: string[];
   onClose: () => void;
   onCreate: (input: {
     displayName: string;
     executableName: string | null;
-    categoryNames: string[];
+    executablePath: string | null;
+    appPath: string | null;
+    categoryName: string | null;
     rule: PresetId;
     customRules: Record<string, EnforcementDecision>;
   }) => Promise<void>;
@@ -1066,20 +1107,26 @@ interface AddAppModalProps {
 
 function AddAppModal({
   categories,
+  apps,
   profiles,
-  emergencyBlockedCategories,
   onClose,
   onCreate,
 }: AddAppModalProps) {
-  const [displayName, setDisplayName] = useState('');
-  const [executableName, setExecutableName] = useState('');
-  const [categoryName, setCategoryName] = useState(
+  const [appSearch, setAppSearch] = useState('');
+  const [selectedApp, setSelectedApp] = useState<KnownApp | null>(null);
+  const [manualPath, setManualPath] = useState<string | null>(null);
+  const [manualName, setManualName] = useState<string>('');
+  const [categoryName, setCategoryName] = useState<string>(
     categories.find((c) => !c.builtin)?.name ?? categories[0]?.name ?? '',
   );
+  const [newCat, setNewCat] = useState(false);
+  const [newCatName, setNewCatName] = useState('');
   const [rule, setRule] = useState<PresetId>('block-work');
   const [customRules, setCustomRules] = useState<
     Record<string, EnforcementDecision>
   >({});
+  const [enforcement, setEnforcement] = useState<'kill' | 'warn'>('kill');
+  const [warnSecs, setWarnSecs] = useState('30');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -1090,40 +1137,61 @@ function AddAppModal({
     return () => document.removeEventListener('keydown', h);
   }, [onClose]);
 
-  const canSubmit = displayName.trim().length > 0;
+  const filteredApps = appSearch.trim()
+    ? apps.filter((a) =>
+        a.displayName.toLowerCase().includes(appSearch.trim().toLowerCase()),
+      )
+    : apps;
+
+  const canSubmit = selectedApp != null || manualPath != null;
+  const isBlocking = rule !== 'always-allow';
+
+  const browseInFinder = async () => {
+    try {
+      const picked = await openFileDialog({
+        multiple: false,
+        directory: false,
+        title: 'Choose an app',
+        defaultPath: '/Applications',
+        filters: [{ name: 'Application', extensions: ['app'] }],
+      });
+      if (typeof picked === 'string' && picked.length > 0) {
+        setManualPath(picked);
+        const base = picked.split('/').pop() ?? picked;
+        setManualName(base.replace(/\.app$/i, ''));
+        setSelectedApp(null);
+      }
+    } catch {
+      // ignore
+    }
+  };
 
   const submit = async () => {
     if (!canSubmit || busy) return;
     setBusy(true);
     try {
+      const resolvedCategory =
+        categoryName === '__new__'
+          ? newCatName.trim() || null
+          : categoryName || null;
+      const displayName = selectedApp?.displayName ?? manualName.trim();
+      const executableName =
+        selectedApp?.executableName ?? (manualName.trim() || null);
+      const executablePath = selectedApp?.executablePath ?? manualPath;
+      const appPath = selectedApp?.appPath ?? manualPath;
       await onCreate({
-        displayName: displayName.trim(),
-        executableName: executableName.trim() || null,
-        categoryNames: categoryName ? [categoryName] : [],
+        displayName,
+        executableName,
+        executablePath,
+        appPath,
+        categoryName: resolvedCategory,
         rule,
         customRules,
       });
       onClose();
-    } catch (err) {
+    } catch {
       setBusy(false);
     }
-  };
-
-  const RULES: { id: PresetId; label: string; hint: string }[] = [
-    { id: 'always-allow', label: 'Always allow', hint: 'Never blocked.' },
-    { id: 'block-work', label: 'Block for work', hint: 'Blocked during Work and Deep Work.' },
-    { id: 'always-block', label: 'Always block', hint: 'Blocked in every profile.' },
-    { id: 'custom', label: 'Custom', hint: 'Set per-profile below.' },
-  ];
-
-  const fLabel: CSSProperties = {
-    display: 'block',
-    fontSize: 10.5,
-    color: 'var(--muted)',
-    fontFamily: 'var(--font-mono)',
-    textTransform: 'uppercase',
-    letterSpacing: '0.1em',
-    marginBottom: 7,
   };
 
   return (
@@ -1186,87 +1254,297 @@ function AddAppModal({
           flexDirection: 'column',
           gap: 18,
         }}>
+          {/* picker */}
           <div>
-            <label style={fLabel}>App name</label>
-            <input
-              autoFocus
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="e.g. Slack"
-              style={{
-                width: '100%',
-                padding: '9px 11px',
+            <label style={fLabelStyle}>Select app</label>
+            <div style={{
+              border: '1px solid var(--line)',
+              borderRadius: 8,
+              overflow: 'hidden',
+              background: 'var(--bg)',
+            }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                borderBottom: '1px solid var(--line)',
                 background: 'var(--bg)',
-                border: '1px solid var(--line)',
-                borderRadius: 6,
-                color: 'var(--ink)',
-                fontSize: 13,
-                outline: 'none',
-                boxSizing: 'border-box',
-              }}
-            />
+              }}>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '8px 11px',
+                  flex: 1,
+                }}>
+                  <Icons.search size={13} />
+                  <input
+                    autoFocus
+                    value={appSearch}
+                    onChange={(e) => setAppSearch(e.target.value)}
+                    placeholder="Search apps…"
+                    style={{
+                      flex: 1,
+                      background: 'transparent',
+                      border: 'none',
+                      outline: 'none',
+                      color: 'var(--ink)',
+                      fontSize: 12.5,
+                      fontFamily: 'var(--font-sans)',
+                    }}
+                  />
+                </div>
+                <div style={{
+                  width: 1,
+                  height: 20,
+                  background: 'var(--line)',
+                  flexShrink: 0,
+                }} />
+                <button
+                  type="button"
+                  title="Browse in Finder to locate an app"
+                  onClick={browseInFinder}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: '0 13px',
+                    minHeight: 36,
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'var(--muted)',
+                    cursor: 'pointer',
+                    flexShrink: 0,
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.color = 'var(--ink)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.color = 'var(--muted)';
+                  }}
+                >
+                  <Icons.folder size={15} />
+                </button>
+              </div>
+              <div style={{ maxHeight: 200, overflow: 'auto' }}>
+                {manualPath && (
+                  <div
+                    onClick={() => setSelectedApp(null)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      padding: '9px 12px',
+                      borderBottom: '1px solid var(--line)',
+                      background: 'var(--accent-soft)',
+                    }}
+                  >
+                    <span style={{
+                      width: 22,
+                      height: 22,
+                      borderRadius: 4,
+                      background: 'color-mix(in oklch, var(--ink) 8%, transparent)',
+                      color: 'var(--muted)',
+                      display: 'inline-grid',
+                      placeItems: 'center',
+                      fontSize: 11,
+                      fontFamily: 'var(--font-mono)',
+                      flexShrink: 0,
+                    }}>
+                      ?
+                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        fontSize: 13,
+                        color: 'var(--accent-ink)',
+                      }}>
+                        {manualName || 'Custom path'}
+                      </div>
+                      <div style={{
+                        fontSize: 10.5,
+                        color: 'var(--muted)',
+                        fontFamily: 'var(--font-mono)',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}>
+                        {manualPath}
+                      </div>
+                    </div>
+                    <Icons.check size={14} />
+                  </div>
+                )}
+                {filteredApps.length === 0 && !manualPath && (
+                  <div style={{
+                    padding: 16,
+                    fontSize: 12.5,
+                    color: 'var(--muted)',
+                    textAlign: 'center',
+                  }}>
+                    No apps found.
+                  </div>
+                )}
+                {filteredApps.map((a, i) => {
+                  const isSel = selectedApp?.appKey === a.appKey;
+                  return (
+                    <div
+                      key={a.appKey}
+                      onClick={() => {
+                        setSelectedApp(a);
+                        setManualPath(null);
+                      }}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        padding: '9px 12px',
+                        borderBottom:
+                          i < filteredApps.length - 1
+                            ? '1px solid var(--line)'
+                            : 'none',
+                        cursor: 'pointer',
+                        background: isSel ? 'var(--accent-soft)' : 'transparent',
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!isSel)
+                          e.currentTarget.style.background =
+                            'color-mix(in oklch, var(--ink) 5%, transparent)';
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!isSel) e.currentTarget.style.background = 'transparent';
+                      }}
+                    >
+                      <span style={{
+                        width: 22,
+                        height: 22,
+                        borderRadius: 4,
+                        background:
+                          'color-mix(in oklch, var(--ink) 8%, transparent)',
+                        color: 'var(--muted)',
+                        display: 'inline-grid',
+                        placeItems: 'center',
+                        fontSize: 11,
+                        fontFamily: 'var(--font-mono)',
+                        flexShrink: 0,
+                      }}>
+                        {(a.displayName || a.appKey).charAt(0).toUpperCase()}
+                      </span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{
+                          fontSize: 13,
+                          color: isSel ? 'var(--accent-ink)' : 'var(--ink)',
+                        }}>
+                          {a.displayName}
+                        </div>
+                        <div style={{
+                          fontSize: 10.5,
+                          color: 'var(--muted)',
+                          fontFamily: 'var(--font-mono)',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}>
+                          {a.effectiveCategory ?? 'Uncategorized'}
+                        </div>
+                      </div>
+                      {a.lastSeenRunningAt &&
+                        Date.now() - a.lastSeenRunningAt < 60_000 && (
+                          <span style={{
+                            width: 6,
+                            height: 6,
+                            borderRadius: '50%',
+                            background: 'var(--accent)',
+                            flexShrink: 0,
+                          }} />
+                        )}
+                      {isSel && <Icons.check size={14} />}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <div style={{
+              marginTop: 6,
+              fontSize: 11,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+            }}>
+              Don't see it? Open the app first so it appears here, or click
+              the folder to browse in Finder.
+            </div>
           </div>
 
+          {/* category */}
           <div>
-            <label style={fLabel}>Executable name (optional)</label>
-            <input
-              value={executableName}
-              onChange={(e) => setExecutableName(e.target.value)}
-              placeholder="e.g. Slack.app (helps with detection)"
-              style={{
-                width: '100%',
-                padding: '9px 11px',
-                background: 'var(--bg)',
-                border: '1px solid var(--line)',
-                borderRadius: 6,
-                color: 'var(--ink)',
-                fontSize: 13,
-                fontFamily: 'var(--font-mono)',
-                outline: 'none',
-                boxSizing: 'border-box',
-              }}
-            />
+            <label style={fLabelStyle}>Category</label>
+            {newCat ? (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input
+                  autoFocus
+                  value={newCatName}
+                  onChange={(e) => setNewCatName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newCatName.trim()) {
+                      setCategoryName('__new__');
+                      setNewCat(false);
+                    }
+                    if (e.key === 'Escape') setNewCat(false);
+                  }}
+                  placeholder="New category name…"
+                  style={{
+                    flex: 1,
+                    padding: '9px 11px',
+                    background: 'var(--bg)',
+                    border: '1px solid var(--accent)',
+                    borderRadius: 6,
+                    color: 'var(--ink)',
+                    fontSize: 13,
+                    outline: 'none',
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    if (newCatName.trim()) {
+                      setCategoryName('__new__');
+                      setNewCat(false);
+                    }
+                  }}
+                  style={btnPrimaryStyle}
+                >
+                  Create
+                </button>
+                <button onClick={() => setNewCat(false)} style={btnGhostStyle}>
+                  ✕
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <StyledSelect
+                  value={categoryName}
+                  onChange={setCategoryName}
+                  options={[
+                    ...categories.map((c) => ({ value: c.name, label: c.name })),
+                    ...(categoryName === '__new__'
+                      ? [{ value: '__new__', label: newCatName + ' (new)' }]
+                      : []),
+                  ]}
+                />
+                <button
+                  onClick={() => setNewCat(true)}
+                  style={{ ...btnGhostStyle, whiteSpace: 'nowrap' }}
+                >
+                  <Icons.plus size={13} /> New
+                </button>
+              </div>
+            )}
           </div>
 
+          {/* rule */}
           <div>
-            <label style={fLabel}>Category</label>
-            <select
-              value={categoryName}
-              onChange={(e) => setCategoryName(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '9px 11px',
-                background: 'var(--bg)',
-                border: '1px solid var(--line)',
-                borderRadius: 6,
-                color: 'var(--ink)',
-                fontSize: 13,
-                outline: 'none',
-                boxSizing: 'border-box',
-              }}
-            >
-              <option value="">Uncategorized</option>
-              {categories.map((c) => (
-                <option key={c.name} value={c.name}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label style={fLabel}>Rule</label>
+            <label style={fLabelStyle}>Rule</label>
             <div style={{ display: 'flex', gap: 6 }}>
-              {RULES.map((r) => {
+              {ADD_RULES.map((r) => {
                 const isActive = rule === r.id;
-                const color =
-                  r.id === 'always-allow'
-                    ? 'var(--ok)'
-                    : r.id === 'block-work'
-                    ? 'var(--accent)'
-                    : r.id === 'always-block'
-                    ? 'var(--danger)'
-                    : 'var(--muted)';
+                const color = rulePresetColor(r.id);
                 return (
                   <button
                     key={r.id}
@@ -1286,20 +1564,30 @@ function AddAppModal({
                       color: isActive ? color : 'var(--muted)',
                       fontSize: 12.5,
                       fontFamily: 'var(--font-sans)',
-                      fontWeight: isActive ? 500 : 400,
                       cursor: 'pointer',
                     }}
                   >
-                    {r.label}
+                    <div style={{ fontWeight: isActive ? 500 : 400 }}>
+                      {r.label}
+                    </div>
+                    <div style={{
+                      fontSize: 10.5,
+                      color: 'var(--muted)',
+                      marginTop: 3,
+                      fontFamily: 'var(--font-mono)',
+                    }}>
+                      {r.hint}
+                    </div>
                   </button>
                 );
               })}
             </div>
           </div>
 
+          {/* custom matrix */}
           {rule === 'custom' && (
             <div>
-              <label style={fLabel}>Per-profile rules</label>
+              <label style={fLabelStyle}>Per-profile rules</label>
               <div style={{
                 border: '1px solid var(--accent)',
                 borderRadius: 8,
@@ -1307,12 +1595,6 @@ function AddAppModal({
                 overflow: 'hidden',
               }}>
                 {profiles.map((p, i) => {
-                  const blocked =
-                    p.name === 'emergency' &&
-                    categoryName != null &&
-                    emergencyBlockedCategories.some(
-                      (c) => c.toLowerCase() === categoryName.toLowerCase(),
-                    );
                   const v = customRules[p.name] ?? 'allow';
                   return (
                     <div
@@ -1357,18 +1639,15 @@ function AddAppModal({
                         {(['allow', 'block'] as EnforcementDecision[]).map(
                           (d) => {
                             const sel = v === d;
-                            const disabled = blocked && d !== 'block';
                             return (
                               <button
                                 key={d}
-                                disabled={disabled}
-                                onClick={() => {
-                                  if (disabled) return;
+                                onClick={() =>
                                   setCustomRules((prev) => ({
                                     ...prev,
                                     [p.name]: d,
-                                  }));
-                                }}
+                                  }))
+                                }
                                 style={{
                                   padding: '6px 12px',
                                   fontSize: 11.5,
@@ -1387,8 +1666,7 @@ function AddAppModal({
                                     d === 'block'
                                       ? '1px solid var(--line)'
                                       : 'none',
-                                  cursor: disabled ? 'not-allowed' : 'pointer',
-                                  opacity: disabled ? 0.4 : 1,
+                                  cursor: 'pointer',
                                   fontFamily: 'var(--font-sans)',
                                 }}
                               >
@@ -1404,6 +1682,110 @@ function AddAppModal({
               </div>
             </div>
           )}
+
+          {/* enforcement */}
+          {isBlocking && rule !== 'custom' && (
+            <div style={{
+              padding: '13px 14px',
+              border: '1px solid var(--line)',
+              borderRadius: 8,
+              background: 'var(--bg)',
+            }}>
+              <label style={{ ...fLabelStyle, marginBottom: 10 }}>
+                When blocked — enforcement
+              </label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {(
+                  [
+                    {
+                      id: 'kill',
+                      label: 'Close immediately',
+                      hint: 'Force-quit as soon as the app or tab is detected.',
+                    },
+                    {
+                      id: 'warn',
+                      label: 'Warn, then close',
+                      hint: 'Show a countdown — user can save work before it closes.',
+                    },
+                  ] as const
+                ).map((opt) => (
+                  <label
+                    key={opt.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 9,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="add-app-enforcement"
+                      value={opt.id}
+                      checked={enforcement === opt.id}
+                      onChange={() => setEnforcement(opt.id)}
+                      style={{
+                        marginTop: 3,
+                        accentColor: 'var(--accent)',
+                        flexShrink: 0,
+                      }}
+                    />
+                    <div>
+                      <div style={{
+                        fontSize: 13,
+                        color: 'var(--ink)',
+                        fontWeight: enforcement === opt.id ? 500 : 400,
+                      }}>
+                        {opt.label}
+                      </div>
+                      <div style={{
+                        fontSize: 11.5,
+                        color: 'var(--muted)',
+                        marginTop: 1,
+                      }}>
+                        {opt.hint}
+                      </div>
+                    </div>
+                  </label>
+                ))}
+                {enforcement === 'warn' && (
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    marginTop: 2,
+                    paddingLeft: 22,
+                  }}>
+                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                      Warn for
+                    </span>
+                    <input
+                      type="number"
+                      min={5}
+                      max={300}
+                      value={warnSecs}
+                      onChange={(e) => setWarnSecs(e.target.value)}
+                      style={{
+                        width: 60,
+                        padding: '5px 8px',
+                        textAlign: 'center',
+                        background: 'var(--bg-raise)',
+                        border: '1px solid var(--line)',
+                        borderRadius: 5,
+                        color: 'var(--ink)',
+                        fontSize: 13,
+                        fontFamily: 'var(--font-mono)',
+                        outline: 'none',
+                      }}
+                    />
+                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                      seconds before closing
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* footer */}
@@ -1413,35 +1795,16 @@ function AddAppModal({
           display: 'flex',
           justifyContent: 'flex-end',
           gap: 8,
+          alignItems: 'center',
         }}>
-          <button
-            onClick={onClose}
-            style={{
-              padding: '8px 14px',
-              background: 'transparent',
-              color: 'var(--ink)',
-              border: '1px solid var(--line)',
-              borderRadius: 6,
-              fontSize: 12.5,
-              cursor: 'pointer',
-              fontFamily: 'var(--font-sans)',
-            }}
-          >
-            Cancel
-          </button>
+          <button onClick={onClose} style={btnGhostStyle}>Cancel</button>
           <button
             disabled={!canSubmit || busy}
             onClick={submit}
             style={{
-              padding: '8px 14px',
-              background: canSubmit ? 'var(--ink)' : 'var(--line)',
-              color: canSubmit ? 'var(--bg)' : 'var(--muted)',
-              border: 'none',
-              borderRadius: 6,
-              fontSize: 12.5,
-              fontWeight: 500,
+              ...btnPrimaryStyle,
+              opacity: canSubmit ? 1 : 0.4,
               cursor: canSubmit ? 'pointer' : 'not-allowed',
-              fontFamily: 'var(--font-sans)',
             }}
           >
             {busy ? 'Adding…' : 'Add app'}
@@ -1452,11 +1815,38 @@ function AddAppModal({
   );
 }
 
-function AddBrowserTargetModal({ categories, onClose, onCreate }: AddTargetModalProps) {
-  const [displayName, setDisplayName] = useState('');
-  const [keyword, setKeyword] = useState('');
-  const [categoryName, setCategoryName] = useState('');
-  const [action, setAction] = useState<ClassificationAction>('unclassified');
+interface AddBrowserTargetModalProps {
+  categories: AppCategory[];
+  profiles: EnforcementProfile[];
+  onClose: () => void;
+  onCreate: (target: {
+    displayName: string;
+    keyword: string;
+    categoryName: string | null;
+    classificationAction: ClassificationAction;
+    rule: PresetId;
+    customRules: Record<string, EnforcementDecision>;
+  }) => Promise<void>;
+}
+
+function AddBrowserTargetModal({
+  categories,
+  profiles,
+  onClose,
+  onCreate,
+}: AddBrowserTargetModalProps) {
+  const [tabPattern, setTabPattern] = useState('');
+  const [categoryName, setCategoryName] = useState<string>(
+    categories.find((c) => !c.builtin)?.name ?? categories[0]?.name ?? '',
+  );
+  const [newCat, setNewCat] = useState(false);
+  const [newCatName, setNewCatName] = useState('');
+  const [rule, setRule] = useState<PresetId>('block-work');
+  const [customRules, setCustomRules] = useState<
+    Record<string, EnforcementDecision>
+  >({});
+  const [enforcement, setEnforcement] = useState<'kill' | 'warn'>('kill');
+  const [warnSecs, setWarnSecs] = useState('30');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -1467,33 +1857,37 @@ function AddBrowserTargetModal({ categories, onClose, onCreate }: AddTargetModal
     return () => document.removeEventListener('keydown', h);
   }, [onClose]);
 
+  const canSubmit = tabPattern.trim().length > 0;
+  const isBlocking = rule !== 'always-allow';
+
   const submit = async () => {
-    if (busy || !displayName.trim() || !keyword.trim()) return;
+    if (!canSubmit || busy) return;
     setBusy(true);
     try {
+      const resolvedCategory =
+        categoryName === '__new__'
+          ? newCatName.trim() || null
+          : categoryName || null;
+      const action: ClassificationAction =
+        rule === 'always-allow'
+          ? 'never_ban'
+          : rule === 'always-block'
+          ? 'always_ban'
+          : rule === 'block-work'
+          ? 'ban_during_work'
+          : 'unclassified';
       await onCreate({
-        displayName: displayName.trim(),
-        keyword: keyword.trim(),
-        categoryName: categoryName === '' ? null : categoryName,
+        displayName: tabPattern.trim(),
+        keyword: tabPattern.trim(),
+        categoryName: resolvedCategory,
         classificationAction: action,
+        rule,
+        customRules,
       });
       onClose();
-    } finally {
+    } catch {
       setBusy(false);
     }
-  };
-
-  const inp: CSSProperties = {
-    width: '100%',
-    boxSizing: 'border-box',
-    background: 'var(--bg)',
-    border: '1px solid var(--line)',
-    borderRadius: 5,
-    padding: '7px 9px',
-    fontSize: 13,
-    color: 'var(--ink)',
-    outline: 'none',
-    fontFamily: 'var(--font-sans)',
   };
 
   return (
@@ -1502,9 +1896,8 @@ function AddBrowserTargetModal({ categories, onClose, onCreate }: AddTargetModal
       style={{
         position: 'fixed',
         inset: 0,
-        zIndex: 80,
-        background: 'rgba(10,9,8,0.55)',
-        backdropFilter: 'blur(3px)',
+        zIndex: 70,
+        background: 'rgba(0,0,0,0.55)',
         display: 'grid',
         placeItems: 'center',
       }}
@@ -1512,117 +1905,411 @@ function AddBrowserTargetModal({ categories, onClose, onCreate }: AddTargetModal
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: 460,
+          width: 480,
+          maxHeight: '88vh',
           background: 'var(--bg-raise)',
           border: '1px solid var(--line)',
           borderRadius: 12,
-          padding: '22px 24px',
-          boxShadow: '0 24px 60px rgba(0,0,0,0.5)',
+          boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
         }}
       >
         <div style={{
-          fontFamily: 'var(--font-display)',
-          fontSize: 20,
-          color: 'var(--ink)',
-          letterSpacing: '-0.015em',
-          marginBottom: 14,
+          padding: '20px 24px 16px',
+          borderBottom: '1px solid var(--line)',
         }}>
-          Add browser target
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div>
-            <div style={{ ...labelStyle, marginBottom: 6 }}>Display name</div>
-            <input
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="e.g. Hacker News"
-              style={inp}
-            />
+          <div style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10.5,
+            textTransform: 'uppercase',
+            letterSpacing: '0.12em',
+            color: 'var(--muted)',
+            marginBottom: 6,
+          }}>
+            Browser targets
           </div>
-          <div>
-            <div style={{ ...labelStyle, marginBottom: 6 }}>Keyword</div>
-            <input
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
-              placeholder="match against window title"
-              style={{ ...inp, fontFamily: 'var(--font-mono)' }}
-            />
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <div>
-              <div style={{ ...labelStyle, marginBottom: 6 }}>Category</div>
-              <select
-                value={categoryName}
-                onChange={(e) => setCategoryName(e.target.value)}
-                style={inp}
-              >
-                <option value="">Uncategorized</option>
-                {categories.map((c) => (
-                  <option key={c.name} value={c.name}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <div style={{ ...labelStyle, marginBottom: 6 }}>Classification</div>
-              <select
-                value={action}
-                onChange={(e) => setAction(e.target.value as ClassificationAction)}
-                style={inp}
-              >
-                {CLASSIFICATION_OPTIONS.map((o) => (
-                  <option key={o.v} value={o.v}>
-                    {o.l}
-                  </option>
-                ))}
-              </select>
-            </div>
+          <div style={{
+            fontFamily: 'var(--font-display)',
+            fontSize: 22,
+            color: 'var(--ink)',
+            letterSpacing: '-0.015em',
+          }}>
+            Add website
           </div>
         </div>
+
         <div style={{
-          marginTop: 18,
+          flex: 1,
+          overflow: 'auto',
+          padding: '18px 24px',
           display: 'flex',
-          gap: 8,
-          justifyContent: 'flex-end',
+          flexDirection: 'column',
+          gap: 18,
         }}>
-          <button
-            onClick={onClose}
-            style={{
-              padding: '8px 14px',
-              background: 'transparent',
+          <div>
+            <label style={fLabelStyle}>Tab title pattern</label>
+            <input
+              autoFocus
+              value={tabPattern}
+              onChange={(e) => setTabPattern(e.target.value)}
+              placeholder="e.g. YouTube, Twitter, Reddit"
+              style={{
+                width: '100%',
+                padding: '9px 11px',
+                background: 'var(--bg)',
+                border: '1px solid var(--line)',
+                borderRadius: 6,
+                color: 'var(--ink)',
+                fontSize: 13,
+                fontFamily: 'var(--font-mono)',
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
+            <div style={{
+              marginTop: 6,
+              fontSize: 11,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+              lineHeight: 1.55,
+            }}>
+              Matched against the browser tab title, not the URL — e.g.
+              &quot;YouTube&quot; catches any tab whose title contains
+              &quot;YouTube&quot;. Case-insensitive.
+            </div>
+          </div>
+
+          <div>
+            <label style={fLabelStyle}>Category</label>
+            {newCat ? (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input
+                  autoFocus
+                  value={newCatName}
+                  onChange={(e) => setNewCatName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newCatName.trim()) {
+                      setCategoryName('__new__');
+                      setNewCat(false);
+                    }
+                    if (e.key === 'Escape') setNewCat(false);
+                  }}
+                  placeholder="New category name…"
+                  style={{
+                    flex: 1,
+                    padding: '9px 11px',
+                    background: 'var(--bg)',
+                    border: '1px solid var(--accent)',
+                    borderRadius: 6,
+                    color: 'var(--ink)',
+                    fontSize: 13,
+                    outline: 'none',
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    if (newCatName.trim()) {
+                      setCategoryName('__new__');
+                      setNewCat(false);
+                    }
+                  }}
+                  style={btnPrimaryStyle}
+                >
+                  Create
+                </button>
+                <button onClick={() => setNewCat(false)} style={btnGhostStyle}>
+                  ✕
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <StyledSelect
+                  value={categoryName}
+                  onChange={setCategoryName}
+                  options={[
+                    ...categories.map((c) => ({ value: c.name, label: c.name })),
+                    ...(categoryName === '__new__'
+                      ? [{ value: '__new__', label: newCatName + ' (new)' }]
+                      : []),
+                  ]}
+                />
+                <button
+                  onClick={() => setNewCat(true)}
+                  style={{ ...btnGhostStyle, whiteSpace: 'nowrap' }}
+                >
+                  <Icons.plus size={13} /> New
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label style={fLabelStyle}>Rule</label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {ADD_RULES.map((r) => {
+                const isActive = rule === r.id;
+                const color = rulePresetColor(r.id);
+                return (
+                  <button
+                    key={r.id}
+                    type="button"
+                    title={r.hint}
+                    onClick={() => setRule(r.id)}
+                    style={{
+                      flex: 1,
+                      padding: '9px 6px',
+                      borderRadius: 7,
+                      textAlign: 'center',
+                      border:
+                        '1px solid ' + (isActive ? color : 'var(--line)'),
+                      background: isActive
+                        ? `color-mix(in oklch, ${color} 14%, transparent)`
+                        : 'var(--bg)',
+                      color: isActive ? color : 'var(--muted)',
+                      fontSize: 12.5,
+                      fontFamily: 'var(--font-sans)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <div style={{ fontWeight: isActive ? 500 : 400 }}>
+                      {r.label}
+                    </div>
+                    <div style={{
+                      fontSize: 10.5,
+                      color: 'var(--muted)',
+                      marginTop: 3,
+                      fontFamily: 'var(--font-mono)',
+                    }}>
+                      {r.hint}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {rule === 'custom' && (
+            <div>
+              <label style={fLabelStyle}>Per-profile rules</label>
+              <div style={{
+                border: '1px solid var(--accent)',
+                borderRadius: 8,
+                background: 'var(--bg)',
+                overflow: 'hidden',
+              }}>
+                {profiles.map((p, i) => {
+                  const v = customRules[p.name] ?? 'allow';
+                  return (
+                    <div
+                      key={p.name}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        padding: '11px 13px',
+                        borderBottom:
+                          i < profiles.length - 1
+                            ? '1px solid var(--line)'
+                            : 'none',
+                      }}
+                    >
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{
+                          fontSize: 13,
+                          color: 'var(--ink)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 7,
+                        }}>
+                          {PROFILE_DISPLAY[p.name] ?? p.name}
+                          {p.parentName && (
+                            <span style={{
+                              fontSize: 10.5,
+                              color: 'var(--faint)',
+                              fontFamily: 'var(--font-mono)',
+                            }}>
+                              ← {PROFILE_DISPLAY[p.parentName] ?? p.parentName}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div style={{
+                        display: 'inline-flex',
+                        border: '1px solid var(--line)',
+                        borderRadius: 6,
+                        overflow: 'hidden',
+                        background: 'var(--bg)',
+                      }}>
+                        {(['allow', 'block'] as EnforcementDecision[]).map(
+                          (d) => {
+                            const sel = v === d;
+                            return (
+                              <button
+                                key={d}
+                                onClick={() =>
+                                  setCustomRules((prev) => ({
+                                    ...prev,
+                                    [p.name]: d,
+                                  }))
+                                }
+                                style={{
+                                  padding: '6px 12px',
+                                  fontSize: 11.5,
+                                  background: sel
+                                    ? d === 'allow'
+                                      ? 'var(--accent-soft)'
+                                      : 'color-mix(in oklch, var(--danger) 16%, transparent)'
+                                    : 'transparent',
+                                  color: sel
+                                    ? d === 'allow'
+                                      ? 'var(--accent-ink)'
+                                      : 'var(--danger)'
+                                    : 'var(--muted)',
+                                  border: 'none',
+                                  borderLeft:
+                                    d === 'block'
+                                      ? '1px solid var(--line)'
+                                      : 'none',
+                                  cursor: 'pointer',
+                                  fontFamily: 'var(--font-sans)',
+                                }}
+                              >
+                                {d === 'allow' ? 'Allow' : 'Block'}
+                              </button>
+                            );
+                          },
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {isBlocking && rule !== 'custom' && (
+            <div style={{
+              padding: '13px 14px',
               border: '1px solid var(--line)',
-              borderRadius: 5,
-              color: 'var(--ink)',
-              fontSize: 13,
-              cursor: 'pointer',
-            }}
-          >
-            Cancel
-          </button>
+              borderRadius: 8,
+              background: 'var(--bg)',
+            }}>
+              <label style={{ ...fLabelStyle, marginBottom: 10 }}>
+                When blocked — enforcement
+              </label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {(
+                  [
+                    {
+                      id: 'kill',
+                      label: 'Close immediately',
+                      hint: 'Force-quit as soon as the app or tab is detected.',
+                    },
+                    {
+                      id: 'warn',
+                      label: 'Warn, then close',
+                      hint: 'Show a countdown — user can save work before it closes.',
+                    },
+                  ] as const
+                ).map((opt) => (
+                  <label
+                    key={opt.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 9,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="add-site-enforcement"
+                      value={opt.id}
+                      checked={enforcement === opt.id}
+                      onChange={() => setEnforcement(opt.id)}
+                      style={{
+                        marginTop: 3,
+                        accentColor: 'var(--accent)',
+                        flexShrink: 0,
+                      }}
+                    />
+                    <div>
+                      <div style={{
+                        fontSize: 13,
+                        color: 'var(--ink)',
+                        fontWeight: enforcement === opt.id ? 500 : 400,
+                      }}>
+                        {opt.label}
+                      </div>
+                      <div style={{
+                        fontSize: 11.5,
+                        color: 'var(--muted)',
+                        marginTop: 1,
+                      }}>
+                        {opt.hint}
+                      </div>
+                    </div>
+                  </label>
+                ))}
+                {enforcement === 'warn' && (
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    marginTop: 2,
+                    paddingLeft: 22,
+                  }}>
+                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                      Warn for
+                    </span>
+                    <input
+                      type="number"
+                      min={5}
+                      max={300}
+                      value={warnSecs}
+                      onChange={(e) => setWarnSecs(e.target.value)}
+                      style={{
+                        width: 60,
+                        padding: '5px 8px',
+                        textAlign: 'center',
+                        background: 'var(--bg-raise)',
+                        border: '1px solid var(--line)',
+                        borderRadius: 5,
+                        color: 'var(--ink)',
+                        fontSize: 13,
+                        fontFamily: 'var(--font-mono)',
+                        outline: 'none',
+                      }}
+                    />
+                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                      seconds before closing
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div style={{
+          padding: '14px 24px',
+          borderTop: '1px solid var(--line)',
+          display: 'flex',
+          justifyContent: 'flex-end',
+          gap: 8,
+        }}>
+          <button onClick={onClose} style={btnGhostStyle}>Cancel</button>
           <button
+            disabled={!canSubmit || busy}
             onClick={submit}
-            disabled={busy || !displayName.trim() || !keyword.trim()}
             style={{
-              padding: '8px 14px',
-              background:
-                busy || !displayName.trim() || !keyword.trim()
-                  ? 'var(--line)'
-                  : 'var(--accent)',
-              color:
-                busy || !displayName.trim() || !keyword.trim()
-                  ? 'var(--muted)'
-                  : 'oklch(0.18 0.04 60)',
-              border: '1px solid var(--accent)',
-              borderRadius: 5,
-              fontSize: 13,
-              cursor:
-                busy || !displayName.trim() || !keyword.trim()
-                  ? 'not-allowed'
-                  : 'pointer',
+              ...btnPrimaryStyle,
+              opacity: canSubmit ? 1 : 0.4,
+              cursor: canSubmit ? 'pointer' : 'not-allowed',
             }}
           >
-            Add target
+            {busy ? 'Adding…' : 'Add site'}
           </button>
         </div>
       </div>
@@ -1853,21 +2540,6 @@ export function AppsScreen() {
   };
 
   const isEmergency = activeProfile === 'emergency';
-
-  const createBrowserTarget = async (target: {
-    displayName: string;
-    keyword: string;
-    categoryName: string | null;
-    classificationAction: ClassificationAction;
-  }) => {
-    try {
-      await api.createKnownBrowserTarget(target);
-      refresh();
-    } catch (err) {
-      setError(String(err));
-      throw err;
-    }
-  };
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -2408,21 +3080,59 @@ export function AppsScreen() {
       {adding && tab === 'browser_targets' && (
         <AddBrowserTargetModal
           categories={categories}
+          profiles={profiles}
           onClose={() => setAdding(false)}
-          onCreate={createBrowserTarget}
+          onCreate={async ({
+            displayName,
+            keyword,
+            categoryName,
+            classificationAction,
+            rule,
+            customRules,
+          }) => {
+            if (categoryName) {
+              try {
+                await api.upsertAppCategory({ name: categoryName });
+              } catch {
+                // ignore — likely already exists
+              }
+            }
+            const created = await api.createKnownBrowserTarget({
+              displayName,
+              keyword,
+              categoryName,
+              classificationAction,
+            });
+            if (rule === 'custom') {
+              for (const profile of profileNames) {
+                const v = customRules[profile];
+                if (v) {
+                  await api.setEnforcementProfileOverride({
+                    profileName: profile,
+                    subjectType: 'browser_target',
+                    subjectKey: created.targetKey,
+                    decision: v,
+                  });
+                }
+              }
+            }
+            refresh();
+          }}
         />
       )}
 
       {adding && tab === 'apps' && (
         <AddAppModal
           categories={categories}
+          apps={apps}
           profiles={profiles}
-          emergencyBlockedCategories={emergencyBlockedCategories}
           onClose={() => setAdding(false)}
           onCreate={async ({
             displayName,
             executableName,
-            categoryNames,
+            executablePath,
+            appPath,
+            categoryName,
             rule,
             customRules,
           }) => {
@@ -2434,10 +3144,19 @@ export function AppsScreen() {
                 : rule === 'block-work'
                 ? 'ban_during_work'
                 : 'unclassified';
+            if (categoryName) {
+              try {
+                await api.upsertAppCategory({ name: categoryName });
+              } catch {
+                // ignore — likely already exists
+              }
+            }
             const created = await api.createKnownApp({
               displayName,
               executableName: executableName ?? undefined,
-              categoryNames,
+              executablePath: executablePath ?? undefined,
+              appPath: appPath ?? undefined,
+              categoryNames: categoryName ? [categoryName] : [],
               classificationAction: action,
             });
             if (rule === 'custom') {
