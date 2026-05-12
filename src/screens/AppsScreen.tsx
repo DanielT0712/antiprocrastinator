@@ -2767,12 +2767,15 @@ export function AppsScreen() {
           justifyContent: 'space-between',
           flexWrap: 'wrap',
           gap: 14,
+          minWidth: 0,
         }}>
           <div style={{
             display: 'flex',
             alignItems: 'center',
             gap: 10,
             flexWrap: 'wrap',
+            minWidth: 0,
+            flex: '1 1 auto',
           }}>
             <div style={{
               fontFamily: 'var(--font-mono)',
@@ -2780,6 +2783,7 @@ export function AppsScreen() {
               textTransform: 'uppercase',
               letterSpacing: '0.12em',
               color: 'var(--muted)',
+              flexShrink: 0,
             }}>
               {/* User explicitly wants "Profiles" not "Active profile". Do not change back. */}
               Profiles
@@ -2796,6 +2800,11 @@ export function AppsScreen() {
             fontSize: 11.5,
             color: 'var(--muted)',
             fontFamily: 'var(--font-mono)',
+            flexShrink: 1,
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
           }}>
             Rules shown for{' '}
             <span style={{ color: 'var(--accent-ink)' }}>
