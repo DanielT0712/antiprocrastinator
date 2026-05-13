@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use chrono::{Datelike, Days, NaiveDate, TimeZone, Utc};
+use chrono::{Datelike, Days, Local, NaiveDate, TimeZone, Timelike};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
@@ -13,6 +13,7 @@ use crate::{
     analytics::{models::AnalyticsEvent, tracker},
     config::models::{TaskChunkClusteringMode, TaskGroupClusteringMode, UserPreferences},
     db::DatabaseState,
+    tasks::models::{RecurrenceKind, TaskKind},
 };
 
 use super::models::{
@@ -77,6 +78,7 @@ struct PlannerTask {
     title: String,
     group_id: Option<i64>,
     enforcement_profile: Option<String>,
+    kind: TaskKind,
     priority: i64,
     deadline: Option<i64>,
     estimated_minutes: i64,
@@ -86,6 +88,11 @@ struct PlannerTask {
     work_ratio: Option<i64>,
     rest_ratio: Option<i64>,
     protect_generated_blocks: bool,
+    fixed_window_start_minute: Option<i64>,
+    fixed_window_end_minute: Option<i64>,
+    recurrence_kind: RecurrenceKind,
+    recurrence_days_mask: i64,
+    recurrence_anchor_date: Option<i64>,
     required_share: f64,
     section_allocations: Vec<i64>,
 }
@@ -200,10 +207,7 @@ pub fn get_current_block(
     refresh_schedule_status(connection)
 }
 
-pub fn get_projected_finish(
-    connection: &Connection,
-    task_id: i64,
-) -> Result<Option<i64>, String> {
+pub fn get_projected_finish(connection: &Connection, task_id: i64) -> Result<Option<i64>, String> {
     connection
         .query_row(
             r#"
@@ -694,6 +698,13 @@ pub fn rebuild_schedule(
     rebuild_schedule_internal(connection, from, preferences, Some("rebuild_schedule"))
 }
 
+pub fn repair_generated_schedule(
+    connection: &Connection,
+    preferences: &UserPreferences,
+) -> Result<ScheduleRebuildResult, String> {
+    rebuild_schedule_internal(connection, timestamp_ms(), preferences, None)
+}
+
 fn rebuild_schedule_internal(
     connection: &Connection,
     from: i64,
@@ -702,17 +713,24 @@ fn rebuild_schedule_internal(
 ) -> Result<ScheduleRebuildResult, String> {
     let before = load_schedule_snapshot(connection, from, None)?;
     let template = get_weekly_template(connection)?.unwrap_or_default();
+    repair_fixed_task_windows_from_blocks(connection)?;
     let tasks = load_plannable_tasks(connection, from)?;
+    let flexible_tasks = tasks
+        .iter()
+        .filter(|task| task.kind == TaskKind::Flexible)
+        .cloned()
+        .collect::<Vec<_>>();
 
     if tasks.is_empty() {
         clear_generated_future_blocks(connection, from)?;
-        let fixed_blocks = generate_fixed_template_blocks(
+        let mut fixed_blocks = generate_fixed_template_blocks(
             connection,
             &template,
             from,
             end_of_day(date_from_timestamp(from)?)?,
         )?;
-        persist_generated_blocks(connection, &fixed_blocks)?;
+    normalize_generated_blocks(&mut fixed_blocks);
+    persist_generated_blocks(connection, &fixed_blocks)?;
         let pseudo_deadline = end_of_day(date_from_timestamp(from)?)?;
         return build_schedule_mutation_result(
             connection,
@@ -725,36 +743,77 @@ fn rebuild_schedule_internal(
             refresh_schedule_status(connection)?,
         );
     }
+    if flexible_tasks.is_empty() {
+        let horizon = end_of_day(date_from_timestamp(from)?)?;
+        clear_generated_future_blocks(connection, from)?;
+        let mut fixed_blocks = generate_fixed_template_blocks(connection, &template, from, horizon)?;
+        fixed_blocks.extend(generate_fixed_task_intervals(&tasks, from, horizon)?);
+        normalize_generated_blocks(&mut fixed_blocks);
+        persist_generated_blocks(connection, &fixed_blocks)?;
+        return build_schedule_mutation_result(
+            connection,
+            history_action,
+            from,
+            Some(horizon),
+            before,
+            vec![],
+            Some(horizon),
+            refresh_schedule_status(connection)?,
+        );
+    }
 
     let pseudo_deadline =
-        compute_pseudo_deadline(connection, &template, preferences, from, &tasks)?;
+        compute_pseudo_deadline(connection, &template, preferences, from, &flexible_tasks)?;
     let existing_immutables = load_preserved_intervals(connection, from, pseudo_deadline)?;
+    let active_work_intervals = load_active_work_intervals(connection, from, pseudo_deadline)?;
     let generated_fixed_intervals =
         generate_fixed_template_blocks(connection, &template, from, pseudo_deadline)?;
+    let fixed_task_intervals = generate_fixed_task_intervals(&tasks, from, pseudo_deadline)?;
+    let mut rest_source_intervals = Vec::new();
+    for interval in active_work_intervals {
+        rest_source_intervals.push(interval);
+    }
+    let boundary_rest_intervals = generate_rest_after_preserved_work(
+        &rest_source_intervals,
+        &[generated_fixed_intervals.clone(), fixed_task_intervals.clone()].concat(),
+        &tasks,
+        preferences,
+        pseudo_deadline,
+    );
     let immutable_intervals = merge_intervals(
-        [existing_immutables, generated_fixed_intervals.clone()].concat(),
+        [
+            existing_immutables,
+            generated_fixed_intervals.clone(),
+            fixed_task_intervals.clone(),
+            boundary_rest_intervals.clone(),
+        ]
+        .concat(),
         from,
         pseudo_deadline,
     );
     let windows = invert_intervals_to_windows(&immutable_intervals, from, pseudo_deadline);
 
-    let section_endpoints = build_section_endpoints(from, pseudo_deadline, &tasks);
+    let section_endpoints = build_section_endpoints(from, pseudo_deadline, &flexible_tasks);
     let sections =
         build_sections_from_windows(&windows, &section_endpoints, from, preferences, &template);
-    let mut warnings = detect_theoretical_overflow(&sections, &tasks, &section_endpoints, from);
+    let mut warnings =
+        detect_theoretical_overflow(&sections, &flexible_tasks, &section_endpoints, from);
     let mut planner_tasks = allocate_tasks_to_sections(
         &sections,
         section_endpoints.len() - 1,
-        tasks,
+        flexible_tasks,
         &section_endpoints,
         from,
         &mut warnings,
     );
 
     let mut generated_blocks = generated_fixed_intervals;
+    generated_blocks.extend(fixed_task_intervals);
+    generated_blocks.extend(boundary_rest_intervals);
     let packed_result =
         materialize_sections(&sections, &mut planner_tasks, preferences, &mut warnings)?;
     generated_blocks.extend(packed_result);
+    normalize_generated_blocks(&mut generated_blocks);
 
     clear_generated_future_blocks(connection, from)?;
     persist_generated_blocks(connection, &generated_blocks)?;
@@ -776,8 +835,7 @@ pub fn complete_current_block(
     schedule: &ScheduleState,
     preferences: &UserPreferences,
 ) -> Result<ScheduleActionResult, String> {
-    let task_id = current_or_paused_block(connection, schedule)?
-        .and_then(|block| block.task_id);
+    let task_id = current_or_paused_block(connection, schedule)?.and_then(|block| block.task_id);
     let result =
         finish_current_block_with_rest(connection, schedule, preferences, BlockStatus::Completed)?;
     if let Some(id) = task_id {
@@ -1971,11 +2029,13 @@ fn sync_overdue_work_block(
         return Ok(vec![]);
     }
 
-    let target_end = if continuing {
-        now
-    } else {
-        next_work_start.map_or(now, |start| min(now, start))
-    };
+    if !continuing {
+        let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+        runtime.last_emitted_block_id = None;
+        return Ok(vec![]);
+    }
+
+    let target_end = now;
     let delta = target_end.saturating_sub(block.end_time);
     if delta <= 0 {
         return Ok(vec![]);
@@ -2061,38 +2121,12 @@ fn current_overdue_prompt(
         return Ok(None);
     };
 
-    let overlapping_other = connection
-        .query_row(
-            r#"
-            SELECT 1
-            FROM time_blocks
-            WHERE id != ?1
-              AND start_time <= ?2
-              AND end_time > ?2
-              AND status IN ('scheduled', 'active')
-            LIMIT 1
-            "#,
-            params![block.id, timestamp_ms()],
-            |_| Ok(()),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-    if overlapping_other.is_some() {
-        return Ok(None);
-    }
-
     let runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
     if runtime.continuing_block_id == Some(block.id) {
         return Ok(None);
     }
 
     let next_work_start = find_next_work_start(connection, block.id, block.start_time)?;
-    if next_work_start
-        .map(|start| timestamp_ms() >= start)
-        .unwrap_or(false)
-    {
-        return Ok(None);
-    }
 
     Ok(Some(BlockDecisionPrompt {
         block,
@@ -2184,14 +2218,57 @@ fn tick_schedule(app: &AppHandle) -> Result<(), String> {
     let connection = database.connection()?;
     let overdue_work = current_or_overdue_work_block(&connection, &schedule)?;
     let warnings = if let Some(block) = &overdue_work {
-        sync_overdue_work_block(
-            &connection,
-            &schedule,
-            &preferences,
-            timestamp_ms(),
-            block.id,
-            false,
-        )?
+        let (already_prompted, continuing) = {
+            let runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+            (
+                runtime.prompted_block_id == Some(block.id),
+                runtime.continuing_block_id == Some(block.id),
+            )
+        };
+        if continuing {
+            sync_overdue_work_block(
+                &connection,
+                &schedule,
+                &preferences,
+                timestamp_ms(),
+                block.id,
+                false,
+            )?
+        } else if already_prompted {
+            let now = timestamp_ms();
+            connection
+                .execute(
+                    "UPDATE time_blocks SET status = 'completed', updated_at = ?1 WHERE id = ?2",
+                    params![now, block.id],
+                )
+                .map_err(|error| error.to_string())?;
+            record_schedule_event(
+                &connection,
+                "schedule.auto_completed_unanswered_block",
+                Some(block),
+                json!({ "plannedEnd": block.end_time }),
+            );
+            let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+            runtime.prompted_block_id = None;
+            runtime.last_emitted_block_id = None;
+            vec![]
+        } else {
+            if let Some(prompt) = current_overdue_prompt(&connection, &schedule)? {
+                let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
+                app.emit("block-finished-prompt", &prompt)
+                    .map_err(|error| error.to_string())?;
+                record_schedule_event(
+                    &connection,
+                    "schedule.block_finished_prompted",
+                    Some(&prompt.block),
+                    json!({
+                        "nextWorkStart": prompt.next_work_start
+                    }),
+                );
+                runtime.prompted_block_id = Some(prompt.block.id);
+            }
+            vec![]
+        }
     } else {
         vec![]
     };
@@ -2200,22 +2277,7 @@ fn tick_schedule(app: &AppHandle) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
 
-    if let Some(prompt) = current_overdue_prompt(&connection, &schedule)? {
-        let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
-        if runtime.prompted_block_id != Some(prompt.block.id) {
-            app.emit("block-finished-prompt", &prompt)
-                .map_err(|error| error.to_string())?;
-            record_schedule_event(
-                &connection,
-                "schedule.block_finished_prompted",
-                Some(&prompt.block),
-                json!({
-                    "nextWorkStart": prompt.next_work_start
-                }),
-            );
-            runtime.prompted_block_id = Some(prompt.block.id);
-        }
-    } else {
+    if overdue_work.is_none() {
         let mut runtime = schedule.runtime.lock().map_err(|error| error.to_string())?;
         runtime.prompted_block_id = None;
     }
@@ -2262,6 +2324,36 @@ fn refresh_schedule_status(connection: &Connection) -> Result<Option<TimeBlock>,
             params![now],
         )
         .map_err(|error| error.to_string())?;
+    let active_work = connection
+        .query_row(
+            r#"
+            SELECT id, title, block_type, start_time, end_time, task_id,
+                   status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
+            FROM time_blocks
+            WHERE status = 'active'
+              AND block_type = 'work'
+            ORDER BY start_time ASC, id ASC
+            LIMIT 1
+            "#,
+            [],
+            map_time_block,
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if let Some(block) = active_work {
+        connection
+            .execute(
+                r#"
+                UPDATE time_blocks
+                SET status = 'scheduled', updated_at = ?1
+                WHERE status = 'active'
+                  AND id != ?2
+                "#,
+                params![now, block.id],
+            )
+            .map_err(|error| error.to_string())?;
+        return get_block_by_id(connection, block.id);
+    }
 
     let current = connection
         .query_row(
@@ -2529,6 +2621,116 @@ fn load_preserved_intervals(
         .collect())
 }
 
+fn load_active_work_intervals(
+    connection: &Connection,
+    from: i64,
+    to: i64,
+) -> Result<Vec<TemplateInterval>, String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT id, title, block_type, start_time, end_time, task_id,
+                   status, intensity, source, is_protected, enforcement_profile, created_at, updated_at
+            FROM time_blocks
+            WHERE start_time < ?2
+              AND end_time > ?1
+              AND status IN ('active', 'paused')
+              AND block_type IN ('work', 'custom')
+            ORDER BY start_time ASC, id ASC
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let intervals = statement
+        .query_map(params![from, to], map_time_block)
+        .map_err(|error| error.to_string())?
+        .map(|row| {
+            row.map(|block| TemplateInterval {
+                title: block.title,
+                block_type: block.block_type,
+                start_time: block.start_time,
+                end_time: block.end_time,
+                task_id: block.task_id,
+                intensity: block.intensity,
+                source: block.source,
+                is_protected: block.is_protected,
+                enforcement_profile: block.enforcement_profile,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(intervals)
+}
+
+fn generate_rest_after_preserved_work(
+    preserved_intervals: &[TemplateInterval],
+    fixed_intervals: &[TemplateInterval],
+    tasks: &[PlannerTask],
+    preferences: &UserPreferences,
+    horizon: i64,
+) -> Vec<TemplateInterval> {
+    let mut occupied = [preserved_intervals.to_vec(), fixed_intervals.to_vec()].concat();
+    occupied.sort_by_key(|interval| (interval.start_time, interval.end_time));
+
+    preserved_intervals
+        .iter()
+        .filter(|interval| matches!(interval.block_type, BlockType::Work | BlockType::Custom))
+        .filter(|interval| !interval.is_protected)
+        .filter(|interval| {
+            interval
+                .task_id
+                .and_then(|task_id| tasks.iter().find(|task| task.task_id == task_id))
+                .is_none_or(|task| task.kind == TaskKind::Flexible)
+        })
+        .filter_map(|interval| {
+            let start = interval.end_time;
+            if start >= horizon {
+                return None;
+            }
+            let next_occupied_start = occupied
+                .iter()
+                .filter(|occupied| occupied.start_time >= start && occupied.start_time > interval.start_time)
+                .map(|occupied| occupied.start_time)
+                .min()
+                .unwrap_or(horizon);
+            let rest_minutes =
+                preferred_rest_after_interval(interval, tasks, preferences).max(i64::from(
+                    preferences.minimum_rest_minutes.max(1),
+                ));
+            let end = min(start + rest_minutes * 60_000, min(next_occupied_start, horizon));
+            (end > start).then_some(TemplateInterval {
+                title: BlockType::Break.default_title().to_string(),
+                block_type: BlockType::Break,
+                start_time: start,
+                end_time: end,
+                task_id: None,
+                intensity: 1,
+                source: BlockSource::Planner,
+                is_protected: false,
+                enforcement_profile: Some("rest".to_string()),
+            })
+        })
+        .collect()
+}
+
+fn preferred_rest_after_interval(
+    interval: &TemplateInterval,
+    tasks: &[PlannerTask],
+    preferences: &UserPreferences,
+) -> i64 {
+    let task = interval
+        .task_id
+        .and_then(|task_id| tasks.iter().find(|task| task.task_id == task_id));
+    let work_ratio = task
+        .and_then(|task| task.work_ratio)
+        .unwrap_or(i64::from(preferences.work_duration_minutes.max(1)))
+        .max(1);
+    let rest_ratio = task
+        .and_then(|task| task.rest_ratio)
+        .unwrap_or(i64::from(preferences.break_duration_minutes))
+        .max(0);
+    preferred_break_minutes((interval.end_time - interval.start_time) / 60_000, work_ratio, rest_ratio)
+}
+
 fn generate_template_blocks(
     template: &WeeklyTemplate,
     occupied_intervals: &[TemplateInterval],
@@ -2740,7 +2942,9 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
             r#"
             SELECT id, name, group_id, priority, estimated_minutes, deadline,
                    max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
-                   work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile
+                   work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile,
+                   kind, fixed_window_start_minute, fixed_window_end_minute,
+                   recurrence_kind, recurrence_days_mask, recurrence_anchor_date
             FROM tasks
             WHERE estimated_minutes IS NOT NULL
               AND estimated_minutes > 0
@@ -2757,6 +2961,9 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
                 title: row.get(1)?,
                 group_id: row.get(2)?,
                 enforcement_profile: row.get(12)?,
+                kind: crate::tasks::models::task_kind_from_str(
+                    row.get::<_, String>(13)?.as_str(),
+                ),
                 priority: row.get(3)?,
                 estimated_minutes: row.get(4)?,
                 deadline: row.get(5)?,
@@ -2766,6 +2973,13 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
                 work_ratio: row.get(9)?,
                 rest_ratio: row.get(10)?,
                 protect_generated_blocks: row.get(11)?,
+                fixed_window_start_minute: row.get(14)?,
+                fixed_window_end_minute: row.get(15)?,
+                recurrence_kind: crate::tasks::models::recurrence_kind_from_str(
+                    row.get::<_, String>(16)?.as_str(),
+                ),
+                recurrence_days_mask: row.get(17)?,
+                recurrence_anchor_date: row.get(18)?,
                 required_share: 0.0,
                 section_allocations: vec![],
             })
@@ -2775,6 +2989,62 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
         .map_err(|error| error.to_string())?;
 
     Ok(tasks)
+}
+
+fn repair_fixed_task_windows_from_blocks(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT id
+            FROM tasks
+            WHERE kind = 'fixed'
+              AND (fixed_window_start_minute IS NULL OR fixed_window_end_minute IS NULL)
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let task_ids = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    for task_id in task_ids {
+        let block = connection
+            .query_row(
+                r#"
+                SELECT start_time, end_time
+                FROM time_blocks
+                WHERE task_id = ?1
+                  AND block_type = 'work'
+                  AND status IN ('scheduled', 'active', 'paused', 'completed')
+                ORDER BY start_time DESC
+                LIMIT 1
+                "#,
+                params![task_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let Some((start_time, end_time)) = block else {
+            continue;
+        };
+        let start_minute = minute_of_local_day(start_time)?;
+        let end_minute = minute_of_local_day(end_time)?;
+        connection
+            .execute(
+                r#"
+                UPDATE tasks
+                SET fixed_window_start_minute = COALESCE(fixed_window_start_minute, ?1),
+                    fixed_window_end_minute = COALESCE(fixed_window_end_minute, ?2),
+                    updated_at = ?3
+                WHERE id = ?4
+                "#,
+                params![start_minute, end_minute, timestamp_ms(), task_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
 }
 
 fn compute_pseudo_deadline(
@@ -2868,6 +3138,85 @@ fn generate_fixed_template_blocks(
             })
         })
         .collect())
+}
+
+fn generate_fixed_task_intervals(
+    tasks: &[PlannerTask],
+    from: i64,
+    to: i64,
+) -> Result<Vec<TemplateInterval>, String> {
+    let start_date = date_from_timestamp(from)?
+        .checked_sub_days(Days::new(1))
+        .ok_or_else(|| "date range overflow while generating fixed task intervals".to_string())?;
+    let end_date = date_from_timestamp(to - 1)?;
+    let day_count = end_date.signed_duration_since(start_date).num_days().max(0) as u64;
+    let mut intervals = Vec::new();
+
+    for task in tasks.iter().filter(|task| task.kind == TaskKind::Fixed) {
+        let Some(start_minute) = task.fixed_window_start_minute else {
+            continue;
+        };
+        let Some(end_minute) = task.fixed_window_end_minute else {
+            continue;
+        };
+
+        for offset in 0..=day_count {
+            let date = start_date
+                .checked_add_days(Days::new(offset))
+                .ok_or_else(|| "date range overflow while generating fixed task intervals".to_string())?;
+            if !fixed_task_occurs_on_date(task, date)? {
+                continue;
+            }
+
+            let start_time = timestamp_for_minute(date, start_minute as u16)?;
+            let end_date = if end_minute <= start_minute {
+                date.checked_add_days(Days::new(1)).ok_or_else(|| {
+                    "date range overflow while generating fixed task intervals".to_string()
+                })?
+            } else {
+                date
+            };
+            let end_time = timestamp_for_minute(end_date, end_minute as u16)?;
+            if start_time >= to || end_time <= from {
+                continue;
+            }
+
+            intervals.push(TemplateInterval {
+                title: task.title.clone(),
+                block_type: BlockType::Work,
+                start_time,
+                end_time,
+                task_id: Some(task.task_id),
+                intensity: intensity_for_priority(task.priority),
+                source: BlockSource::Planner,
+                is_protected: true,
+                enforcement_profile: Some(
+                    task.enforcement_profile
+                        .clone()
+                        .unwrap_or_else(|| "work".to_string()),
+                ),
+            });
+        }
+    }
+
+    Ok(intervals)
+}
+
+fn fixed_task_occurs_on_date(task: &PlannerTask, date: NaiveDate) -> Result<bool, String> {
+    let weekday = date.weekday().num_days_from_monday() as i64;
+    Ok(match task.recurrence_kind {
+        RecurrenceKind::Daily => true,
+        RecurrenceKind::Weekdays => weekday < 5,
+        RecurrenceKind::Weekly => task.recurrence_days_mask & (1 << weekday) != 0,
+        RecurrenceKind::Once | RecurrenceKind::None => {
+            let anchor = task
+                .recurrence_anchor_date
+                .or(task.deadline)
+                .map(date_from_timestamp)
+                .transpose()?;
+            anchor == Some(date)
+        }
+    })
 }
 
 fn build_section_endpoints(from: i64, pseudo_deadline: i64, tasks: &[PlannerTask]) -> Vec<i64> {
@@ -3029,7 +3378,7 @@ fn allocate_tasks_to_sections(
 
         for task_idx in ordered_indices {
             let mut remaining = tasks[task_idx].estimated_minutes;
-            for target_section in (0..=section_index).rev() {
+            for target_section in 0..=section_index {
                 if remaining <= 0 {
                     break;
                 }
@@ -3147,17 +3496,38 @@ fn materialize_sections(
                 if gap_minutes <= 0 {
                     break;
                 }
-
+                let remaining_chunk_count = remaining_chunks
+                    .iter()
+                    .map(|(_, chunks)| chunks.len())
+                    .sum::<usize>();
+                let mut next_cursor = chunk_cursor;
                 let next = find_next_planned_candidate(
                     tasks,
                     &remaining_chunks,
                     &chunk_queue,
-                    &mut chunk_cursor,
+                    &mut next_cursor,
                 );
                 let candidate = match next {
-                    Some(candidate) if candidate.duration_minutes <= gap_minutes => candidate,
+                    Some(candidate)
+                        if candidate_fits_gap(
+                            &candidate,
+                            gap_minutes,
+                            remaining_chunk_count,
+                            tasks,
+                            global_min_break_minutes,
+                        ) =>
+                    {
+                        chunk_cursor = next_cursor;
+                        candidate
+                    }
                     _ if preferences.fill_dead_gaps => {
-                        match find_fit_candidate(tasks, &remaining_chunks, gap_minutes) {
+                        match find_fit_candidate(
+                            tasks,
+                            &remaining_chunks,
+                            gap_minutes,
+                            remaining_chunk_count,
+                            global_min_break_minutes,
+                        ) {
                             Some(candidate) => candidate,
                             None => break,
                         }
@@ -3192,20 +3562,35 @@ fn materialize_sections(
                     .minimum_rest_minutes
                     .unwrap_or(global_min_break_minutes)
                     .max(global_min_break_minutes);
-                if has_more_chunks && cursor + min_break_minutes * 60 * 1_000 <= window.end_time {
+                let preferred_break = preferred_break_minutes(
+                    candidate.duration_minutes,
+                    tasks[candidate.task_index]
+                        .work_ratio
+                        .unwrap_or(default_ratio_work)
+                        .max(1),
+                    tasks[candidate.task_index]
+                        .rest_ratio
+                        .unwrap_or(default_ratio_break)
+                        .max(0),
+                );
+                let available_break_minutes = ((window.end_time - cursor) / 60_000).max(0);
+                let break_minutes = preferred_break
+                    .min(available_break_minutes)
+                    .max(min_break_minutes);
+                if has_more_chunks && cursor + break_minutes * 60 * 1_000 <= window.end_time {
                     generated.push(TemplateInterval {
                         title: BlockType::Break.default_title().to_string(),
                         block_type: BlockType::Break,
                         start_time: cursor,
-                        end_time: cursor + min_break_minutes * 60 * 1_000,
+                        end_time: cursor + break_minutes * 60 * 1_000,
                         task_id: None,
                         intensity: 1,
                         source: BlockSource::Planner,
                         is_protected: false,
                         enforcement_profile: Some("rest".to_string()),
                     });
-                    cursor += min_break_minutes * 60 * 1_000;
-                    total_break_built += min_break_minutes;
+                    cursor += break_minutes * 60 * 1_000;
+                    total_break_built += break_minutes;
                 }
             }
 
@@ -3496,18 +3881,27 @@ fn find_fit_candidate(
     tasks: &[PlannerTask],
     remaining_chunks: &[(usize, Vec<i64>)],
     gap_minutes: i64,
+    remaining_chunk_count: usize,
+    global_min_break_minutes: i64,
 ) -> Option<ChunkCandidate> {
     let mut candidates = Vec::new();
     for (task_idx, chunks) in remaining_chunks {
         if let Some(&duration_minutes) = chunks.first() {
-            if duration_minutes <= gap_minutes {
-                candidates.push(ChunkCandidate {
-                    task_index: *task_idx,
-                    task_id: tasks[*task_idx].task_id,
-                    title: tasks[*task_idx].title.clone(),
-                    priority: tasks[*task_idx].priority,
-                    duration_minutes,
-                });
+            let candidate = ChunkCandidate {
+                task_index: *task_idx,
+                task_id: tasks[*task_idx].task_id,
+                title: tasks[*task_idx].title.clone(),
+                priority: tasks[*task_idx].priority,
+                duration_minutes,
+            };
+            if candidate_fits_gap(
+                &candidate,
+                gap_minutes,
+                remaining_chunk_count,
+                tasks,
+                global_min_break_minutes,
+            ) {
+                candidates.push(candidate);
             }
         }
     }
@@ -3523,6 +3917,24 @@ fn find_fit_candidate(
     candidates.into_iter().next()
 }
 
+fn candidate_fits_gap(
+    candidate: &ChunkCandidate,
+    gap_minutes: i64,
+    remaining_chunk_count: usize,
+    tasks: &[PlannerTask],
+    global_min_break_minutes: i64,
+) -> bool {
+    let required_rest = if remaining_chunk_count > 1 {
+        tasks[candidate.task_index]
+            .minimum_rest_minutes
+            .unwrap_or(global_min_break_minutes)
+            .max(global_min_break_minutes)
+    } else {
+        0
+    };
+    candidate.duration_minutes + required_rest <= gap_minutes
+}
+
 fn consume_candidate_chunk(remaining_chunks: &mut [(usize, Vec<i64>)], task_index: usize) {
     if let Some((_, chunks)) = remaining_chunks
         .iter_mut()
@@ -3533,19 +3945,44 @@ fn consume_candidate_chunk(remaining_chunks: &mut [(usize, Vec<i64>)], task_inde
 }
 
 fn clear_generated_future_blocks(connection: &Connection, from: i64) -> Result<(), String> {
+    let clear_from = timestamp_for_minute(date_from_timestamp(from)?, 0)?;
     connection
         .execute(
             r#"
             DELETE FROM time_blocks
-            WHERE start_time >= ?1
-              AND status = 'scheduled'
+            WHERE end_time > ?1
+              AND status IN ('scheduled', 'active', 'paused')
               AND source IN ('template', 'planner')
-              AND is_protected = 0
             "#,
-            params![from],
+            params![clear_from],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn normalize_generated_blocks(blocks: &mut Vec<TemplateInterval>) {
+    blocks.sort_by_key(|block| (block.start_time, block.end_time));
+    let mut normalized: Vec<TemplateInterval> = Vec::with_capacity(blocks.len());
+    for block in blocks.drain(..) {
+        if let Some(previous) = normalized.last_mut() {
+            if should_merge_generated_intervals(previous, &block) {
+                previous.end_time = previous.end_time.max(block.end_time);
+                continue;
+            }
+        }
+        normalized.push(block);
+    }
+    *blocks = normalized;
+}
+
+fn should_merge_generated_intervals(left: &TemplateInterval, right: &TemplateInterval) -> bool {
+    left.block_type == BlockType::Break
+        && right.block_type == BlockType::Break
+        && left.end_time >= right.start_time
+        && left.source == right.source
+        && left.task_id.is_none()
+        && right.task_id.is_none()
+        && left.enforcement_profile == right.enforcement_profile
 }
 
 fn persist_generated_blocks(
@@ -3729,17 +4166,26 @@ fn timestamp_for_minute(date: NaiveDate, minute: u16) -> Result<i64, String> {
     let hour = minute / 60;
     let minute_of_hour = minute % 60;
 
-    Utc.with_ymd_and_hms(
-        date.year(),
-        date.month(),
-        date.day(),
-        u32::from(hour),
-        u32::from(minute_of_hour),
-        0,
-    )
-    .single()
-    .map(|datetime| datetime.timestamp_millis())
-    .ok_or_else(|| "invalid date while generating schedule".to_string())
+    Local
+        .with_ymd_and_hms(
+            date.year(),
+            date.month(),
+            date.day(),
+            u32::from(hour),
+            u32::from(minute_of_hour),
+            0,
+        )
+        .single()
+        .map(|datetime| datetime.timestamp_millis())
+        .ok_or_else(|| "invalid date while generating schedule".to_string())
+}
+
+fn minute_of_local_day(timestamp: i64) -> Result<i64, String> {
+    let datetime = Local
+        .timestamp_millis_opt(timestamp)
+        .single()
+        .ok_or_else(|| "invalid timestamp".to_string())?;
+    Ok(i64::from(datetime.hour()) * 60 + i64::from(datetime.minute()))
 }
 
 fn end_of_day(date: NaiveDate) -> Result<i64, String> {
@@ -3751,7 +4197,7 @@ fn end_of_day(date: NaiveDate) -> Result<i64, String> {
 
 fn date_from_timestamp(timestamp: i64) -> Result<NaiveDate, String> {
     chrono::DateTime::from_timestamp_millis(timestamp)
-        .map(|datetime| datetime.date_naive())
+        .map(|datetime| datetime.with_timezone(&Local).date_naive())
         .ok_or_else(|| "invalid timestamp".to_string())
 }
 
@@ -3889,14 +4335,15 @@ fn block_source_from_str(value: &str) -> Result<BlockSource, String> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use chrono::{NaiveDate, TimeZone, Utc};
     use rusqlite::{params, Connection};
 
     use super::{
         add_time_block, apply_weekly_template, complete_current_block, continue_current_block,
         effective_enforcement_block_type, extend_current_block, get_block_by_id, get_current_block,
-        get_schedule_range, pause_current_block, resume_current_block, save_weekly_template,
-        start_emergency_block, sync_overdue_work_block, ScheduleState,
+        get_schedule_range, pause_current_block, rebuild_schedule, resume_current_block,
+        save_weekly_template, start_emergency_block, sync_overdue_work_block, timestamp_for_minute,
+        ScheduleState,
     };
     use crate::{
         config::models::UserPreferences,
@@ -3924,6 +4371,52 @@ mod tests {
 
     fn preferences() -> UserPreferences {
         UserPreferences::default()
+    }
+
+    #[test]
+    fn rebuild_inserts_rest_between_adjacent_work_chunks() {
+        let (connection, _) = setup();
+        let preferences = UserPreferences {
+            work_duration_minutes: 60,
+            break_duration_minutes: 20,
+            minimum_rest_minutes: 10,
+            ..UserPreferences::default()
+        };
+        let date = NaiveDate::from_ymd_opt(2026, 5, 13).expect("date should exist");
+        let from = timestamp_for_minute(date, 16 * 60).expect("from should be valid");
+        let deadline = timestamp_for_minute(date, 19 * 60).expect("deadline should be valid");
+        connection
+            .execute(
+                r#"
+                INSERT INTO tasks (
+                    name, priority, estimated_minutes, deadline, max_chunk_minutes,
+                    minimum_rest_minutes, created_at, updated_at
+                )
+                VALUES ('Lit Essay', 3, 120, ?1, 60, 10, ?2, ?2)
+                "#,
+                params![deadline, from],
+            )
+            .expect("task should insert");
+
+        rebuild_schedule(&connection, from, &preferences).expect("schedule should rebuild");
+
+        let blocks = get_schedule_range(&connection, from, deadline)
+            .expect("schedule range should load");
+        let work_blocks = blocks
+            .iter()
+            .filter(|block| block.block_type == BlockType::Work)
+            .collect::<Vec<_>>();
+        assert_eq!(work_blocks.len(), 2);
+
+        let between = blocks
+            .iter()
+            .find(|block| {
+                block.block_type == BlockType::Break
+                    && block.start_time >= work_blocks[0].end_time
+                    && block.end_time <= work_blocks[1].start_time
+            })
+            .expect("break should exist between first two work chunks");
+        assert!(between.duration_secs() / 60 >= 10);
     }
 
     #[test]

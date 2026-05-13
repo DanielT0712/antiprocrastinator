@@ -172,6 +172,55 @@ function timeToMinutes(value: string): number | null {
   return hh * 60 + mm;
 }
 
+function RatioFields({
+  work,
+  rest,
+  onChange,
+}: {
+  work: number | null;
+  rest: number | null;
+  onChange: (work: number | null, rest: number | null) => void;
+}) {
+  const box: CSSProperties = {
+    width: '100%',
+    background: 'var(--bg)',
+    border: '1px solid var(--line)',
+    borderRadius: 5,
+    padding: '7px 9px',
+    fontSize: 13,
+    color: 'var(--ink)',
+    outline: 'none',
+    fontFamily: 'var(--font-mono)',
+    boxSizing: 'border-box',
+    textAlign: 'center',
+  };
+  const parse = (value: string, min: number) =>
+    value === '' ? null : Math.max(min, Number(value));
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 8, alignItems: 'center' }}>
+      <input
+        type="number"
+        min={1}
+        step={1}
+        value={work ?? ''}
+        placeholder="3"
+        onChange={(e) => onChange(parse(e.target.value, 1), rest)}
+        style={box}
+      />
+      <span style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)' }}>:</span>
+      <input
+        type="number"
+        min={0}
+        step={1}
+        value={rest ?? ''}
+        placeholder="1"
+        onChange={(e) => onChange(work, parse(e.target.value, 0))}
+        style={box}
+      />
+    </div>
+  );
+}
+
 interface QuickAddProps {
   groups: TaskGroup[];
   onAdd: (task: NewTask) => Promise<void>;
@@ -335,6 +384,7 @@ function Drawer({
   }, [onClose]);
 
   const set = (patch: Partial<Task>) => setDraft((d) => ({ ...d, ...patch }));
+  const isSleepTask = task.id === SLEEP_TASK_ID;
 
   const save = async () => {
     const updates: TaskUpdate = {};
@@ -552,6 +602,7 @@ function Drawer({
               ).map((opt) => (
                 <button
                   key={opt.v}
+                  disabled={isSleepTask}
                   onClick={() =>
                     set({
                       kind: opt.v,
@@ -571,7 +622,8 @@ function Drawer({
                     background: draft.kind === opt.v ? 'var(--ink-soft)' : 'transparent',
                     color: draft.kind === opt.v ? 'var(--ink)' : 'var(--muted)',
                     border: 'none',
-                    cursor: 'pointer',
+                    cursor: isSleepTask ? 'not-allowed' : 'pointer',
+                    opacity: isSleepTask && draft.kind !== opt.v ? 0.35 : 1,
                     fontFamily: 'var(--font-sans)',
                     display: 'flex',
                     flexDirection: 'column',
@@ -625,8 +677,25 @@ function Drawer({
             <div style={{ ...labelStyle, marginBottom: 6 }}>
               {draft.kind === 'fixed' ? 'When' : 'Repeat'}
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-              {(draft.kind === 'fixed'
+            {isSleepTask ? (
+              <div
+                style={{
+                  display: 'inline-flex',
+                  width: 'fit-content',
+                  padding: '6px 11px',
+                  fontSize: 12,
+                  background: 'var(--accent-soft)',
+                  color: 'var(--accent-ink)',
+                  border: '1px solid var(--accent)',
+                  borderRadius: 5,
+                  fontFamily: 'var(--font-sans)',
+                }}
+              >
+                Daily fixed task
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {(draft.kind === 'fixed'
                 ? ([
                     { v: 'once' as const, l: 'Once' },
                     { v: 'weekdays' as const, l: 'Weekdays' },
@@ -666,9 +735,10 @@ function Drawer({
                   {opt.l}
                 </button>
               ))}
-            </div>
+              </div>
+            )}
 
-            {draft.recurrenceKind === 'weekly' && (
+            {!isSleepTask && draft.recurrenceKind === 'weekly' && (
               <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                 {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((label, idx) => {
                   const bit = 1 << idx;
@@ -703,7 +773,7 @@ function Drawer({
               </div>
             )}
 
-            {draft.recurrenceKind === 'once' && (
+            {!isSleepTask && draft.recurrenceKind === 'once' && (
               <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ fontSize: 12, color: 'var(--muted)' }}>On</span>
                 <input
@@ -770,30 +840,11 @@ function Drawer({
                   style={drawerInp}
                 />
               </FieldCell>
-              <FieldCell label="Work ratio">
-                <input
-                  type="number"
-                  min={0}
-                  value={draft.workRatio ?? ''}
-                  onChange={(e) =>
-                    set({
-                      workRatio: e.target.value === '' ? null : Number(e.target.value),
-                    })
-                  }
-                  style={drawerInp}
-                />
-              </FieldCell>
-              <FieldCell label="Rest ratio">
-                <input
-                  type="number"
-                  min={0}
-                  value={draft.restRatio ?? ''}
-                  onChange={(e) =>
-                    set({
-                      restRatio: e.target.value === '' ? null : Number(e.target.value),
-                    })
-                  }
-                  style={drawerInp}
+              <FieldCell label="Work:rest ratio">
+                <RatioFields
+                  work={draft.workRatio}
+                  rest={draft.restRatio}
+                  onChange={(workRatio, restRatio) => set({ workRatio, restRatio })}
                 />
               </FieldCell>
               <FieldCell label="Protect blocks" hint="Planner can't reflow these once placed">
@@ -858,27 +909,29 @@ function Drawer({
           alignItems: 'center',
           background: 'var(--bg)',
         }}>
-          <button
-            onClick={() => {
-              if (confirm(`Delete "${task.name}"?`)) onDelete(task.id);
-            }}
-            style={{
-              padding: '6px 12px',
-              background: 'transparent',
-              border: '1px solid color-mix(in oklch, var(--danger) 50%, var(--line))',
-              borderRadius: 5,
-              color: 'var(--danger)',
-              fontSize: 12,
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 5,
-            }}
-          >
-            <Icons.trash size={12} /> Delete
-          </button>
+          {!isSleepTask && (
+            <button
+              onClick={() => {
+                if (confirm(`Delete "${task.name}"?`)) onDelete(task.id);
+              }}
+              style={{
+                padding: '6px 12px',
+                background: 'transparent',
+                border: '1px solid color-mix(in oklch, var(--danger) 50%, var(--line))',
+                borderRadius: 5,
+                color: 'var(--danger)',
+                fontSize: 12,
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
+              }}
+            >
+              <Icons.trash size={12} /> Delete
+            </button>
+          )}
           <span style={{ flex: 1 }} />
-          {planned ? (
+          {!isSleepTask && (planned ? (
             <button
               onClick={onRemoveFromPlan}
               style={{
@@ -908,7 +961,7 @@ function Drawer({
             >
               Add to plan…
             </button>
-          )}
+          ))}
           <button
             onClick={onClose}
             style={{
@@ -1380,6 +1433,41 @@ function ActiveTaskCard({
 }
 
 const ACTIVE_HORIZON_DAYS = 14;
+const SLEEP_TASK_ID = -1;
+const ALL_WEEKDAYS_MASK = 0b1111111;
+
+function sleepTaskFromTemplate(template: unknown): Task {
+  const days = (template as { days?: Array<{ sleepStartMinute?: number | null; sleepEndMinute?: number | null }> } | null)?.days ?? [];
+  const start = days.find((day) => day.sleepStartMinute != null)?.sleepStartMinute ?? 23 * 60;
+  const end = days.find((day) => day.sleepEndMinute != null)?.sleepEndMinute ?? 7 * 60;
+  const now = Date.now();
+  return {
+    id: SLEEP_TASK_ID,
+    name: 'Sleep',
+    groupId: null,
+    priority: 1,
+    estimatedMinutes: null,
+    deadline: null,
+    maxChunkMinutes: null,
+    minChunkMinutes: null,
+    minimumRestMinutes: null,
+    workRatio: null,
+    restRatio: null,
+    protectGeneratedBlocks: true,
+    enforcementProfile: 'rest',
+    kind: 'fixed',
+    fixedWindowStartMinute: start,
+    fixedWindowEndMinute: end,
+    recurrenceKind: 'daily',
+    recurrenceDaysMask: ALL_WEEKDAYS_MASK,
+    recurrenceAnchorDate: null,
+    averagePriority: 1,
+    averageActualMinutes: null,
+    completionCount: 0,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
 
 export function TasksScreen() {
   const [tab, setTab] = useState<TasksTab>('active');
@@ -1444,12 +1532,13 @@ export function TasksScreen() {
     try {
       const horizonStart = startOfDay(Date.now());
       const horizonEnd = horizonStart + ACTIVE_HORIZON_DAYS * 86_400_000;
-      const [t, g, blocks] = await Promise.all([
+      const [t, g, blocks, template] = await Promise.all([
         api.getTasks(),
         api.getTaskGroups(),
         api.getScheduleRange(horizonStart, horizonEnd),
+        api.getWeeklyTemplate(),
       ]);
-      setTasks(t);
+      setTasks([sleepTaskFromTemplate(template), ...t]);
       setGroups(g);
       setScheduledBlocks(blocks);
     } catch (err) {
@@ -1562,6 +1651,37 @@ export function TasksScreen() {
 
   const update = async (id: number, updates: TaskUpdate) => {
     try {
+      if (id === SLEEP_TASK_ID) {
+        const existing = (await api.getWeeklyTemplate()) as Record<string, unknown> | null;
+        const baseDays =
+          (existing?.days as Array<Record<string, unknown>> | undefined) ??
+          ([
+            'monday',
+            'tuesday',
+            'wednesday',
+            'thursday',
+            'friday',
+            'saturday',
+            'sunday',
+          ].map((day) => ({ day, enabled: true })));
+        const currentSleep = sleepTaskFromTemplate(existing);
+        const start = updates.fixedWindowStartMinute ?? currentSleep.fixedWindowStartMinute ?? 23 * 60;
+        const end = updates.fixedWindowEndMinute ?? currentSleep.fixedWindowEndMinute ?? 7 * 60;
+        await api.saveWeeklyTemplate({
+          ...existing,
+          days: baseDays.map((day) => ({
+            ...day,
+            enabled: day.enabled ?? true,
+            sleepStartMinute: start,
+            sleepEndMinute: end,
+          })),
+          fixedBlocks:
+            (existing?.fixedBlocks as unknown[] | undefined) ?? [],
+        });
+        await api.rebuildSchedule();
+        refresh();
+        return;
+      }
       await api.updateTask(id, updates);
       refresh();
     } catch (err) {
@@ -2169,7 +2289,7 @@ export function TasksScreen() {
         />
       )}
 
-      {planModalTaskId != null && (
+      {planModalTaskId != null && tasks.some((t) => t.id === planModalTaskId) && (
         <PlanModal
           task={tasks.find((t) => t.id === planModalTaskId)!}
           groups={groups}
@@ -2179,7 +2299,7 @@ export function TasksScreen() {
         />
       )}
 
-      {removeModalTaskId != null && (
+      {removeModalTaskId != null && tasks.some((t) => t.id === removeModalTaskId) && (
         <RemoveFromPlanModal
           task={tasks.find((t) => t.id === removeModalTaskId)!}
           onClose={() => setRemoveModalTaskId(null)}

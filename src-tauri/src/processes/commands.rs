@@ -44,8 +44,7 @@ pub async fn get_app_icon(
 
     // Global cap on concurrent `sips` spawns so a list of 400 apps doesn't
     // fork 400 subprocesses at once.
-    static ICON_RENDER_GATE: Lazy<Arc<Semaphore>> =
-        Lazy::new(|| Arc::new(Semaphore::new(4)));
+    static ICON_RENDER_GATE: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(4)));
 
     // In-memory cache keyed by app_key. Stores the final data URL (or None
     // for "no icon").
@@ -73,11 +72,7 @@ pub async fn get_app_icon(
         return Ok(None);
     };
 
-    let cache_dir = monitor::icon_cache_dir(
-        &app.path()
-            .app_data_dir()
-            .map_err(|e| e.to_string())?,
-    );
+    let cache_dir = monitor::icon_cache_dir(&app.path().app_data_dir().map_err(|e| e.to_string())?);
 
     // Fast path: cached PNG already on disk.
     if let Some(bytes) = monitor::read_cached_icon(&cache_dir, &app_key) {
@@ -99,8 +94,7 @@ pub async fn get_app_icon(
     let key_for_task = app_key.clone();
     let cache_dir_clone = cache_dir.clone();
     let bytes = tokio::task::spawn_blocking(move || {
-        let result =
-            monitor::render_and_cache_icon(&cache_dir_clone, &key_for_task, &app_path);
+        let result = monitor::render_and_cache_icon(&cache_dir_clone, &key_for_task, &app_path);
         drop(permit);
         result
     })

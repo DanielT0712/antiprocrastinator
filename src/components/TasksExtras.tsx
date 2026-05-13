@@ -1158,6 +1158,22 @@ export function PlanModal({
       if (draft.enforcementProfile !== task.enforcementProfile) {
         updates.enforcementProfile = draft.enforcementProfile;
       }
+      if (draft.kind !== task.kind) updates.kind = draft.kind;
+      if (draft.fixedWindowStartMinute !== task.fixedWindowStartMinute) {
+        updates.fixedWindowStartMinute = draft.fixedWindowStartMinute;
+      }
+      if (draft.fixedWindowEndMinute !== task.fixedWindowEndMinute) {
+        updates.fixedWindowEndMinute = draft.fixedWindowEndMinute;
+      }
+      if (draft.recurrenceKind !== task.recurrenceKind) {
+        updates.recurrenceKind = draft.recurrenceKind;
+      }
+      if (draft.recurrenceDaysMask !== task.recurrenceDaysMask) {
+        updates.recurrenceDaysMask = draft.recurrenceDaysMask;
+      }
+      if (draft.recurrenceAnchorDate !== task.recurrenceAnchorDate) {
+        updates.recurrenceAnchorDate = draft.recurrenceAnchorDate;
+      }
       if (draft.groupId !== task.groupId) updates.groupId = draft.groupId;
       if (Object.keys(updates).length > 0) {
         await api.updateTask(task.id, updates);
@@ -1379,16 +1395,14 @@ export function PlanModal({
                 value={draft.minimumRestMinutes}
                 onChange={(v) => set({ minimumRestMinutes: v })}
               />
-              <NumField
-                label="Work ratio"
-                value={draft.workRatio}
-                onChange={(v) => set({ workRatio: v })}
-              />
-              <NumField
-                label="Rest ratio"
-                value={draft.restRatio}
-                onChange={(v) => set({ restRatio: v })}
-              />
+              <div>
+                <div style={{ ...labelStyle, marginBottom: 5 }}>Work:rest ratio</div>
+                <RatioFields
+                  work={draft.workRatio}
+                  rest={draft.restRatio}
+                  onChange={(workRatio, restRatio) => set({ workRatio, restRatio })}
+                />
+              </div>
             </div>
             <label style={{
               marginTop: 10,
@@ -1491,6 +1505,58 @@ function NumField({
   );
 }
 
+function RatioFields({
+  work,
+  rest,
+  onChange,
+}: {
+  work: number | null;
+  rest: number | null;
+  onChange: (work: number | null, rest: number | null) => void;
+}) {
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', alignItems: 'center', gap: 6 }}>
+      <input
+        type="number"
+        min={1}
+        value={work ?? ''}
+        onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value), rest)}
+        style={{
+          width: '100%',
+          boxSizing: 'border-box',
+          background: 'var(--bg)',
+          border: '1px solid var(--line)',
+          borderRadius: 5,
+          padding: '6px 9px',
+          fontSize: 13,
+          color: 'var(--ink)',
+          outline: 'none',
+          fontFamily: 'var(--font-mono)',
+        }}
+      />
+      <span style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)' }}>:</span>
+      <input
+        type="number"
+        min={0}
+        value={rest ?? ''}
+        onChange={(e) => onChange(work, e.target.value === '' ? null : Number(e.target.value))}
+        style={{
+          width: '100%',
+          boxSizing: 'border-box',
+          background: 'var(--bg)',
+          border: '1px solid var(--line)',
+          borderRadius: 5,
+          padding: '6px 9px',
+          fontSize: 13,
+          color: 'var(--ink)',
+          outline: 'none',
+          fontFamily: 'var(--font-mono)',
+        }}
+      />
+    </div>
+  );
+}
+
 interface RemoveModalProps {
   task: Task;
   onClose: () => void;
@@ -1556,6 +1622,7 @@ export function RemoveFromPlanModal({
       for (const b of taskBlocks) {
         await api.deleteTimeBlock(b.id);
       }
+      await api.updateTask(task.id, { estimatedMinutes: null });
       await api.rebuildSchedule();
       onAfterRemove();
       onClose();

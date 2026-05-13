@@ -1091,6 +1091,7 @@ interface PendingBannerProps {
   onOpenApp: (app: KnownApp) => void;
   onAcceptApp: (app: KnownApp) => void | Promise<void>;
   onAcceptBrowserTarget: (target: KnownBrowserTarget) => void | Promise<void>;
+  onDismiss: () => void;
 }
 
 const PRESET_LABEL_FOR_ACTION: Record<string, string> = {
@@ -1107,6 +1108,7 @@ export function PendingBanner({
   onOpenApp,
   onAcceptApp,
   onAcceptBrowserTarget,
+  onDismiss,
 }: PendingBannerProps) {
   const [open, setOpen] = useState(false);
   const items = isBrowserTab ? browserTargets : apps;
@@ -1145,25 +1147,46 @@ export function PendingBanner({
             </span>
           </div>
         </div>
-        <button
-          onClick={() => setOpen((v) => !v)}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 6,
-            padding: '6px 11px',
-            background: 'transparent',
-            color: 'var(--ink)',
-            border: '1px solid var(--line)',
-            borderRadius: 6,
-            fontSize: 12.5,
-            cursor: 'pointer',
-            fontFamily: 'var(--font-sans)',
-          }}
-        >
-          {open ? 'Hide' : 'Review'}
-          <Icons.chevronD size={12} />
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <button
+            onClick={() => setOpen((v) => !v)}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '6px 11px',
+              background: 'transparent',
+              color: 'var(--ink)',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              fontSize: 12.5,
+              cursor: 'pointer',
+              fontFamily: 'var(--font-sans)',
+            }}
+          >
+            {open ? 'Hide' : 'Review'}
+            <Icons.chevronD size={12} />
+          </button>
+          <button
+            type="button"
+            onClick={onDismiss}
+            title="Dismiss reminder"
+            aria-label="Dismiss newly seen reminder"
+            style={{
+              width: 30,
+              height: 30,
+              display: 'inline-grid',
+              placeItems: 'center',
+              background: 'transparent',
+              color: 'var(--muted)',
+              border: '1px solid var(--line)',
+              borderRadius: 6,
+              cursor: 'pointer',
+            }}
+          >
+            <Icons.x size={13} />
+          </button>
+        </div>
       </div>
       {open && (
         <div style={{

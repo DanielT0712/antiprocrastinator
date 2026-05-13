@@ -34,8 +34,12 @@ const inputStyle: CSSProperties = {
   boxSizing: 'border-box',
 };
 
-const TIMELINE_PX_PER_HOUR = 56;
-const TIMELINE_START_HOUR = 6;
+const DAY_MS = 86_400_000;
+const HOUR_MS = 60 * 60 * 1_000;
+const DEFAULT_TIMELINE_PX_PER_HOUR = 56;
+const MIN_TIMELINE_PX_PER_HOUR = 48;
+const MAX_TIMELINE_PX_PER_HOUR = 96;
+const TIMELINE_START_HOUR = 0;
 const TIMELINE_END_HOUR = 24;
 
 function startOfDay(epoch: number): number {
@@ -54,11 +58,10 @@ function startOfWeek(epoch: number): number {
   return d.getTime();
 }
 
-// Anchor for the schedule grid given the active view. Week + 5d both
-// anchor to Monday of the current week (Mon-Sun and Mon-Fri). Day
-// stays on today.
+// Anchor for the schedule grid given the active view. Day and 5d start
+// today; week stays Monday-anchored.
 function viewStartDay(view: ViewMode, now: number): number {
-  if (view === 'day') return startOfDay(now);
+  if (view === 'day' || view === '5d') return startOfDay(now);
   return startOfWeek(now);
 }
 
@@ -86,45 +89,227 @@ function epochFromDateInput(value: string): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
-function blockTopPx(block: TimeBlock): number {
-  const start = new Date(block.startTime);
-  const minutes = start.getHours() * 60 + start.getMinutes();
-  const baseMin = TIMELINE_START_HOUR * 60;
-  return ((minutes - baseMin) / 60) * TIMELINE_PX_PER_HOUR;
+interface BlockSegment {
+  block: TimeBlock;
+  startTime: number;
+  endTime: number;
+  continuesFromPreviousDay: boolean;
+  continuesToNextDay: boolean;
+  lane: number;
+  laneCount: number;
 }
 
-function blockHeightPx(block: TimeBlock): number {
-  const minutes = (block.endTime - block.startTime) / 60_000;
-  return Math.max(28, (minutes / 60) * TIMELINE_PX_PER_HOUR);
+interface TimelineRun {
+  startHour: number;
+  endHour: number;
+  compressed: boolean;
+}
+
+interface TimelineScale {
+  height: number;
+  runs: TimelineRun[];
+  yOf: (hour: number) => number;
+}
+
+function segmentTopPx(segment: BlockSegment, dayStart: number, scale: TimelineScale): number {
+  return scale.yOf((segment.startTime - dayStart) / HOUR_MS);
+}
+
+function segmentHeightPx(segment: BlockSegment, dayStart: number, scale: TimelineScale): number {
+  const startHour = (segment.startTime - dayStart) / HOUR_MS;
+  const endHour = (segment.endTime - dayStart) / HOUR_MS;
+  return Math.max(8, scale.yOf(endHour) - scale.yOf(startHour) - 1);
+}
+
+function buildBlockSegmentsForDay(day: number, blocks: TimeBlock[]): BlockSegment[] {
+  const dayEnd = day + DAY_MS;
+  const segments = blocks
+    .filter((block) => block.startTime < dayEnd && block.endTime > day)
+    .map((block) => ({
+      block,
+      startTime: Math.max(block.startTime, day),
+      endTime: Math.min(block.endTime, dayEnd),
+      continuesFromPreviousDay: block.startTime < day,
+      continuesToNextDay: block.endTime > dayEnd,
+      lane: 0,
+      laneCount: 1,
+    }))
+    .filter((segment) => segment.endTime > segment.startTime)
+    .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
+
+  let cluster: BlockSegment[] = [];
+  let clusterEnd = 0;
+  const flushCluster = () => {
+    if (cluster.length === 0) return;
+    const laneEnds: number[] = [];
+    for (const segment of cluster) {
+      const lane = laneEnds.findIndex((end) => end <= segment.startTime);
+      segment.lane = lane === -1 ? laneEnds.length : lane;
+      laneEnds[segment.lane] = segment.endTime;
+    }
+    const laneCount = Math.max(1, laneEnds.length);
+    for (const segment of cluster) segment.laneCount = laneCount;
+    cluster = [];
+    clusterEnd = 0;
+  };
+
+  for (const segment of segments) {
+    if (cluster.length > 0 && segment.startTime >= clusterEnd) {
+      flushCluster();
+    }
+    cluster.push(segment);
+    clusterEnd = Math.max(clusterEnd, segment.endTime);
+  }
+  flushCluster();
+
+  return segments;
+}
+
+function classifyHour(day: number, segments: BlockSegment[], hour: number): '.' | 's' | 'r' {
+  const start = day + hour * HOUR_MS;
+  const end = start + HOUR_MS;
+  let hasWork = false;
+  let hasSleep = false;
+  let hasRest = false;
+  for (const segment of segments) {
+    if (segment.startTime >= end || segment.endTime <= start) continue;
+    if (segment.block.blockType === 'work' || segment.block.blockType === 'custom') {
+      hasWork = true;
+    } else if (segment.block.blockType === 'sleep') {
+      hasSleep = true;
+    } else {
+      hasRest = true;
+    }
+  }
+  if (hasWork) return '.';
+  if (hasSleep) return 's';
+  return hasRest ? 'r' : 'r';
+}
+
+function canCompressLongBlockRun(
+  buckets: { day: number; segments: BlockSegment[] }[],
+  startHour: number,
+  endHour: number,
+): boolean {
+  if (endHour - startHour < 3) return false;
+  return buckets.every((bucket) => {
+    const start = bucket.day + startHour * HOUR_MS;
+    const end = bucket.day + endHour * HOUR_MS;
+    const overlapping = bucket.segments.filter(
+      (segment) => segment.startTime < end && segment.endTime > start,
+    );
+    if (overlapping.length === 0) return true;
+    return overlapping.every((segment) => {
+      const duration = segment.block.endTime - segment.block.startTime;
+      return duration >= 3 * HOUR_MS && segment.startTime <= start && segment.endTime >= end;
+    });
+  });
+}
+
+function runKey(run: TimelineRun): string {
+  return `${run.startHour}-${run.endHour}`;
+}
+
+function buildTimelineScale(
+  buckets: { day: number; segments: BlockSegment[] }[],
+  pxPerHour: number,
+  expandedRuns: ReadonlySet<string>,
+): TimelineScale {
+  const patterns: string[] = [];
+  for (let h = TIMELINE_START_HOUR; h < TIMELINE_END_HOUR; h++) {
+    patterns.push(buckets.map((bucket) => classifyHour(bucket.day, bucket.segments, h)).join(''));
+  }
+
+  const runs: TimelineRun[] = [];
+  let index = 0;
+  while (index < patterns.length) {
+    const pattern = patterns[index];
+    const restCompressible = !pattern.includes('.');
+    let next = index + 1;
+    while (next < patterns.length && patterns[next] === pattern) next += 1;
+    const startHour = TIMELINE_START_HOUR + index;
+    const endHour = TIMELINE_START_HOUR + next;
+    const longBlockCompressible =
+      !restCompressible && canCompressLongBlockRun(buckets, startHour, endHour);
+    runs.push({
+      startHour,
+      endHour,
+      compressed: restCompressible ? next - index >= 2 : longBlockCompressible,
+    });
+    index = next;
+  }
+
+  const heights = runs.map((run) =>
+    run.compressed && !expandedRuns.has(runKey(run))
+      ? pxPerHour
+      : (run.endHour - run.startHour) * pxPerHour,
+  );
+  const offsets = [0];
+  for (const height of heights) offsets.push(offsets[offsets.length - 1] + height);
+  const height = offsets[offsets.length - 1];
+  const yOf = (hour: number) => {
+    for (let i = 0; i < runs.length; i++) {
+      const run = runs[i];
+      if (hour >= run.startHour && hour <= run.endHour) {
+        const span = run.endHour - run.startHour;
+        return offsets[i] + ((hour - run.startHour) / span) * heights[i];
+      }
+    }
+    return hour < TIMELINE_START_HOUR ? 0 : height;
+  };
+
+  return { height, runs, yOf };
 }
 
 function BlockTile({
-  block,
+  segment,
+  dayStart,
+  scale,
   task,
   selected,
   onClick,
 }: {
-  block: TimeBlock;
+  segment: BlockSegment;
+  dayStart: number;
+  scale: TimelineScale;
   task: Task | null;
   selected: boolean;
   onClick: () => void;
 }) {
+  const { block } = segment;
   const kind = railKindFor(block);
   const bar = blockBarColor(kind);
   const title = task?.name ?? block.title;
   const isPast = block.endTime < Date.now();
+  const height = segmentHeightPx(segment, dayStart, scale);
+  const laneWidth = 100 / segment.laneCount;
+  const isRest = block.blockType === 'break' || block.blockType === 'meal';
+  const isTinyRest = isRest && height < 38;
+  const isBoundary = block.source === 'template' || block.isProtected;
+  const compactRestPattern =
+    'repeating-linear-gradient(90deg, transparent 0 5px, color-mix(in oklch, var(--muted) 35%, transparent) 5px 7px)';
+  const restPattern = isTinyRest
+    ? compactRestPattern
+    : 'repeating-linear-gradient(90deg, transparent 0 5px, color-mix(in oklch, var(--muted) 14%, transparent) 5px 7px)';
+  const background = isBoundary
+    ? 'repeating-linear-gradient(135deg, transparent 0 8px, color-mix(in oklch, var(--ink) 6%, transparent) 8px 9px), var(--bg-raise)'
+    : isRest
+      ? `${restPattern}, ${selected ? 'var(--accent-soft)' : 'var(--bg-raise)'}`
+    : selected
+      ? 'var(--accent-soft)'
+      : 'var(--bg-raise)';
   return (
     <button
       onClick={onClick}
       style={{
         position: 'absolute',
-        left: 4,
-        right: 4,
-        top: blockTopPx(block),
-        height: blockHeightPx(block),
+        left: `calc(${segment.lane * laneWidth}% + 4px)`,
+        width: `calc(${laneWidth}% - 8px)`,
+        top: segmentTopPx(segment, dayStart, scale),
+        height,
         textAlign: 'left',
         padding: '4px 8px',
-        background: selected ? 'var(--accent-soft)' : 'var(--bg-raise)',
+        background,
         border: '1px solid ' + (selected ? 'var(--accent)' : 'var(--line)'),
         borderLeft: '3px solid ' + bar,
         borderRadius: 5,
@@ -135,14 +320,24 @@ function BlockTile({
         fontFamily: 'var(--font-sans)',
       }}
     >
-      <div style={{
+      {isTinyRest ? null : <div style={{
         fontFamily: 'var(--font-mono)',
         fontSize: 10,
         color: 'var(--muted)',
       }}>
-        {formatHHMM(block.startTime)} – {formatHHMM(block.endTime)}
-      </div>
-      <div style={{
+        {segment.continuesFromPreviousDay ? '00:00' : formatHHMM(segment.startTime)}
+        {' - '}
+        {segment.continuesToNextDay ? '24:00' : formatHHMM(segment.endTime)}
+        {block.isProtected && (
+          <span
+            title="Protected block"
+            style={{ marginLeft: 6, color: 'var(--accent-ink)', display: 'inline-flex' }}
+          >
+            <Icons.pin size={9} />
+          </span>
+        )}
+      </div>}
+      {isTinyRest ? null : <div style={{
         fontSize: 12,
         marginTop: 2,
         overflow: 'hidden',
@@ -150,7 +345,7 @@ function BlockTile({
         whiteSpace: 'nowrap',
       }}>
         {title}
-      </div>
+      </div>}
     </button>
   );
 }
@@ -616,45 +811,116 @@ function AddBlockModal({ onClose, onCreate, tasks }: AddModalProps) {
   );
 }
 
-function HourLabels(): ReactNode {
+function HourLabels({
+  scale,
+  expandedRuns,
+  onToggleRun,
+}: {
+  scale: TimelineScale;
+  expandedRuns: ReadonlySet<string>;
+  onToggleRun: (key: string) => void;
+}): ReactNode {
   const out: ReactNode[] = [];
-  for (let h = TIMELINE_START_HOUR; h <= TIMELINE_END_HOUR; h++) {
-    out.push(
-      <div
-        key={h}
-        style={{
-          height: TIMELINE_PX_PER_HOUR,
-          fontFamily: 'var(--font-mono)',
-          fontSize: 10,
-          color: 'var(--faint)',
-          textAlign: 'right',
-          paddingRight: 8,
-          paddingTop: 2,
-          borderTop: h === TIMELINE_START_HOUR ? 'none' : '1px dashed var(--line)',
-        }}
-      >
-        {String(h).padStart(2, '0')}:00
-      </div>,
-    );
+  for (const run of scale.runs) {
+    const key = runKey(run);
+    const expanded = expandedRuns.has(key);
+    if (run.compressed) {
+      const yMid = (scale.yOf(run.startHour) + scale.yOf(run.endHour)) / 2;
+      out.push(
+        <button
+          key={`toggle-${key}`}
+          onClick={() => onToggleRun(key)}
+          title={expanded ? 'Collapse compressed time' : 'Expand compressed time'}
+          style={{
+            position: 'absolute',
+            top: yMid,
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: 16,
+            height: 16,
+            padding: 0,
+            border: 'none',
+            background: 'transparent',
+            color: 'var(--muted)',
+            cursor: 'pointer',
+            display: 'grid',
+            placeItems: 'center',
+          }}
+        >
+          {expanded ? <Icons.chevronD size={12} /> : <Icons.chevron size={12} />}
+        </button>,
+      );
+    }
+    const marks = run.compressed
+      ? [run.startHour, run.endHour]
+      : Array.from({ length: run.endHour - run.startHour + 1 }, (_, i) => run.startHour + i);
+    for (const h of marks) {
+      const key = `${run.startHour}-${run.endHour}-${h}`;
+      const isLast = h === TIMELINE_END_HOUR;
+      out.push(
+        <div
+          key={key}
+          style={{
+            position: 'absolute',
+            top: isLast ? scale.height - 14 : scale.yOf(h) + 2,
+            right: 8,
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            color: 'var(--faint)',
+            textAlign: 'right',
+            lineHeight: 1,
+            fontVariantNumeric: 'tabular-nums',
+          }}
+        >
+          {String(h % 24).padStart(2, '0')}:00
+        </div>,
+      );
+    }
   }
-  return out;
+  return (
+    <div style={{ position: 'relative', height: scale.height }}>
+      {out}
+    </div>
+  );
 }
 
-function HourLines(): ReactNode {
+function HourLines({ scale }: { scale: TimelineScale }): ReactNode {
   const out: ReactNode[] = [];
-  for (let h = TIMELINE_START_HOUR + 1; h <= TIMELINE_END_HOUR; h++) {
-    out.push(
-      <div
-        key={h}
-        style={{
-          position: 'absolute',
-          left: 0,
-          right: 0,
-          top: (h - TIMELINE_START_HOUR) * TIMELINE_PX_PER_HOUR,
-          borderTop: '1px dashed var(--line)',
-        }}
-      />,
-    );
+  for (const run of scale.runs) {
+    if (run.compressed) {
+      out.push(
+        <div
+          key={`compressed-${run.startHour}`}
+          title="Compressed time"
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            top: scale.yOf(run.startHour),
+            height: scale.yOf(run.endHour) - scale.yOf(run.startHour),
+            background:
+              'repeating-linear-gradient(135deg, transparent 0 10px, color-mix(in oklch, var(--ink) 4%, transparent) 10px 11px)',
+            borderTop: '1px dashed color-mix(in oklch, var(--line) 70%, transparent)',
+            borderBottom: '1px dashed color-mix(in oklch, var(--line) 70%, transparent)',
+          }}
+        />,
+      );
+      continue;
+    }
+    for (let h = run.startHour + 1; h <= run.endHour; h++) {
+      out.push(
+        <div
+          key={`${run.startHour}-${h}`}
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            top: scale.yOf(h),
+            borderTop: '1px dashed var(--line)',
+          }}
+        />,
+      );
+    }
   }
   return out;
 }
@@ -961,6 +1227,8 @@ export function ScheduleScreen() {
   const [adding, setAdding] = useState(false);
   const [history, setHistory] = useState<MutationHistoryEntry[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [pxPerHour, setPxPerHour] = useState(DEFAULT_TIMELINE_PX_PER_HOUR);
+  const [expandedRuns, setExpandedRuns] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
 
   const daysToShow = VIEW_DAYS[view];
@@ -969,11 +1237,11 @@ export function ScheduleScreen() {
     try {
       const now = Date.now();
       const from = viewStartDay(view, now);
-      const to = from + daysToShow * 86_400_000;
+      const to = from + daysToShow * DAY_MS;
       const [list, taskList, historyList] = await Promise.all([
         api.getScheduleRange(from, to),
         api.getTasks(),
-        api.getScheduleMutationHistory(from - 7 * 86_400_000, to),
+        api.getScheduleMutationHistory(from - 7 * DAY_MS, to),
       ]);
       setBlocks(list);
       setTasks(taskList);
@@ -988,19 +1256,39 @@ export function ScheduleScreen() {
   }, [refresh]);
 
   const dayBuckets = useMemo(() => {
-    const buckets: { day: number; blocks: TimeBlock[] }[] = [];
+    const buckets: { day: number; segments: BlockSegment[]; blockCount: number }[] = [];
     const start = viewStartDay(view, Date.now());
     for (let i = 0; i < daysToShow; i++) {
-      const day = start + i * 86_400_000;
+      const day = start + i * DAY_MS;
+      const segments = buildBlockSegmentsForDay(day, blocks);
       buckets.push({
         day,
-        blocks: blocks.filter(
-          (b) => b.startTime >= day && b.startTime < day + 86_400_000,
-        ),
+        segments,
+        blockCount: new Set(segments.map((segment) => segment.block.id)).size,
       });
     }
     return buckets;
   }, [blocks, view, daysToShow]);
+
+  const timelineScale = useMemo(
+    () => buildTimelineScale(dayBuckets, pxPerHour, expandedRuns),
+    [dayBuckets, pxPerHour, expandedRuns],
+  );
+
+  const toggleRun = useCallback((key: string) => {
+    setExpandedRuns((previous) => {
+      const next = new Set(previous);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const zoomTimeline = useCallback((delta: number) => {
+    setPxPerHour((previous) =>
+      Math.min(MAX_TIMELINE_PX_PER_HOUR, Math.max(MIN_TIMELINE_PX_PER_HOUR, previous + delta)),
+    );
+  }, []);
 
   const stats = useMemo(() => {
     let workMinutes = 0;
@@ -1108,7 +1396,7 @@ export function ScheduleScreen() {
   const rangeLabel = useMemo(() => {
     const startMs = viewStartDay(view, Date.now());
     const first = new Date(startMs);
-    const last = new Date(startMs + (daysToShow - 1) * 86_400_000);
+    const last = new Date(startMs + (daysToShow - 1) * DAY_MS);
     const fmt = (d: Date) =>
       d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     if (daysToShow === 1) return fmt(first);
@@ -1269,7 +1557,14 @@ export function ScheduleScreen() {
           </div>
         </div>
 
-        <div style={{ flex: 1, overflow: 'auto' }}>
+        <div
+          onWheel={(event) => {
+            if (!event.ctrlKey && !event.metaKey && !event.altKey) return;
+            event.preventDefault();
+            zoomTimeline(event.deltaY < 0 ? 4 : -4);
+          }}
+          style={{ flex: 1, overflow: 'auto' }}
+        >
           <div style={{
             display: 'grid',
             gridTemplateColumns: `60px repeat(${daysToShow}, 1fr)`,
@@ -1305,16 +1600,20 @@ export function ScheduleScreen() {
               >
                 {dayKey(bucket.day)}
                 <span style={{ color: 'var(--faint)', marginLeft: 6 }}>
-                  ({bucket.blocks.length})
+                  ({bucket.blockCount})
                 </span>
               </div>
             ))}
 
             <div style={{
               borderRight: '1px solid var(--line)',
-              padding: '4px 0',
+              position: 'relative',
             }}>
-              {HourLabels()}
+              <HourLabels
+                scale={timelineScale}
+                expandedRuns={expandedRuns}
+                onToggleRun={toggleRun}
+              />
             </div>
             {dayBuckets.map((bucket) => (
               <div
@@ -1322,19 +1621,27 @@ export function ScheduleScreen() {
                 style={{
                   borderRight: '1px solid var(--line)',
                   position: 'relative',
-                  height:
-                    (TIMELINE_END_HOUR - TIMELINE_START_HOUR) * TIMELINE_PX_PER_HOUR,
-                  paddingTop: 4,
+                  height: timelineScale.height,
+                  background:
+                    startOfDay(Date.now()) === bucket.day
+                      ? 'color-mix(in oklch, var(--ink) 5%, var(--bg))'
+                      : 'transparent',
                 }}
               >
-                {HourLines()}
-                {bucket.blocks.map((block) => (
+                <HourLines scale={timelineScale} />
+                {bucket.segments.map((segment) => (
                   <BlockTile
-                    key={block.id}
-                    block={block}
-                    task={block.taskId ? taskById.get(block.taskId) ?? null : null}
-                    selected={block.id === selected}
-                    onClick={() => setSelected(block.id)}
+                    key={`${segment.block.id}-${segment.startTime}`}
+                    segment={segment}
+                    dayStart={bucket.day}
+                    scale={timelineScale}
+                    task={
+                      segment.block.taskId
+                        ? taskById.get(segment.block.taskId) ?? null
+                        : null
+                    }
+                    selected={segment.block.id === selected}
+                    onClick={() => setSelected(segment.block.id)}
                   />
                 ))}
               </div>

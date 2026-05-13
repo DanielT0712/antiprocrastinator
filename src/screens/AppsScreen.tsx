@@ -66,6 +66,23 @@ const PRESETS: { id: PresetId; label: string; hint: string }[] = [
   { id: 'custom', label: 'Custom', hint: 'Different per profile.' },
 ];
 
+const FIRST_SWEEP_KEY = 'ap-first-sweep-ms';
+const DISMISSED_PENDING_APPS_KEY = 'ap-dismissed-pending-apps';
+const DISMISSED_PENDING_TARGETS_KEY = 'ap-dismissed-pending-targets';
+
+function readDismissedPending(key: string): Set<string> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) ?? '[]');
+    return new Set(Array.isArray(parsed) ? parsed.filter(Boolean) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeDismissedPending(key: string, values: Set<string>): void {
+  localStorage.setItem(key, JSON.stringify([...values]));
+}
+
 function presetColor(p: PresetId): string {
   switch (p) {
     case 'always-allow':
@@ -2422,6 +2439,18 @@ export function AppsScreen() {
   const [browserTargets, setBrowserTargets] = useState<KnownBrowserTarget[]>([]);
   const [pendingApps, setPendingApps] = useState<KnownApp[]>([]);
   const [pendingTargets, setPendingTargets] = useState<KnownBrowserTarget[]>([]);
+  const dismissPendingApps = useCallback(() => {
+    const dismissed = readDismissedPending(DISMISSED_PENDING_APPS_KEY);
+    pendingApps.forEach((app) => dismissed.add(app.appKey));
+    writeDismissedPending(DISMISSED_PENDING_APPS_KEY, dismissed);
+    setPendingApps([]);
+  }, [pendingApps]);
+  const dismissPendingTargets = useCallback(() => {
+    const dismissed = readDismissedPending(DISMISSED_PENDING_TARGETS_KEY);
+    pendingTargets.forEach((target) => dismissed.add(target.targetKey));
+    writeDismissedPending(DISMISSED_PENDING_TARGETS_KEY, dismissed);
+    setPendingTargets([]);
+  }, [pendingTargets]);
   const [adding, setAdding] = useState(false);
   const [addInitialCategory, setAddInitialCategory] = useState<string | null>(
     null,
@@ -2557,20 +2586,27 @@ export function AppsScreen() {
       // the marker to now so the user isn't greeted by a banner full of
       // apps they already knew were installed; later sweeps add new
       // arrivals (first_seen_at > marker) to the banner.
-      const FIRST_SWEEP_KEY = 'ap-first-sweep-ms';
       let firstSweepAt = Number(localStorage.getItem(FIRST_SWEEP_KEY));
       if (!firstSweepAt || Number.isNaN(firstSweepAt)) {
         firstSweepAt = Date.now();
         localStorage.setItem(FIRST_SWEEP_KEY, String(firstSweepAt));
       }
+      const dismissedApps = readDismissedPending(DISMISSED_PENDING_APPS_KEY);
+      const dismissedTargets = readDismissedPending(
+        DISMISSED_PENDING_TARGETS_KEY,
+      );
       setPendingApps(
         (pending.apps ?? []).filter(
-          (app) => (app.firstSeenAt ?? 0) > firstSweepAt,
+          (app) =>
+            (app.firstSeenAt ?? 0) > firstSweepAt &&
+            !dismissedApps.has(app.appKey),
         ),
       );
       setPendingTargets(
         (pending.browserTargets ?? []).filter(
-          (t) => (t.firstSeenAt ?? 0) > firstSweepAt,
+          (t) =>
+            (t.firstSeenAt ?? 0) > firstSweepAt &&
+            !dismissedTargets.has(t.targetKey),
         ),
       );
       if (!p.find((profile) => profile.name === activeProfile) && p.length > 0) {
@@ -2971,6 +3007,7 @@ export function AppsScreen() {
                     setError(String(err));
                   }
                 }}
+                onDismiss={dismissPendingApps}
               />
               {[
                 ...categories,
@@ -3132,6 +3169,7 @@ export function AppsScreen() {
                     setError(String(err));
                   }
                 }}
+                onDismiss={dismissPendingTargets}
               />
 
               {(() => {

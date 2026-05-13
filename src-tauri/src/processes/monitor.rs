@@ -162,7 +162,45 @@ fn ensure_enforcement_defaults(connection: &Connection) -> Result<(), String> {
     }
 
     migrate_category_override_casing(connection)?;
+    migrate_allowed_category_overrides(connection)?;
 
+    Ok(())
+}
+
+fn migrate_allowed_category_overrides(connection: &Connection) -> Result<(), String> {
+    let now = timestamp_ms();
+    for category in categories::built_in_categories()
+        .into_iter()
+        .filter(|category| category.default_action == ProcessAction::AlwaysAllow)
+    {
+        connection
+            .execute(
+                r#"
+                DELETE FROM enforcement_profile_overrides
+                WHERE subject_type = 'category'
+                  AND LOWER(subject_key) = LOWER(?1)
+                  AND decision = 'block'
+                "#,
+                params![category.name],
+            )
+            .map_err(|error| error.to_string())?;
+
+        for profile in categories::built_in_profile_names() {
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO enforcement_profile_overrides
+                        (profile_name, subject_type, subject_key, decision, created_at, updated_at)
+                    VALUES (?1, 'category', ?2, 'allow', ?3, ?3)
+                    ON CONFLICT(profile_name, subject_type, subject_key) DO UPDATE SET
+                        decision = excluded.decision,
+                        updated_at = excluded.updated_at
+                    "#,
+                    params![profile.name, category.name, now],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+    }
     Ok(())
 }
 
@@ -275,9 +313,8 @@ pub fn scan_processes() -> Vec<ProcessInfo> {
 fn taskbar_pids() -> HashSet<u32> {
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW,
-        GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, GW_OWNER,
-        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        EnumWindows, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowThreadProcessId,
+        IsWindowVisible, GWL_EXSTYLE, GW_OWNER, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
 
     unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -306,10 +343,7 @@ fn taskbar_pids() -> HashSet<u32> {
 
     let mut pids: HashSet<u32> = HashSet::new();
     unsafe {
-        EnumWindows(
-            Some(cb),
-            &mut pids as *mut HashSet<u32> as LPARAM,
-        );
+        EnumWindows(Some(cb), &mut pids as *mut HashSet<u32> as LPARAM);
     }
     pids
 }
@@ -373,13 +407,8 @@ fn is_user_facing_app(exe: Option<&Path>) -> bool {
         if let Some(home) = std::env::var_os("HOME") {
             let home = home.to_string_lossy();
             let user_apps = format!("{}/Applications/", home);
-            let steam_lib = format!(
-                "{}/Library/Application Support/Steam/steamapps/",
-                home
-            );
-            if display.starts_with(user_apps.as_str())
-                || display.starts_with(steam_lib.as_str())
-            {
+            let steam_lib = format!("{}/Library/Application Support/Steam/steamapps/", home);
+            if display.starts_with(user_apps.as_str()) || display.starts_with(steam_lib.as_str()) {
                 return true;
             }
         }
@@ -427,12 +456,7 @@ fn is_user_facing_app(exe: Option<&Path>) -> bool {
                 return false;
             }
         }
-        const ALLOW_PREFIXES: &[&str] = &[
-            "/usr/bin/",
-            "/opt/",
-            "/snap/",
-            "/var/lib/flatpak/",
-        ];
+        const ALLOW_PREFIXES: &[&str] = &["/usr/bin/", "/opt/", "/snap/", "/var/lib/flatpak/"];
         for prefix in ALLOW_PREFIXES {
             if display.starts_with(prefix) {
                 return true;
@@ -684,7 +708,9 @@ pub fn refresh_known_apps_inventory(connection: &Connection) -> Result<(), Strin
     for app in discovered {
         upsert_known_app(connection, &app, None)?;
     }
-    reclassify_uncategorized_apps(connection)?;
+    purge_stale_steam_duplicate_rows(connection)?;
+    purge_stale_bundle_duplicate_rows(connection)?;
+    reclassify_auto_categorized_apps(connection)?;
     Ok(())
 }
 
@@ -705,7 +731,7 @@ fn purge_embedded_helper_rows(connection: &Connection) -> Result<(), String> {
     drop(statement);
     let mut purged = 0usize;
     for (app_key, path) in rows {
-        if categories::is_macos_embedded_helper_path(&path) {
+        if categories::is_macos_embedded_helper_path(&path) || is_own_app_path(&path) {
             connection
                 .execute(
                     "DELETE FROM known_apps WHERE app_key = ?1",
@@ -721,15 +747,73 @@ fn purge_embedded_helper_rows(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Re-run the classifier over rows still missing a category guess. Catches
-/// apps that pre-date a keyword-list expansion.
-fn reclassify_uncategorized_apps(connection: &Connection) -> Result<(), String> {
+fn purge_stale_steam_duplicate_rows(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT app_key, app_path
+            FROM known_apps
+            WHERE app_path IS NOT NULL
+              AND category_override IS NULL
+              AND classification_status = 'unclassified'
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<(String, Option<String>)>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+
+    let mut purged = 0usize;
+    for (app_key, app_path) in rows {
+        let Some(path) = app_path else {
+            continue;
+        };
+        let Some(steam_app_id) = steam_app_id_for_path(&path) else {
+            continue;
+        };
+        let canonical_key = steam_app_key(&steam_app_id);
+        if app_key == canonical_key {
+            continue;
+        }
+        let canonical_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM known_apps WHERE app_key = ?1)",
+                params![canonical_key],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if canonical_exists {
+            connection
+                .execute(
+                    "DELETE FROM known_apps WHERE app_key = ?1",
+                    params![app_key],
+                )
+                .map_err(|error| error.to_string())?;
+            purged += 1;
+        }
+    }
+    if purged > 0 {
+        log::info!("purged {} stale Steam duplicate app rows", purged);
+    }
+    Ok(())
+}
+
+fn purge_stale_bundle_duplicate_rows(connection: &Connection) -> Result<(), String> {
+    purge_duplicate_bundle_display_rows(connection)?;
+
     let mut statement = connection
         .prepare(
             r#"
             SELECT app_key, display_name, app_path
             FROM known_apps
-            WHERE category_guess IS NULL OR category_guess = ''
+            WHERE app_path IS NOT NULL
+              AND category_override IS NULL
+              AND classification_status = 'unclassified'
             "#,
         )
         .map_err(|error| error.to_string())?;
@@ -745,21 +829,154 @@ fn reclassify_uncategorized_apps(connection: &Connection) -> Result<(), String> 
         .collect::<Result<Vec<(String, String, Option<String>)>, _>>()
         .map_err(|error| error.to_string())?;
     drop(statement);
-    let mut updated = 0usize;
-    for (app_key, display_name, path) in rows {
-        let (guess, confidence) = classify_app_candidate(&display_name, path.as_deref());
-        if let Some(name) = guess {
+
+    let mut purged = 0usize;
+    for (app_key, _display_name, app_path) in rows {
+        let Some(path) = app_path else {
+            continue;
+        };
+        let Some(bundle_name) = app_bundle_display_name(&path) else {
+            continue;
+        };
+        let canonical_key = app_key_for(&bundle_name, Some(&bundle_name), Some(&path));
+        if app_key == canonical_key {
+            continue;
+        }
+        let canonical_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM known_apps WHERE app_key = ?1 AND app_path = ?2)",
+                params![canonical_key, path],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if canonical_exists {
             connection
                 .execute(
-                    "UPDATE known_apps SET category_guess = ?1, confidence = ?2, updated_at = ?3 WHERE app_key = ?4",
-                    rusqlite::params![name, confidence, timestamp_ms(), app_key],
+                    "DELETE FROM known_apps WHERE app_key = ?1",
+                    params![app_key],
                 )
                 .map_err(|error| error.to_string())?;
-            updated += 1;
+            purged += 1;
         }
     }
+    if purged > 0 {
+        log::info!("purged {} stale duplicate app bundle rows", purged);
+    }
+    Ok(())
+}
+
+fn purge_duplicate_bundle_display_rows(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT app_path
+            FROM known_apps
+            WHERE app_path IS NOT NULL
+              AND category_override IS NULL
+              AND classification_status = 'unclassified'
+            GROUP BY app_path
+            HAVING COUNT(*) > 1
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let paths = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+
+    let mut purged = 0usize;
+    for path in paths {
+        let Some(bundle_name) = app_bundle_display_name(&path) else {
+            continue;
+        };
+        let keeper_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM known_apps WHERE app_path = ?1 AND display_name = ?2)",
+                params![path, bundle_name],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !keeper_exists {
+            continue;
+        }
+        purged += connection
+            .execute(
+                r#"
+                DELETE FROM known_apps
+                WHERE app_path = ?1
+                  AND display_name != ?2
+                  AND category_override IS NULL
+                  AND classification_status = 'unclassified'
+                "#,
+                params![path, bundle_name],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    if purged > 0 {
+        log::info!("purged {} duplicate bundle display rows", purged);
+    }
+    Ok(())
+}
+
+/// Re-run the classifier over unconfirmed rows with no user override. This
+/// catches apps that pre-date classifier changes and repairs stale bad guesses
+/// without touching explicit user decisions.
+fn reclassify_auto_categorized_apps(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT app_key, display_name, app_path, category_guess
+            FROM known_apps
+            WHERE category_override IS NULL
+              AND classification_status = 'unclassified'
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<(String, String, Option<String>, Option<String>)>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+    let mut updated = 0usize;
+    for (app_key, display_name, path, previous_guess) in rows {
+        let (guess, confidence) = classify_app_candidate(&display_name, path.as_deref());
+        let existing_memberships = load_app_category_names(connection, &app_key)?;
+        let auto_membership = existing_memberships.is_empty()
+            || previous_guess
+                .as_deref()
+                .map(|name| existing_memberships == [name.to_string()])
+                .unwrap_or(false);
+        connection
+            .execute(
+                "UPDATE known_apps SET category_guess = ?1, confidence = ?2, updated_at = ?3 WHERE app_key = ?4",
+                rusqlite::params![guess, confidence, timestamp_ms(), app_key],
+            )
+            .map_err(|error| error.to_string())?;
+        if auto_membership {
+            connection
+                .execute(
+                    "DELETE FROM app_category_memberships WHERE app_key = ?1",
+                    rusqlite::params![app_key],
+                )
+                .map_err(|error| error.to_string())?;
+            if let Some(name) = guess.as_deref() {
+                ensure_category_membership(connection, &app_key, name)?;
+            }
+        }
+        updated += 1;
+    }
     if updated > 0 {
-        log::info!("reclassified {} previously uncategorized apps", updated);
+        log::info!("reclassified {} auto-categorized apps", updated);
     }
     Ok(())
 }
@@ -1200,9 +1417,7 @@ pub fn set_enforcement_profile_override(
     if profile_name == categories::EMERGENCY_PROFILE_NAME
         && override_entry.decision == EnforcementDecision::Allow
     {
-        if let Some(category) =
-            resolve_subject_category(connection, &subject_type, &subject_key)?
-        {
+        if let Some(category) = resolve_subject_category(connection, &subject_type, &subject_key)? {
             if categories::EMERGENCY_BLOCKED_CATEGORIES
                 .iter()
                 .any(|blocked| blocked.eq_ignore_ascii_case(&category))
@@ -1752,25 +1967,29 @@ fn upsert_known_app(
 }
 
 fn running_app_candidate(process: &ProcessInfo) -> DiscoveredApp {
-    let display_name = executable_display_name(process);
+    let app_path = process
+        .exe_path
+        .as_deref()
+        .and_then(enclosing_app_bundle_path)
+        .or_else(|| process.exe_path.clone());
+    let display_name = app_path
+        .as_deref()
+        .and_then(app_bundle_display_name)
+        .unwrap_or_else(|| executable_display_name(process));
     let executable_name = process
         .exe_path
         .as_deref()
         .and_then(|path| Path::new(path).file_name())
         .map(|name| name.to_string_lossy().to_string())
         .or_else(|| Some(process.name.clone()));
-    let (category_guess, confidence) =
-        classify_app_candidate(&display_name, process.exe_path.as_deref());
+    let category_path = app_path.as_deref().or(process.exe_path.as_deref());
+    let (category_guess, confidence) = classify_app_candidate(&display_name, category_path);
     DiscoveredApp {
-        app_key: app_key_for(
-            &display_name,
-            executable_name.as_deref(),
-            process.exe_path.as_deref(),
-        ),
+        app_key: app_key_for(&display_name, Some(&display_name), category_path),
         display_name,
         executable_name,
         executable_path: process.exe_path.clone(),
-        app_path: process.exe_path.clone(),
+        app_path,
         platform: std::env::consts::OS.to_string(),
         source: "running_detected".to_string(),
         category_guess,
@@ -1827,12 +2046,18 @@ fn discover_installed_apps_for_platform() -> Vec<DiscoveredApp> {
                 {
                     let (category_guess, confidence) =
                         classify_app_candidate(&display_name, Some(&display));
+                    let steam_app_id = steam_app_id_for_path(&display);
+                    let display_name = steam_app_id
+                        .as_deref()
+                        .and_then(|id| steam_app_name_for_id(&display, id))
+                        .unwrap_or(display_name);
+                    let app_key = steam_app_id
+                        .map(|id| steam_app_key(&id))
+                        .unwrap_or_else(|| {
+                            app_key_for(&display_name, Some(&display_name), Some(&display))
+                        });
                     apps.push(DiscoveredApp {
-                        app_key: app_key_for(
-                            &display_name,
-                            Some(&display_name),
-                            Some(&display),
-                        ),
+                        app_key,
                         display_name: display_name.clone(),
                         executable_name: Some(display_name.clone()),
                         executable_path: None,
@@ -1855,9 +2080,7 @@ fn discover_installed_apps_for_platform() -> Vec<DiscoveredApp> {
     ];
     if let Some(home) = dirs::home_dir() {
         roots.push(home.join("Applications"));
-        roots.push(home.join(
-            "Library/Application Support/Steam/steamapps/common",
-        ));
+        roots.push(home.join("Library/Application Support/Steam/steamapps/common"));
     }
     for root in roots {
         let before = apps.len();
@@ -2004,11 +2227,7 @@ fn discover_installed_apps_for_platform() -> Vec<DiscoveredApp> {
             let (category_guess, confidence) =
                 classify_app_candidate(&display_name, exec_path.as_deref());
             apps.push(DiscoveredApp {
-                app_key: app_key_for(
-                    &display_name,
-                    Some(&display_name),
-                    exec_path.as_deref(),
-                ),
+                app_key: app_key_for(&display_name, Some(&display_name), exec_path.as_deref()),
                 display_name: display_name.clone(),
                 executable_name: Some(display_name.clone()),
                 executable_path: exec_path,
@@ -2043,8 +2262,18 @@ fn collect_app_bundles(root: &Path, apps: &mut Vec<DiscoveredApp>) {
             };
             let (category_guess, confidence) =
                 classify_app_candidate(&display_name, Some(&path_str));
+            let steam_app_id = steam_app_id_for_path(&path_str);
+            let display_name = steam_app_id
+                .as_deref()
+                .and_then(|id| steam_app_name_for_id(&path_str, id))
+                .unwrap_or(display_name);
+            let app_key = steam_app_id
+                .map(|id| steam_app_key(&id))
+                .unwrap_or_else(|| {
+                    app_key_for(&display_name, Some(&display_name), Some(&path_str))
+                });
             apps.push(DiscoveredApp {
-                app_key: app_key_for(&display_name, Some(&display_name), Some(&path_str)),
+                app_key,
                 display_name: display_name.clone(),
                 executable_name: Some(display_name.clone()),
                 executable_path: None,
@@ -2131,10 +2360,120 @@ fn normalized_path_token(path: &str) -> Option<String> {
         .filter(|token| !token.is_empty())
 }
 
+fn enclosing_app_bundle_path(path: &str) -> Option<String> {
+    let marker = ".app/";
+    let index = path.find(marker)?;
+    Some(path[..index + ".app".len()].to_string())
+}
+
+fn app_bundle_display_name(path: &str) -> Option<String> {
+    let bundle_path = if path.ends_with(".app") {
+        Path::new(path)
+    } else {
+        return None;
+    };
+    bundle_path
+        .file_stem()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.trim().is_empty())
+}
+
+fn steam_app_key(app_id: &str) -> String {
+    format!("steam:{app_id}")
+}
+
+fn steam_app_id_for_path(path: &str) -> Option<String> {
+    steam_app_id_from_shortcut(path).or_else(|| steam_app_id_from_library_path(path))
+}
+
+fn steam_app_id_from_shortcut(path: &str) -> Option<String> {
+    let bundle_path = Path::new(path);
+    if bundle_path.extension().and_then(|value| value.to_str()) != Some("app") {
+        return None;
+    }
+    let launcher = bundle_path.join("Contents/MacOS/run.sh");
+    let content = fs::read_to_string(launcher).ok()?;
+    parse_steam_run_url(&content)
+}
+
+fn steam_app_id_from_library_path(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let marker = "/steamapps/common/";
+    let marker_index = normalized.to_lowercase().find(marker)?;
+    let after_common = &normalized[marker_index + marker.len()..];
+    let install_dir = after_common.split('/').next()?.trim();
+    if install_dir.is_empty() {
+        return None;
+    }
+    let steamapps_dir = Path::new(&normalized[..marker_index + "/steamapps".len()]);
+    let entries = fs::read_dir(steamapps_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = path.file_name()?.to_string_lossy();
+        if !file_name.starts_with("appmanifest_") || !file_name.ends_with(".acf") {
+            continue;
+        }
+        let content = fs::read_to_string(path).ok()?;
+        if acf_value(&content, "installdir")
+            .map(|value| value.eq_ignore_ascii_case(install_dir))
+            .unwrap_or(false)
+        {
+            return acf_value(&content, "appid");
+        }
+    }
+    None
+}
+
+fn steam_app_name_for_id(path: &str, app_id: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let marker = "/steamapps/";
+    let marker_index = normalized.to_lowercase().find(marker)?;
+    let steamapps_dir = Path::new(&normalized[..marker_index + "/steamapps".len()]);
+    let manifest = steamapps_dir.join(format!("appmanifest_{app_id}.acf"));
+    let content = fs::read_to_string(manifest).ok()?;
+    acf_value(&content, "name")
+}
+
+fn parse_steam_run_url(content: &str) -> Option<String> {
+    let marker = "steam://run/";
+    let lower = content.to_lowercase();
+    let start = lower.find(marker)? + marker.len();
+    let id: String = lower[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
+fn acf_value(content: &str, key: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        let quoted: Vec<&str> = line.split('"').collect();
+        if quoted.len() >= 4 && quoted[1] == key {
+            return Some(quoted[3].to_string());
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+enum KeywordMatchMode {
+    ExactCompact,
+    WholeToken,
+    Phrase,
+    DistinctSubstring,
+}
+
 fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<String>, f64) {
     if let Some(path_str) = path {
+        if is_own_app_path(path_str) {
+            return (Some("System".to_string()), 0.99);
+        }
         if categories::is_macos_embedded_helper_path(path_str) {
             return (Some("System".to_string()), 0.97);
+        }
+        if is_steam_game_path(path_str) || is_steam_shortcut_bundle(path_str) {
+            return (Some("Games".to_string()), 0.9);
         }
         if categories::MACOS_SYSTEM_PATH_PREFIXES
             .iter()
@@ -2154,122 +2493,411 @@ fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<Str
         }
     }
 
-    // Keyword sweep matches only against the display name (path strips
-    // produced too many false positives — Electron apps ship Chromium
-    // frameworks, etc). Spaces are removed from both sides so a keyword
-    // like "block work" still matches "Block for Work" without false
-    // partial-word hits on short tokens.
-    let haystack = normalized.replace(' ', "");
+    // Keyword sweep matches only against the display name. Path strips
+    // produced too many false positives because Electron apps ship Chromium
+    // frameworks, helpers, etc. Match modes are deliberately conservative:
+    // short/generic terms must match whole tokens or exact compact names,
+    // while substring matching is reserved for distinctive app names.
+    let tokens = normalized_tokens(display_name);
+    let compact = normalized.replace(' ', "");
     for (category, keywords) in [
         (
             "Games",
             &[
-                "steam", "riot", "epic", "battle", "game", "minecraft", "roblox",
-                "valorant", "fortnite", "league", "blizzard", "playstation",
-                "xbox", "nintendo", "emulator", "rpcs", "dolphin", "retroarch",
-                "gameloop", "gog", "ubisoft", "rockstar",
+                ("steam", KeywordMatchMode::WholeToken),
+                ("riot", KeywordMatchMode::WholeToken),
+                ("epic", KeywordMatchMode::WholeToken),
+                ("battle", KeywordMatchMode::WholeToken),
+                ("game", KeywordMatchMode::WholeToken),
+                ("minecraft", KeywordMatchMode::DistinctSubstring),
+                ("roblox", KeywordMatchMode::DistinctSubstring),
+                ("valorant", KeywordMatchMode::DistinctSubstring),
+                ("fortnite", KeywordMatchMode::DistinctSubstring),
+                ("league", KeywordMatchMode::WholeToken),
+                ("blizzard", KeywordMatchMode::DistinctSubstring),
+                ("playstation", KeywordMatchMode::DistinctSubstring),
+                ("xbox", KeywordMatchMode::WholeToken),
+                ("nintendo", KeywordMatchMode::DistinctSubstring),
+                ("emulator", KeywordMatchMode::WholeToken),
+                ("rpcs", KeywordMatchMode::WholeToken),
+                ("dolphin", KeywordMatchMode::WholeToken),
+                ("retroarch", KeywordMatchMode::DistinctSubstring),
+                ("gameloop", KeywordMatchMode::DistinctSubstring),
+                ("gog", KeywordMatchMode::WholeToken),
+                ("ubisoft", KeywordMatchMode::DistinctSubstring),
+                ("rockstar", KeywordMatchMode::DistinctSubstring),
             ][..],
         ),
         (
             "Social Media",
             &[
-                "discord", "telegram", "whatsapp", "signal", "wechat", "line",
-                "messenger", "instagram", "twitter", "tweetbot", "mastodon",
-                "bluesky", "threads", "reddit", "snapchat", "tiktok", "wire",
-                "viber", "kakao", "facebook",
+                ("discord", KeywordMatchMode::DistinctSubstring),
+                ("telegram", KeywordMatchMode::DistinctSubstring),
+                ("whatsapp", KeywordMatchMode::DistinctSubstring),
+                ("signal", KeywordMatchMode::WholeToken),
+                ("wechat", KeywordMatchMode::DistinctSubstring),
+                ("wechatappex", KeywordMatchMode::DistinctSubstring),
+                ("line", KeywordMatchMode::WholeToken),
+                ("messenger", KeywordMatchMode::WholeToken),
+                ("instagram", KeywordMatchMode::DistinctSubstring),
+                ("twitter", KeywordMatchMode::DistinctSubstring),
+                ("tweetbot", KeywordMatchMode::DistinctSubstring),
+                ("mastodon", KeywordMatchMode::DistinctSubstring),
+                ("bluesky", KeywordMatchMode::DistinctSubstring),
+                ("threads", KeywordMatchMode::WholeToken),
+                ("reddit", KeywordMatchMode::DistinctSubstring),
+                ("snapchat", KeywordMatchMode::DistinctSubstring),
+                ("tiktok", KeywordMatchMode::DistinctSubstring),
+                ("wire", KeywordMatchMode::WholeToken),
+                ("viber", KeywordMatchMode::DistinctSubstring),
+                ("kakao", KeywordMatchMode::DistinctSubstring),
+                ("facebook", KeywordMatchMode::DistinctSubstring),
             ][..],
         ),
         (
             "Entertainment",
             &[
-                "spotify", "vlc", "iina", "netflix", "music", "podcast", "youtube",
-                "twitch", "plex", "infuse", "hulu", "primevideo", "disney",
-                "appletv", "mpv", "quicktime", "audible", "soundcloud",
-                "tidal", "deezer", "kindle", "comic", "video", "player",
-                "stream",
+                ("spotify", KeywordMatchMode::DistinctSubstring),
+                ("vlc", KeywordMatchMode::ExactCompact),
+                ("iina", KeywordMatchMode::ExactCompact),
+                ("netflix", KeywordMatchMode::DistinctSubstring),
+                ("music", KeywordMatchMode::WholeToken),
+                ("podcast", KeywordMatchMode::WholeToken),
+                ("youtube", KeywordMatchMode::DistinctSubstring),
+                ("twitch", KeywordMatchMode::DistinctSubstring),
+                ("plex", KeywordMatchMode::WholeToken),
+                ("infuse", KeywordMatchMode::WholeToken),
+                ("hulu", KeywordMatchMode::DistinctSubstring),
+                ("bilibili", KeywordMatchMode::DistinctSubstring),
+                ("哔哩哔哩", KeywordMatchMode::DistinctSubstring),
+                ("primevideo", KeywordMatchMode::DistinctSubstring),
+                ("disney", KeywordMatchMode::WholeToken),
+                ("appletv", KeywordMatchMode::DistinctSubstring),
+                ("mpv", KeywordMatchMode::ExactCompact),
+                ("quicktime", KeywordMatchMode::DistinctSubstring),
+                ("audible", KeywordMatchMode::DistinctSubstring),
+                ("soundcloud", KeywordMatchMode::DistinctSubstring),
+                ("tidal", KeywordMatchMode::WholeToken),
+                ("deezer", KeywordMatchMode::DistinctSubstring),
+                ("kindle", KeywordMatchMode::WholeToken),
+                ("comic", KeywordMatchMode::WholeToken),
+                ("video", KeywordMatchMode::WholeToken),
+                ("player", KeywordMatchMode::WholeToken),
+                ("stream", KeywordMatchMode::WholeToken),
             ][..],
         ),
         (
             "Communication",
             &[
-                "slack", "teams", "zoom", "webex", "meet", "skype", "outlook",
-                "thunderbird", "mail", "gmail", "spark", "airmail", "newton",
-                "fastmail", "front", "hey", "linear", "shortwave",
+                ("slack", KeywordMatchMode::DistinctSubstring),
+                ("teams", KeywordMatchMode::WholeToken),
+                ("zoom", KeywordMatchMode::WholeToken),
+                ("webex", KeywordMatchMode::DistinctSubstring),
+                ("meet", KeywordMatchMode::WholeToken),
+                ("skype", KeywordMatchMode::DistinctSubstring),
+                ("outlook", KeywordMatchMode::DistinctSubstring),
+                ("thunderbird", KeywordMatchMode::DistinctSubstring),
+                ("mail", KeywordMatchMode::WholeToken),
+                ("gmail", KeywordMatchMode::DistinctSubstring),
+                ("spark", KeywordMatchMode::WholeToken),
+                ("airmail", KeywordMatchMode::DistinctSubstring),
+                ("newton", KeywordMatchMode::WholeToken),
+                ("fastmail", KeywordMatchMode::DistinctSubstring),
+                ("front", KeywordMatchMode::WholeToken),
+                ("hey", KeywordMatchMode::ExactCompact),
+                ("linear", KeywordMatchMode::WholeToken),
+                ("shortwave", KeywordMatchMode::DistinctSubstring),
             ][..],
         ),
         (
             "Browsers",
             &[
-                "chrome", "firefox", "safari", "microsoftedge", "arc",
-                "bravebrowser", "opera", "vivaldi", "chromium", "torbrowser",
-                "duckduckgo", "orion", "thorium", "zenbrowser",
+                ("chrome", KeywordMatchMode::WholeToken),
+                ("firefox", KeywordMatchMode::DistinctSubstring),
+                ("safari", KeywordMatchMode::WholeToken),
+                ("microsoftedge", KeywordMatchMode::ExactCompact),
+                ("arc", KeywordMatchMode::ExactCompact),
+                ("bravebrowser", KeywordMatchMode::ExactCompact),
+                ("opera", KeywordMatchMode::WholeToken),
+                ("vivaldi", KeywordMatchMode::DistinctSubstring),
+                ("chromium", KeywordMatchMode::WholeToken),
+                ("torbrowser", KeywordMatchMode::ExactCompact),
+                ("duckduckgo", KeywordMatchMode::DistinctSubstring),
+                ("orion", KeywordMatchMode::WholeToken),
+                ("thorium", KeywordMatchMode::WholeToken),
+                ("zenbrowser", KeywordMatchMode::ExactCompact),
             ][..],
         ),
         (
             "Development",
             &[
-                "code", "vscode", "cursor", "xcode", "android studio",
-                "intellij", "pycharm", "webstorm", "rubymine", "goland",
-                "phpstorm", "rider", "datagrip", "clion", "appcode", "fleet",
-                "zed", "sublime", "atom", "vim", "neovim", "emacs", "nova",
-                "terminal", "iterm", "warp", "alacritty", "kitty", "hyper",
-                "wezterm", "tmux", "docker", "podman", "lazygit", "github",
-                "sourcetree", "tower", "fork", "gitkraken", "postman", "insomnia",
-                "bruno", "tableplus", "dbeaver", "pgadmin", "mongodb compass",
-                "redis", "tinypng", "transmit", "cyberduck", "filezilla",
-                "tunnelblick", "wireshark", "proxyman", "charles",
+                ("code", KeywordMatchMode::ExactCompact),
+                ("visual studio code", KeywordMatchMode::Phrase),
+                ("vscode", KeywordMatchMode::ExactCompact),
+                ("codex", KeywordMatchMode::ExactCompact),
+                ("codex computer use", KeywordMatchMode::Phrase),
+                ("claude", KeywordMatchMode::ExactCompact),
+                ("claude code", KeywordMatchMode::Phrase),
+                ("claude code url handler", KeywordMatchMode::Phrase),
+                ("cursor", KeywordMatchMode::WholeToken),
+                ("xcode", KeywordMatchMode::DistinctSubstring),
+                ("android studio", KeywordMatchMode::Phrase),
+                ("intellij", KeywordMatchMode::DistinctSubstring),
+                ("pycharm", KeywordMatchMode::DistinctSubstring),
+                ("webstorm", KeywordMatchMode::DistinctSubstring),
+                ("rubymine", KeywordMatchMode::DistinctSubstring),
+                ("goland", KeywordMatchMode::DistinctSubstring),
+                ("phpstorm", KeywordMatchMode::DistinctSubstring),
+                ("rider", KeywordMatchMode::WholeToken),
+                ("datagrip", KeywordMatchMode::DistinctSubstring),
+                ("clion", KeywordMatchMode::WholeToken),
+                ("appcode", KeywordMatchMode::DistinctSubstring),
+                ("fleet", KeywordMatchMode::WholeToken),
+                ("zed", KeywordMatchMode::ExactCompact),
+                ("sublime", KeywordMatchMode::WholeToken),
+                ("atom", KeywordMatchMode::ExactCompact),
+                ("vim", KeywordMatchMode::ExactCompact),
+                ("neovim", KeywordMatchMode::DistinctSubstring),
+                ("emacs", KeywordMatchMode::DistinctSubstring),
+                ("nova", KeywordMatchMode::ExactCompact),
+                ("terminal", KeywordMatchMode::WholeToken),
+                ("iterm", KeywordMatchMode::DistinctSubstring),
+                ("warp", KeywordMatchMode::WholeToken),
+                ("alacritty", KeywordMatchMode::DistinctSubstring),
+                ("kitty", KeywordMatchMode::ExactCompact),
+                ("hyper", KeywordMatchMode::ExactCompact),
+                ("wezterm", KeywordMatchMode::DistinctSubstring),
+                ("tmux", KeywordMatchMode::WholeToken),
+                ("docker", KeywordMatchMode::WholeToken),
+                ("podman", KeywordMatchMode::WholeToken),
+                ("lazygit", KeywordMatchMode::DistinctSubstring),
+                ("github", KeywordMatchMode::WholeToken),
+                ("sourcetree", KeywordMatchMode::DistinctSubstring),
+                ("tower", KeywordMatchMode::WholeToken),
+                ("fork", KeywordMatchMode::ExactCompact),
+                ("gitkraken", KeywordMatchMode::DistinctSubstring),
+                ("postman", KeywordMatchMode::DistinctSubstring),
+                ("insomnia", KeywordMatchMode::DistinctSubstring),
+                ("bruno", KeywordMatchMode::ExactCompact),
+                ("tableplus", KeywordMatchMode::DistinctSubstring),
+                ("dbeaver", KeywordMatchMode::DistinctSubstring),
+                ("pgadmin", KeywordMatchMode::DistinctSubstring),
+                ("mongodb compass", KeywordMatchMode::Phrase),
+                ("redis", KeywordMatchMode::WholeToken),
+                ("tinypng", KeywordMatchMode::DistinctSubstring),
+                ("transmit", KeywordMatchMode::WholeToken),
+                ("cyberduck", KeywordMatchMode::DistinctSubstring),
+                ("filezilla", KeywordMatchMode::DistinctSubstring),
+                ("tunnelblick", KeywordMatchMode::DistinctSubstring),
+                ("wireshark", KeywordMatchMode::DistinctSubstring),
+                ("proxyman", KeywordMatchMode::DistinctSubstring),
+                ("charles", KeywordMatchMode::WholeToken),
             ][..],
         ),
         (
             "Productivity",
             &[
-                "notion", "obsidian", "logseq", "roam", "bear", "craft", "evernote",
-                "onenote", "anytype", "remnote", "things", "todoist", "ticktick",
-                "omnifocus", "trello", "asana", "linear", "jira", "monday",
-                "clickup", "basecamp", "notes", "reminders", "freeform",
-                "scrivener", "drafts", "ulysses", "ia writer", "1writer",
-                "raycast", "alfred", "rectangle", "magnet", "shottr",
-                "cleanshot", "1password", "bitwarden", "lastpass", "dashlane",
-                "calendar", "fantastical", "cron", "amie", "vimcal", "sunsama",
-                "microsoft", "excel", "word", "powerpoint", "outlook",
-                "keynote", "pages", "numbers", "google", "dropbox",
-                "onedrive", "icloud", "office",
+                ("notion", KeywordMatchMode::DistinctSubstring),
+                ("obsidian", KeywordMatchMode::DistinctSubstring),
+                ("logseq", KeywordMatchMode::DistinctSubstring),
+                ("roam", KeywordMatchMode::WholeToken),
+                ("bear", KeywordMatchMode::ExactCompact),
+                ("craft", KeywordMatchMode::WholeToken),
+                ("evernote", KeywordMatchMode::DistinctSubstring),
+                ("onenote", KeywordMatchMode::DistinctSubstring),
+                ("anytype", KeywordMatchMode::DistinctSubstring),
+                ("remnote", KeywordMatchMode::DistinctSubstring),
+                ("things", KeywordMatchMode::ExactCompact),
+                ("todoist", KeywordMatchMode::DistinctSubstring),
+                ("ticktick", KeywordMatchMode::DistinctSubstring),
+                ("omnifocus", KeywordMatchMode::DistinctSubstring),
+                ("trello", KeywordMatchMode::DistinctSubstring),
+                ("asana", KeywordMatchMode::DistinctSubstring),
+                ("linear", KeywordMatchMode::WholeToken),
+                ("jira", KeywordMatchMode::WholeToken),
+                ("monday", KeywordMatchMode::WholeToken),
+                ("clickup", KeywordMatchMode::DistinctSubstring),
+                ("basecamp", KeywordMatchMode::DistinctSubstring),
+                ("notes", KeywordMatchMode::WholeToken),
+                ("reminders", KeywordMatchMode::WholeToken),
+                ("freeform", KeywordMatchMode::WholeToken),
+                ("scrivener", KeywordMatchMode::DistinctSubstring),
+                ("drafts", KeywordMatchMode::ExactCompact),
+                ("ulysses", KeywordMatchMode::DistinctSubstring),
+                ("ia writer", KeywordMatchMode::Phrase),
+                ("1writer", KeywordMatchMode::DistinctSubstring),
+                ("raycast", KeywordMatchMode::DistinctSubstring),
+                ("alfred", KeywordMatchMode::DistinctSubstring),
+                ("rectangle", KeywordMatchMode::WholeToken),
+                ("magnet", KeywordMatchMode::WholeToken),
+                ("shottr", KeywordMatchMode::DistinctSubstring),
+                ("cleanshot", KeywordMatchMode::DistinctSubstring),
+                ("1password", KeywordMatchMode::DistinctSubstring),
+                ("bitwarden", KeywordMatchMode::DistinctSubstring),
+                ("lastpass", KeywordMatchMode::DistinctSubstring),
+                ("dashlane", KeywordMatchMode::DistinctSubstring),
+                ("calendar", KeywordMatchMode::WholeToken),
+                ("fantastical", KeywordMatchMode::DistinctSubstring),
+                ("cron", KeywordMatchMode::ExactCompact),
+                ("amie", KeywordMatchMode::ExactCompact),
+                ("vimcal", KeywordMatchMode::DistinctSubstring),
+                ("sunsama", KeywordMatchMode::DistinctSubstring),
+                ("microsoft", KeywordMatchMode::WholeToken),
+                ("excel", KeywordMatchMode::WholeToken),
+                ("word", KeywordMatchMode::WholeToken),
+                ("powerpoint", KeywordMatchMode::WholeToken),
+                ("outlook", KeywordMatchMode::DistinctSubstring),
+                ("keynote", KeywordMatchMode::WholeToken),
+                ("pages", KeywordMatchMode::ExactCompact),
+                ("numbers", KeywordMatchMode::ExactCompact),
+                ("google", KeywordMatchMode::WholeToken),
+                ("dropbox", KeywordMatchMode::DistinctSubstring),
+                ("onedrive", KeywordMatchMode::DistinctSubstring),
+                ("icloud", KeywordMatchMode::DistinctSubstring),
+                ("office", KeywordMatchMode::WholeToken),
             ][..],
         ),
         (
             "Utilities",
             &[
-                "calculator", "preview", "photos", "image", "screenshot",
-                "transmission", "macupdater", "appcleaner", "the unarchiver",
-                "unzip", "keka", "betterzip", "vmware", "parallels",
-                "virtualbox", "utm", "homebrew", "cleanmymac", "macdiskpart",
-                "carbon copy", "time machine", "battery", "stats", "istat",
-                "vpn", "proxy", "downloader", "cleaner", "uninstaller",
-                "archiver", "compress", "disk", "fan",
+                ("calculator", KeywordMatchMode::WholeToken),
+                ("preview", KeywordMatchMode::WholeToken),
+                ("photos", KeywordMatchMode::WholeToken),
+                ("image", KeywordMatchMode::WholeToken),
+                ("screenshot", KeywordMatchMode::WholeToken),
+                ("transmission", KeywordMatchMode::WholeToken),
+                ("macupdater", KeywordMatchMode::DistinctSubstring),
+                ("appcleaner", KeywordMatchMode::DistinctSubstring),
+                ("the unarchiver", KeywordMatchMode::Phrase),
+                ("unzip", KeywordMatchMode::WholeToken),
+                ("keka", KeywordMatchMode::ExactCompact),
+                ("betterzip", KeywordMatchMode::DistinctSubstring),
+                ("vmware", KeywordMatchMode::DistinctSubstring),
+                ("parallels", KeywordMatchMode::WholeToken),
+                ("virtualbox", KeywordMatchMode::DistinctSubstring),
+                ("utm", KeywordMatchMode::ExactCompact),
+                ("homebrew", KeywordMatchMode::DistinctSubstring),
+                ("cleanmymac", KeywordMatchMode::DistinctSubstring),
+                ("macdiskpart", KeywordMatchMode::DistinctSubstring),
+                ("carbon copy", KeywordMatchMode::Phrase),
+                ("time machine", KeywordMatchMode::Phrase),
+                ("battery", KeywordMatchMode::WholeToken),
+                ("stats", KeywordMatchMode::ExactCompact),
+                ("istat", KeywordMatchMode::WholeToken),
+                ("vpn", KeywordMatchMode::WholeToken),
+                ("proxy", KeywordMatchMode::WholeToken),
+                ("downloader", KeywordMatchMode::WholeToken),
+                ("cleaner", KeywordMatchMode::WholeToken),
+                ("uninstaller", KeywordMatchMode::WholeToken),
+                ("archiver", KeywordMatchMode::WholeToken),
+                ("compress", KeywordMatchMode::WholeToken),
+                ("disk", KeywordMatchMode::WholeToken),
+                ("fan", KeywordMatchMode::WholeToken),
             ][..],
         ),
         (
             "Creative",
             &[
-                "photoshop", "illustrator", "indesign", "premiere", "after effects",
-                "lightroom", "figma", "sketch", "framer", "blender", "cinema 4d",
-                "fusion", "logic", "garageband", "ableton", "fl studio", "audacity",
-                "davinci", "final cut", "imovie", "obs", "screenflow", "procreate",
-                "affinity", "pixelmator", "capture one", "rawtherapee",
-                "darktable", "krita",
-                "gimp", "inkscape", "handbrake",
+                ("photoshop", KeywordMatchMode::DistinctSubstring),
+                ("illustrator", KeywordMatchMode::DistinctSubstring),
+                ("indesign", KeywordMatchMode::DistinctSubstring),
+                ("premiere", KeywordMatchMode::WholeToken),
+                ("after effects", KeywordMatchMode::Phrase),
+                ("lightroom", KeywordMatchMode::DistinctSubstring),
+                ("figma", KeywordMatchMode::WholeToken),
+                ("sketch", KeywordMatchMode::WholeToken),
+                ("framer", KeywordMatchMode::WholeToken),
+                ("blender", KeywordMatchMode::WholeToken),
+                ("cinema 4d", KeywordMatchMode::Phrase),
+                ("fusion", KeywordMatchMode::WholeToken),
+                ("logic", KeywordMatchMode::WholeToken),
+                ("garageband", KeywordMatchMode::DistinctSubstring),
+                ("ableton", KeywordMatchMode::DistinctSubstring),
+                ("musescore", KeywordMatchMode::DistinctSubstring),
+                ("muse hub", KeywordMatchMode::Phrase),
+                ("mainstage", KeywordMatchMode::DistinctSubstring),
+                ("sibelius", KeywordMatchMode::DistinctSubstring),
+                ("imslp", KeywordMatchMode::ExactCompact),
+                ("blackmagic", KeywordMatchMode::DistinctSubstring),
+                ("fl studio", KeywordMatchMode::Phrase),
+                ("audacity", KeywordMatchMode::DistinctSubstring),
+                ("davinci", KeywordMatchMode::DistinctSubstring),
+                ("final cut", KeywordMatchMode::Phrase),
+                ("imovie", KeywordMatchMode::DistinctSubstring),
+                ("obs", KeywordMatchMode::ExactCompact),
+                ("screenflow", KeywordMatchMode::DistinctSubstring),
+                ("procreate", KeywordMatchMode::DistinctSubstring),
+                ("affinity", KeywordMatchMode::WholeToken),
+                ("pixelmator", KeywordMatchMode::DistinctSubstring),
+                ("capture one", KeywordMatchMode::Phrase),
+                ("rawtherapee", KeywordMatchMode::DistinctSubstring),
+                ("darktable", KeywordMatchMode::DistinctSubstring),
+                ("krita", KeywordMatchMode::DistinctSubstring),
+                ("gimp", KeywordMatchMode::ExactCompact),
+                ("inkscape", KeywordMatchMode::DistinctSubstring),
+                ("handbrake", KeywordMatchMode::DistinctSubstring),
             ][..],
         ),
     ] {
-        if keywords.iter().any(|keyword| {
-            let needle = keyword.replace(' ', "");
-            haystack.contains(&needle)
-        }) {
+        if keywords
+            .iter()
+            .any(|(keyword, mode)| keyword_matches(&normalized, &compact, &tokens, keyword, *mode))
+        {
             return (Some(category.to_string()), 0.65);
         }
     }
 
     (None, 0.0)
+}
+
+fn is_steam_game_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_lowercase();
+    normalized.contains("/steamapps/common/")
+}
+
+fn is_steam_shortcut_bundle(path: &str) -> bool {
+    steam_app_id_from_shortcut(path).is_some()
+}
+
+fn is_own_app_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_lowercase();
+    normalized.ends_with("/antiprocrastinator.app")
+        || normalized.contains("/antiprocrastinator.app/contents/")
+        || normalized.ends_with("/com.antiprocrastinator.app")
+        || normalized.contains("/com.antiprocrastinator.app/")
+}
+
+fn normalized_tokens(value: &str) -> Vec<String> {
+    value
+        .to_lowercase()
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_string())
+        .collect()
+}
+
+fn keyword_matches(
+    normalized: &str,
+    compact: &str,
+    tokens: &[String],
+    keyword: &str,
+    mode: KeywordMatchMode,
+) -> bool {
+    let normalized_keyword = normalize_process_name(keyword);
+    let compact_keyword = normalized_keyword.replace(' ', "");
+    match mode {
+        KeywordMatchMode::ExactCompact => compact == compact_keyword,
+        KeywordMatchMode::WholeToken => tokens.iter().any(|token| token == &compact_keyword),
+        KeywordMatchMode::Phrase => {
+            normalized == normalized_keyword
+                || normalized.contains(&format!(" {normalized_keyword} "))
+                || normalized.starts_with(&format!("{normalized_keyword} "))
+                || normalized.ends_with(&format!(" {normalized_keyword}"))
+        }
+        KeywordMatchMode::DistinctSubstring => {
+            compact_keyword.len() >= 5 && compact.contains(&compact_keyword)
+        }
+    }
 }
 
 fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
@@ -3126,7 +3754,13 @@ pub fn lookup_icon_source(
         .optional()
         .map_err(|e| e.to_string())?
         .flatten();
-    Ok(row)
+    Ok(row.and_then(|path| {
+        if path.ends_with(".app") {
+            Some(path)
+        } else {
+            enclosing_app_bundle_path(&path)
+        }
+    }))
 }
 
 /// Convert a PNG byte buffer to a `data:image/png;base64,…` URL.
@@ -3172,11 +3806,7 @@ pub fn read_cached_icon(cache_dir: &Path, app_key: &str) -> Option<Vec<u8>> {
 /// orders of magnitude lighter than `qlmanage` (no Quick Look daemon).
 /// Other platforms always return None.
 #[cfg(target_os = "macos")]
-pub fn render_and_cache_icon(
-    cache_dir: &Path,
-    app_key: &str,
-    app_path: &str,
-) -> Option<Vec<u8>> {
+pub fn render_and_cache_icon(cache_dir: &Path, app_key: &str, app_path: &str) -> Option<Vec<u8>> {
     if !app_path.ends_with(".app") {
         return None;
     }
@@ -3185,20 +3815,26 @@ pub fn render_and_cache_icon(
         return None;
     }
     let resources = bundle.join("Contents/Resources");
-    let icns = find_icns_in_resources(&resources)?;
     let out_path = cache_dir.join(icon_cache_filename(app_key));
 
-    // sips -s format png -Z 64 <icns> --out <out_path>
+    if let Some(icns) = find_icns_in_resources(&resources) {
+        // sips -s format png -Z 64 <icns> --out <out_path>
+        let status = Command::new("sips")
+            .args(["-s", "format", "png", "-Z", "64", icns.to_str()?, "--out"])
+            .arg(&out_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        if !status.success() {
+            return None;
+        }
+        return fs::read(&out_path).ok();
+    }
+
+    let png = find_png_app_icon(bundle)?;
     let status = Command::new("sips")
-        .args([
-            "-s",
-            "format",
-            "png",
-            "-Z",
-            "64",
-            icns.to_str()?,
-            "--out",
-        ])
+        .args(["-s", "format", "png", "-Z", "64", png.to_str()?, "--out"])
         .arg(&out_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -3264,12 +3900,61 @@ fn find_icns_in_resources(resources: &Path) -> Option<PathBuf> {
         }
     }
     // Else: prefer the largest .icns file (usually the main app icon).
-    candidates.sort_by_key(|p| {
-        std::fs::metadata(p)
-            .map(|m| m.len())
-            .unwrap_or(0)
+    candidates.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
+    candidates.into_iter().next_back()
+}
+
+#[cfg(target_os = "macos")]
+fn find_png_app_icon(bundle: &Path) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    collect_png_icon_candidates(bundle, 0, &mut candidates);
+    candidates.sort_by_key(|path| {
+        let name_score = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .map(|name| {
+                if name.contains("appicon") {
+                    3
+                } else if name.contains("icon") {
+                    2
+                } else {
+                    1
+                }
+            })
+            .unwrap_or(0);
+        let size = fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        (name_score, size)
     });
     candidates.into_iter().next_back()
+}
+
+#[cfg(target_os = "macos")]
+fn collect_png_icon_candidates(root: &Path, depth: usize, candidates: &mut Vec<PathBuf>) {
+    if depth > 5 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_png_icon_candidates(&path, depth + 1, candidates);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("png") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if name.contains("appicon") || name.contains("icon") {
+            candidates.push(path);
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -3401,12 +4086,14 @@ fn to_from_sql_error(error: String) -> rusqlite::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use rusqlite::Connection;
 
     use super::{
-        clean_browser_window_title, create_known_app, create_known_browser_target, get_known_apps,
-        match_browser_target, running_app_candidate, update_known_app, upsert_known_app,
-        FocusedWindowInfo, ProcessInfo,
+        classify_app_candidate, clean_browser_window_title, create_known_app,
+        create_known_browser_target, get_known_apps, match_browser_target, running_app_candidate,
+        update_known_app, upsert_known_app, FocusedWindowInfo, ProcessInfo,
     };
     use crate::{
         db::migrations::run_migrations,
@@ -3482,6 +4169,89 @@ mod tests {
         .expect("browser target should match");
 
         assert_eq!(matched.target_key, "youtube");
+    }
+
+    #[test]
+    fn browser_keyword_matching_avoids_short_substring_false_positives() {
+        for name in ["Archive Utility", "Monarch", "Arcade", "SearchBar"] {
+            let (category, confidence) =
+                classify_app_candidate(name, Some("/Applications/Test.app"));
+
+            assert_ne!(
+                category.as_deref(),
+                Some("Browsers"),
+                "{name} should not be a browser"
+            );
+            assert!(
+                confidence < 0.95,
+                "{name} should not receive an exact-match confidence"
+            );
+        }
+
+        let (category, confidence) = classify_app_candidate("Arc", Some("/Applications/Arc.app"));
+        assert_eq!(category.as_deref(), Some("Browsers"));
+        assert!(confidence >= 0.95);
+    }
+
+    #[test]
+    fn generic_category_keywords_match_tokens_not_substrings() {
+        let cases = [
+            ("VideoScribe", "Entertainment"),
+            ("Codex", "Development"),
+            ("Mailbrew", "Communication"),
+            ("GameChanger", "Games"),
+        ];
+
+        for (name, wrong_category) in cases {
+            let (category, _) = classify_app_candidate(name, Some("/Applications/Test.app"));
+            assert_ne!(
+                category.as_deref(),
+                Some(wrong_category),
+                "{name} should not be classified via a generic substring"
+            );
+        }
+
+        let (category, _) = classify_app_candidate("Mail", Some("/Applications/Mail.app"));
+        assert_eq!(category.as_deref(), Some("Communication"));
+
+        let (category, _) =
+            classify_app_candidate("HandBrake", Some("/Applications/HandBrake.app"));
+        assert_eq!(category.as_deref(), Some("Creative"));
+    }
+
+    #[test]
+    fn steam_library_apps_are_games_even_with_non_game_titles() {
+        let (category, confidence) = classify_app_candidate(
+            "Victoria 3",
+            Some("/Users/test/Library/Application Support/Steam/steamapps/common/Victoria 3/Victoria 3.app"),
+        );
+
+        assert_eq!(category.as_deref(), Some("Games"));
+        assert!(confidence >= 0.9);
+    }
+
+    #[test]
+    fn steam_shortcut_bundles_are_games() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "antiprocrastinator-steam-shortcut-test-{}",
+            std::process::id()
+        ));
+        let launcher_dir = temp_dir.join("Victoria 3.app/Contents/MacOS");
+        fs::create_dir_all(&launcher_dir).expect("launcher directory should be created");
+        fs::write(
+            launcher_dir.join("run.sh"),
+            "#!/bin/bash\nopen steam://run/529340\n",
+        )
+        .expect("launcher script should be written");
+
+        let app_path = temp_dir.join("Victoria 3.app");
+        let (category, confidence) =
+            classify_app_candidate("Victoria 3", Some(&app_path.to_string_lossy()));
+
+        assert_eq!(category.as_deref(), Some("Games"));
+        assert!(confidence >= 0.9);
+
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]

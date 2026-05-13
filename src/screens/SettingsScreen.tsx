@@ -60,6 +60,17 @@ const btnDanger: CSSProperties = {
 let activeHoverPopId: symbol | null = null;
 let closeActiveHoverPop: (() => void) | null = null;
 
+function gcd(a: number, b: number): number {
+  let x = Math.abs(Math.round(a));
+  let y = Math.abs(Math.round(b));
+  while (y !== 0) {
+    const next = x % y;
+    x = y;
+    y = next;
+  }
+  return x || 1;
+}
+
 function HoverPop({
   title,
   body,
@@ -291,6 +302,45 @@ function Stepper({
       <button onClick={inc} style={stepperBtn}>
         +
       </button>
+    </div>
+  );
+}
+
+function RatioInput({
+  work,
+  rest,
+  onChange,
+}: {
+  work: number;
+  rest: number;
+  onChange: (work: number, rest: number) => void;
+}) {
+  const box: CSSProperties = {
+    width: 48,
+    background: 'transparent',
+    border: 'none',
+    color: 'var(--ink)',
+    fontFamily: 'var(--font-mono)',
+    fontSize: 12.5,
+    textAlign: 'center',
+    outline: 'none',
+  };
+  const setPart = (which: 'work' | 'rest', value: string) => {
+    const parsed = Math.max(which === 'work' ? 1 : 0, Number(value) || 0);
+    onChange(which === 'work' ? parsed : work, which === 'rest' ? parsed : rest);
+  };
+  return (
+    <div style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      border: '1px solid var(--line)',
+      borderRadius: 6,
+      background: 'var(--bg)',
+      overflow: 'hidden',
+    }}>
+      <input type="number" min={1} step={1} value={work} onChange={(e) => setPart('work', e.target.value)} style={box} />
+      <span style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)', fontSize: 13 }}>:</span>
+      <input type="number" min={0} step={1} value={rest} onChange={(e) => setPart('rest', e.target.value)} style={box} />
     </div>
   );
 }
@@ -907,17 +957,24 @@ export function SettingsScreen() {
                   }
                 />
                 <SettingsRow
-                  title="Default rest block"
-                  help="Length of rest between focus blocks."
+                  title="Work:rest ratio"
+                  help="Ratio used to derive rest after a generated work block. Default is 3:1."
                   control={
-                    <Stepper
-                      value={prefs.breakDurationMinutes}
-                      onChange={(v) => update({ breakDurationMinutes: v })}
-                      min={1}
-                      max={120}
-                      step={1}
-                      unit="min"
-                      width={140}
+                    <RatioInput
+                      work={Math.max(1, Math.round(
+                        prefs.workDurationMinutes / Math.max(1, gcd(prefs.workDurationMinutes, prefs.breakDurationMinutes)),
+                      ))}
+                      rest={Math.max(0, Math.round(
+                        prefs.breakDurationMinutes / Math.max(1, gcd(prefs.workDurationMinutes, prefs.breakDurationMinutes)),
+                      ))}
+                      onChange={(work, rest) =>
+                        update({
+                          breakDurationMinutes: Math.max(
+                            0,
+                            Math.round((prefs.workDurationMinutes * rest) / Math.max(1, work)),
+                          ),
+                        })
+                      }
                     />
                   }
                 />

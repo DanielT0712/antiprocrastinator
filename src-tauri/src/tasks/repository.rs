@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, Row};
 
 use super::models::{
-    recurrence_kind_from_str, recurrence_kind_to_str, task_kind_from_str, task_kind_to_str, NewTask,
-    Task, TaskFilter, TaskGroup, TaskStats, TaskUpdate,
+    recurrence_kind_from_str, recurrence_kind_to_str, task_kind_from_str, task_kind_to_str,
+    NewTask, Task, TaskFilter, TaskGroup, TaskStats, TaskUpdate,
 };
 
 pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<Vec<Task>, String> {
@@ -378,12 +378,12 @@ pub fn update_task_group(
         return get_task_group_by_id(connection, id);
     }
     params_vec.push(rusqlite::types::Value::Integer(id));
-    let sql = format!(
-        "UPDATE task_groups SET {} WHERE id = ?",
-        updates.join(", ")
-    );
+    let sql = format!("UPDATE task_groups SET {} WHERE id = ?", updates.join(", "));
     let mut stmt = connection.prepare(&sql).map_err(|e| e.to_string())?;
-    let bind: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+    let bind: Vec<&dyn rusqlite::ToSql> = params_vec
+        .iter()
+        .map(|v| v as &dyn rusqlite::ToSql)
+        .collect();
     stmt.execute(bind.as_slice()).map_err(|e| e.to_string())?;
     get_task_group_by_id(connection, id)
 }

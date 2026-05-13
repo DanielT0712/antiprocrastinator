@@ -255,5 +255,8 @@ export function onAppEvent<K extends keyof AppEventMap>(
   name: K,
   handler: (payload: AppEventMap[K]) => void,
 ): Promise<UnlistenFn> {
-  return listen<AppEventMap[K]>(name, (event) => handler(event.payload));
+  return listen<AppEventMap[K]>(name, (event) => handler(event.payload)).catch((error) => {
+    console.warn(`Event subscription unavailable for "${name}"`, error);
+    return () => undefined;
+  });
 }

@@ -17,6 +17,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            let _ = guard::watchdog::show_main_window(app);
+        }))
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .on_menu_event(|app, event| {
             if event.id() == guard::watchdog::TRAY_SHOW_ID {
@@ -145,6 +148,7 @@ pub fn run() {
 
             schedule::engine::start_timer_loop(app.handle().clone());
             processes::monitor::start_monitor_loop(app.handle().clone());
+            repair_generated_schedule(&app.handle());
 
             Ok(())
         })
@@ -159,6 +163,28 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+fn repair_generated_schedule(app: &tauri::AppHandle) {
+    let database = app.state::<db::DatabaseState>();
+    let config = app.state::<config::manager::ConfigState>();
+    let connection = match database.connection() {
+        Ok(connection) => connection,
+        Err(error) => {
+            log::warn!("failed to open database for startup schedule repair: {error}");
+            return;
+        }
+    };
+    let preferences = match config.get_preferences() {
+        Ok(preferences) => preferences,
+        Err(error) => {
+            log::warn!("failed to load preferences for startup schedule repair: {error}");
+            return;
+        }
+    };
+    if let Err(error) = schedule::engine::repair_generated_schedule(&connection, &preferences) {
+        log::warn!("failed to repair generated schedule on startup: {error}");
+    }
 }
 
 fn handle_window_close<R: tauri::Runtime>(window: &tauri::Window<R>, api: &tauri::CloseRequestApi) {

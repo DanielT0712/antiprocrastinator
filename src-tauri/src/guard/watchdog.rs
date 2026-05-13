@@ -330,6 +330,12 @@ pub fn run_guard_helper_from_cli() -> Result<(), String> {
 
 fn run_guard_helper(config: HelperConfig) -> Result<(), String> {
     let helper_pid = std::process::id();
+    if let Some(existing_pid) = find_running_helper_pid(&config.identifier, helper_pid) {
+        let mut state = load_supervisor_state(&config.identifier)?;
+        state.helper_pid = Some(existing_pid);
+        write_supervisor_state(&config.identifier, &state)?;
+        return Ok(());
+    }
 
     loop {
         let mut state = load_supervisor_state(&config.identifier)?;
@@ -362,18 +368,21 @@ fn run_guard_helper(config: HelperConfig) -> Result<(), String> {
             SupervisorMode::Enforced => {}
         }
 
-        let main_alive = state.main_pid.is_some_and(is_process_alive);
+        let executable = state
+            .main_executable_path
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| config.main_executable.clone());
+        let running_main_pid = find_running_pid_by_executable(&executable, Some(helper_pid));
+        let main_alive = state.main_pid.is_some_and(is_process_alive) || running_main_pid.is_some();
+        if let Some(pid) = running_main_pid {
+            state.main_pid = Some(pid);
+        }
         let launch_grace_elapsed = state
             .last_launch_at_epoch_secs
             .is_none_or(|ts| now.saturating_sub(ts) >= GUARD_LAUNCH_GRACE_SECS);
 
         if !main_alive && launch_grace_elapsed && can_attempt_restart(&mut state, now) {
-            let executable = state
-                .main_executable_path
-                .clone()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| config.main_executable.clone());
-
             if let Some((program, args, cwd)) = dev_relaunch_command(&state) {
                 spawn_process_with_cwd(
                     OsStr::new(&program),
@@ -462,6 +471,13 @@ fn ensure_helper_running(app: &AppHandle) -> Result<(), String> {
 
     let main_executable = main_binary_path(&current_executable);
     let identifier = app.config().identifier.clone();
+    if let Some(helper_pid) = find_running_helper_pid(&identifier, std::process::id()) {
+        let mut state = state;
+        state.helper_pid = Some(helper_pid);
+        write_supervisor_state_for_app(app, &state)?;
+        return Ok(());
+    }
+
     spawn_process(
         &helper_executable,
         &helper_args(&identifier, &main_executable),
@@ -686,6 +702,54 @@ fn is_process_alive(pid: u32) -> bool {
     let mut system = System::new_all();
     system.refresh_processes(ProcessesToUpdate::All, true);
     system.process(Pid::from_u32(pid)).is_some()
+}
+
+fn find_running_helper_pid(identifier: &str, current_pid: u32) -> Option<u32> {
+    let mut system = System::new_all();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    system.processes().iter().find_map(|(pid, process)| {
+        let raw_pid = pid.as_u32();
+        if raw_pid == current_pid {
+            return None;
+        }
+
+        let command = process
+            .cmd()
+            .iter()
+            .map(|part| part.to_string_lossy())
+            .collect::<Vec<_>>();
+        let is_helper = process
+            .exe()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == HELPER_BINARY_NAME)
+            || command.iter().any(|part| part.ends_with(HELPER_BINARY_NAME));
+        let has_identifier = command.iter().any(|part| part.as_ref() == identifier);
+        (is_helper && has_identifier).then_some(raw_pid)
+    })
+}
+
+fn find_running_pid_by_executable(executable: &Path, except_pid: Option<u32>) -> Option<u32> {
+    let mut system = System::new_all();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    system.processes().iter().find_map(|(pid, process)| {
+        let raw_pid = pid.as_u32();
+        if except_pid == Some(raw_pid) {
+            return None;
+        }
+        let process_exe = process.exe()?;
+        paths_match(process_exe, executable).then_some(raw_pid)
+    })
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn now_epoch_secs() -> u64 {
