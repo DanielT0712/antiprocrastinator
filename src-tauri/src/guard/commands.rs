@@ -52,6 +52,12 @@ pub fn suspend_guard(
 }
 
 #[tauri::command]
+pub fn frontend_heartbeat(guard: State<'_, GuardState>) -> Result<(), String> {
+    guard.record_frontend_heartbeat();
+    Ok(())
+}
+
+#[tauri::command]
 pub fn get_guard_status(
     app: AppHandle,
     guard: State<'_, GuardState>,

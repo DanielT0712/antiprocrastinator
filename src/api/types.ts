@@ -84,6 +84,8 @@ export interface Task {
   recurrenceKind: RecurrenceKind;
   recurrenceDaysMask: number;
   recurrenceAnchorDate: number | null;
+  recurrenceDates: number[] | null;
+  recurrenceOverrides: string | null;
   averagePriority: number;
   averageActualMinutes: number | null;
   completionCount: number;
@@ -117,6 +119,8 @@ export interface NewTask {
   recurrenceKind?: RecurrenceKind | null;
   recurrenceDaysMask?: number | null;
   recurrenceAnchorDate?: number | null;
+  recurrenceDates?: number[] | null;
+  recurrenceOverrides?: string | null;
 }
 
 export interface TaskUpdate {
@@ -138,6 +142,8 @@ export interface TaskUpdate {
   recurrenceKind?: RecurrenceKind;
   recurrenceDaysMask?: number;
   recurrenceAnchorDate?: number | null;
+  recurrenceDates?: number[] | null;
+  recurrenceOverrides?: string | null;
 }
 
 export interface UserPreferences {

@@ -259,6 +259,20 @@ pub fn run_migrations(connection: &Connection) -> Result<(), rusqlite::Error> {
         }
     }
 
+    // Idempotent: ensures columns exist even if user_version was advanced
+    // by an earlier build that didn't add them. Cheap pragma lookup.
+    for column in ["recurrence_dates", "recurrence_overrides"] {
+        let exists: i32 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = ?1",
+            [column],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            let ddl = format!("ALTER TABLE tasks ADD COLUMN {column} TEXT");
+            connection.execute(&ddl, [])?;
+        }
+    }
+
     if current_version != CURRENT_SCHEMA_VERSION {
         connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     }

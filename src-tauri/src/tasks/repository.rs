@@ -21,7 +21,7 @@ pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<
                    average_priority, average_actual_minutes, completion_count,
                    kind, fixed_window_start_minute, fixed_window_end_minute,
                    recurrence_kind, recurrence_days_mask, recurrence_anchor_date,
-                   created_at, updated_at
+                   created_at, updated_at, recurrence_dates, recurrence_overrides
                 FROM tasks
                 WHERE group_id = ?1 AND LOWER(name) LIKE LOWER(?2)
                 ORDER BY updated_at DESC, name ASC
@@ -37,7 +37,7 @@ pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<
                    average_priority, average_actual_minutes, completion_count,
                    kind, fixed_window_start_minute, fixed_window_end_minute,
                    recurrence_kind, recurrence_days_mask, recurrence_anchor_date,
-                   created_at, updated_at
+                   created_at, updated_at, recurrence_dates, recurrence_overrides
                 FROM tasks
                 WHERE group_id = ?1
                 ORDER BY updated_at DESC, name ASC
@@ -53,7 +53,7 @@ pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<
                    average_priority, average_actual_minutes, completion_count,
                    kind, fixed_window_start_minute, fixed_window_end_minute,
                    recurrence_kind, recurrence_days_mask, recurrence_anchor_date,
-                   created_at, updated_at
+                   created_at, updated_at, recurrence_dates, recurrence_overrides
                 FROM tasks
                 WHERE LOWER(name) LIKE LOWER(?1)
                 ORDER BY updated_at DESC, name ASC
@@ -69,7 +69,7 @@ pub fn get_tasks(connection: &Connection, filter: Option<TaskFilter>) -> Result<
                    average_priority, average_actual_minutes, completion_count,
                    kind, fixed_window_start_minute, fixed_window_end_minute,
                    recurrence_kind, recurrence_days_mask, recurrence_anchor_date,
-                   created_at, updated_at
+                   created_at, updated_at, recurrence_dates, recurrence_overrides
                 FROM tasks
                 ORDER BY updated_at DESC, name ASC
                 "#,
@@ -101,7 +101,7 @@ pub fn search_tasks(connection: &Connection, query: &str) -> Result<Vec<Task>, S
                    average_priority, average_actual_minutes, completion_count,
                    kind, fixed_window_start_minute, fixed_window_end_minute,
                    recurrence_kind, recurrence_days_mask, recurrence_anchor_date,
-                   created_at, updated_at
+                   created_at, updated_at, recurrence_dates, recurrence_overrides
             FROM tasks
             WHERE LOWER(name) LIKE LOWER(?1)
             ORDER BY completion_count DESC, updated_at DESC, name ASC
@@ -144,8 +144,8 @@ pub fn create_task(connection: &Connection, new_task: NewTask) -> Result<Task, S
                 average_priority, average_actual_minutes, completion_count,
                 kind, fixed_window_start_minute, fixed_window_end_minute,
                 recurrence_kind, recurrence_days_mask, recurrence_anchor_date,
-                created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+                created_at, updated_at, recurrence_dates, recurrence_overrides
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
             "#,
             params![
                 name,
@@ -170,7 +170,9 @@ pub fn create_task(connection: &Connection, new_task: NewTask) -> Result<Task, S
                 recurrence_days_mask,
                 new_task.recurrence_anchor_date,
                 now,
-                now
+                now,
+                dates_to_str(new_task.recurrence_dates.as_ref()),
+                new_task.recurrence_overrides,
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -237,6 +239,12 @@ pub fn update_task(connection: &Connection, id: i64, updates: TaskUpdate) -> Res
     let recurrence_anchor_date = updates
         .recurrence_anchor_date
         .unwrap_or(existing.recurrence_anchor_date);
+    let recurrence_dates = updates
+        .recurrence_dates
+        .unwrap_or(existing.recurrence_dates.clone());
+    let recurrence_overrides = updates
+        .recurrence_overrides
+        .unwrap_or(existing.recurrence_overrides.clone());
 
     validate_minutes(estimated_minutes)?;
     validate_chunk_minutes(max_chunk_minutes)?;
@@ -270,7 +278,9 @@ pub fn update_task(connection: &Connection, id: i64, updates: TaskUpdate) -> Res
                 recurrence_kind = ?19,
                 recurrence_days_mask = ?20,
                 recurrence_anchor_date = ?21,
-                updated_at = ?22
+                updated_at = ?22,
+                recurrence_dates = ?24,
+                recurrence_overrides = ?25
             WHERE id = ?23
             "#,
             params![
@@ -296,7 +306,9 @@ pub fn update_task(connection: &Connection, id: i64, updates: TaskUpdate) -> Res
                 recurrence_days_mask,
                 recurrence_anchor_date,
                 timestamp_ms(),
-                id
+                id,
+                dates_to_str(recurrence_dates.as_ref()),
+                recurrence_overrides,
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -428,7 +440,7 @@ fn get_task_by_id(connection: &Connection, id: i64) -> Result<Task, String> {
                    average_priority, average_actual_minutes, completion_count,
                    kind, fixed_window_start_minute, fixed_window_end_minute,
                    recurrence_kind, recurrence_days_mask, recurrence_anchor_date,
-                   created_at, updated_at
+                   created_at, updated_at, recurrence_dates, recurrence_overrides
             FROM tasks
             WHERE id = ?1
             "#,
@@ -451,6 +463,8 @@ fn get_task_group_by_id(connection: &Connection, id: i64) -> Result<TaskGroup, S
 fn map_task(row: &Row<'_>) -> rusqlite::Result<Task> {
     let kind_str: String = row.get(16)?;
     let recurrence_kind_str: String = row.get(19)?;
+    let dates_str: Option<String> = row.get(24)?;
+    let overrides_str: Option<String> = row.get(25)?;
     Ok(Task {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -474,9 +488,25 @@ fn map_task(row: &Row<'_>) -> rusqlite::Result<Task> {
         recurrence_kind: recurrence_kind_from_str(&recurrence_kind_str),
         recurrence_days_mask: row.get(20)?,
         recurrence_anchor_date: row.get(21)?,
+        recurrence_overrides: overrides_str,
+        recurrence_dates: dates_from_str(dates_str.as_deref()),
         created_at: row.get(22)?,
         updated_at: row.get(23)?,
     })
+}
+
+fn dates_to_str(dates: Option<&Vec<i64>>) -> Option<String> {
+    dates.and_then(|list| {
+        if list.is_empty() {
+            None
+        } else {
+            serde_json::to_string(list).ok()
+        }
+    })
+}
+
+fn dates_from_str(value: Option<&str>) -> Option<Vec<i64>> {
+    value.and_then(|raw| serde_json::from_str::<Vec<i64>>(raw).ok())
 }
 
 fn map_task_group(row: &Row<'_>) -> rusqlite::Result<TaskGroup> {
@@ -646,6 +676,14 @@ mod tests {
                 work_ratio: None,
                 rest_ratio: None,
                 protect_generated_blocks: None,
+                kind: None,
+                fixed_window_start_minute: None,
+                fixed_window_end_minute: None,
+                recurrence_kind: None,
+                recurrence_days_mask: None,
+                recurrence_anchor_date: None,
+                recurrence_dates: None,
+                recurrence_overrides: None,
             },
         )
         .expect("task should be created");
@@ -688,6 +726,14 @@ mod tests {
                 work_ratio: None,
                 rest_ratio: None,
                 protect_generated_blocks: None,
+                kind: None,
+                fixed_window_start_minute: None,
+                fixed_window_end_minute: None,
+                recurrence_kind: None,
+                recurrence_days_mask: None,
+                recurrence_anchor_date: None,
+                recurrence_dates: None,
+                recurrence_overrides: None,
             },
         )
         .expect("task should be created");

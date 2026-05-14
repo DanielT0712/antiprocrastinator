@@ -21,6 +21,7 @@ pub fn run() {
             let _ = guard::watchdog::show_main_window(app);
         }))
         .plugin(tauri_plugin_window_state::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .on_menu_event(|app, event| {
             if event.id() == guard::watchdog::TRAY_SHOW_ID {
                 let _ = guard::watchdog::show_main_window(app);
@@ -113,6 +114,7 @@ pub fn run() {
             guard::commands::confirm_quit,
             guard::commands::suspend_guard,
             guard::commands::get_guard_status,
+            guard::commands::frontend_heartbeat,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -208,6 +210,16 @@ fn handle_window_close<R: tauri::Runtime>(window: &tauri::Window<R>, api: &tauri
         return;
     }
 
+    // If the React UI hasn't pinged in 15s (e.g. white screen / mount
+    // failure), the challenge dialog can never render. Don't trap the
+    // user — let the close proceed; the exit handler will then disable
+    // the supervisor through its non-generic AppHandle path.
+    if strong_guard_active && !guard.frontend_alive(15_000) {
+        log::warn!("frontend heartbeat stale during close; bypassing strong guard");
+        let _ = guard.allow_exit_once();
+        return;
+    }
+
     api.prevent_close();
 
     // When strong guard is on, the close button means "I want to stop the
@@ -261,6 +273,12 @@ fn handle_exit_request(app: &tauri::AppHandle, api: &tauri::ExitRequestApi, code
         return;
     }
 
+    if !guard.frontend_alive(15_000) {
+        log::warn!("frontend heartbeat stale during exit; bypassing strong guard");
+        let _ = guard::watchdog::disable_supervisor(app);
+        return;
+    }
+
     api.prevent_exit();
     let _ = guard::watchdog::show_main_window(app);
     let _ = guard::watchdog::emit_quit_required(app, "app_exit", false);
@@ -282,10 +300,16 @@ fn handle_quit_request(app: &tauri::AppHandle, source: &str) {
     let strong_guard_active =
         preferences.strong_guard_enabled && guard.is_active().unwrap_or(false);
 
-    if strong_guard_active {
+    if strong_guard_active && guard.frontend_alive(15_000) {
         let _ = guard::watchdog::show_main_window(app);
         let _ = guard::watchdog::emit_quit_required(app, source, false);
         return;
+    }
+
+    if strong_guard_active {
+        log::warn!(
+            "frontend heartbeat stale during quit ({source}); bypassing strong guard"
+        );
     }
 
     let _ = guard::watchdog::disable_supervisor(app);

@@ -111,6 +111,7 @@ export const api = {
 
   // Guard
   getGuardStatus: () => invoke<GuardStatus>('get_guard_status'),
+  frontendHeartbeat: () => invoke<void>('frontend_heartbeat'),
   requestQuit: () =>
     invoke<{ warning: string; requiredPhrase: string }>('request_quit'),
   confirmQuit: (phrase: string) => invoke<boolean>('confirm_quit', { phrase }),
@@ -240,11 +241,21 @@ export interface ProcessKilledEvent {
   timestamp: number;
 }
 
+export interface BlockUpcomingEvent {
+  blockId: number;
+  title: string;
+  blockType: string;
+  startTime: number;
+  endTime: number;
+  secondsUntilStart: number;
+}
+
 // Event subscriptions
 export type AppEventMap = {
   'timer-tick': TimerTickPayload;
   'block-changed': TimeBlock;
   'block-finished-prompt': BlockDecisionPrompt;
+  'block-upcoming': BlockUpcomingEvent;
   'schedule-warning': ScheduleWarning[];
   'guard-quit-required': GuardQuitRequiredEvent;
   'process-warning': ProcessWarningEvent;

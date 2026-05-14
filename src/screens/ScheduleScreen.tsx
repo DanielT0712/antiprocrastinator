@@ -8,7 +8,8 @@ import {
   useState,
 } from 'react';
 import { api } from '../api';
-import type { Task, TimeBlock } from '../api/types';
+import type { Task, TaskGroup, TimeBlock } from '../api/types';
+import { Dropdown } from '../components/Dropdown';
 import { Icons } from '../components/Icons';
 import { blockBarColor, railKindFor } from '../lib/blocks';
 import { formatDuration, formatHHMM } from '../lib/format';
@@ -266,6 +267,7 @@ function BlockTile({
   dayStart,
   scale,
   task,
+  groupColor,
   selected,
   onClick,
 }: {
@@ -273,12 +275,19 @@ function BlockTile({
   dayStart: number;
   scale: TimelineScale;
   task: Task | null;
+  groupColor: string | null;
   selected: boolean;
   onClick: () => void;
 }) {
   const { block } = segment;
   const kind = railKindFor(block);
-  const bar = blockBarColor(kind);
+  const defaultBar = blockBarColor(kind);
+  // Work-type blocks inherit task group color so users can scan day by topic.
+  // Rest/sleep/meal keep their kind-based color since they're not task-bound.
+  const bar =
+    (block.blockType === 'work' || block.blockType === 'custom') && groupColor
+      ? groupColor
+      : defaultBar;
   const title = task?.name ?? block.title;
   const isPast = block.endTime < Date.now();
   const height = segmentHeightPx(segment, dayStart, scale);
@@ -412,19 +421,18 @@ function Inspector({ block, tasks, onClose, onSave, onDelete }: InspectorProps) 
 
       <div style={{ marginBottom: 12 }}>
         <div style={{ ...labelStyle, marginBottom: 6 }}>Type</div>
-        <select
+        <Dropdown
           value={draft.blockType}
-          onChange={(e) =>
-            setDraft({ ...draft, blockType: e.target.value as TimeBlock['blockType'] })
-          }
+          onChange={(v) => setDraft({ ...draft, blockType: v })}
           style={inputStyle}
-        >
-          <option value="work">Work</option>
-          <option value="break">Break</option>
-          <option value="sleep">Sleep</option>
-          <option value="meal">Meal</option>
-          <option value="custom">Custom</option>
-        </select>
+          options={[
+            { value: 'work', label: 'Work' },
+            { value: 'break', label: 'Break' },
+            { value: 'sleep', label: 'Sleep' },
+            { value: 'meal', label: 'Meal' },
+            { value: 'custom', label: 'Custom' },
+          ]}
+        />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
@@ -456,43 +464,35 @@ function Inspector({ block, tasks, onClose, onSave, onDelete }: InspectorProps) 
 
       <div style={{ marginBottom: 12 }}>
         <div style={{ ...labelStyle, marginBottom: 6 }}>Linked task</div>
-        <select
-          value={draft.taskId ?? ''}
-          onChange={(e) =>
-            setDraft({
-              ...draft,
-              taskId: e.target.value === '' ? null : Number(e.target.value),
-            })
+        <Dropdown
+          value={draft.taskId == null ? '' : String(draft.taskId)}
+          onChange={(v) =>
+            setDraft({ ...draft, taskId: v === '' ? null : Number(v) })
           }
           style={inputStyle}
-        >
-          <option value="">No task</option>
-          {tasks.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.name}
-            </option>
-          ))}
-        </select>
+          options={[
+            { value: '', label: 'No task' },
+            ...tasks.map((t) => ({ value: String(t.id), label: t.name })),
+          ]}
+        />
       </div>
 
       <div style={{ marginBottom: 12 }}>
         <div style={{ ...labelStyle, marginBottom: 6 }}>Profile</div>
-        <select
+        <Dropdown
           value={draft.enforcementProfile ?? ''}
-          onChange={(e) =>
-            setDraft({
-              ...draft,
-              enforcementProfile: e.target.value === '' ? null : e.target.value,
-            })
+          onChange={(v) =>
+            setDraft({ ...draft, enforcementProfile: v === '' ? null : v })
           }
           style={inputStyle}
-        >
-          <option value="">Inherit</option>
-          <option value="rest">Rest</option>
-          <option value="work">Work</option>
-          <option value="deep_work">Deep Work</option>
-          <option value="emergency">Emergency</option>
-        </select>
+          options={[
+            { value: '', label: 'Inherit' },
+            { value: 'rest', label: 'Rest' },
+            { value: 'work', label: 'Work' },
+            { value: 'deep_work', label: 'Deep Work' },
+            { value: 'emergency', label: 'Emergency' },
+          ]}
+        />
       </div>
 
       <label style={{
@@ -701,29 +701,31 @@ function AddBlockModal({ onClose, onCreate, tasks }: AddModalProps) {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
             <div>
               <div style={{ ...labelStyle, marginBottom: 6 }}>Type</div>
-              <select
+              <Dropdown
                 value={type}
-                onChange={(e) => setType(e.target.value as TimeBlock['blockType'])}
+                onChange={setType}
                 style={inputStyle}
-              >
-                <option value="work">Work</option>
-                <option value="break">Break</option>
-                <option value="sleep">Sleep</option>
-                <option value="meal">Meal</option>
-                <option value="custom">Custom</option>
-              </select>
+                options={[
+                  { value: 'work', label: 'Work' },
+                  { value: 'break', label: 'Break' },
+                  { value: 'sleep', label: 'Sleep' },
+                  { value: 'meal', label: 'Meal' },
+                  { value: 'custom', label: 'Custom' },
+                ]}
+              />
             </div>
             <div>
               <div style={{ ...labelStyle, marginBottom: 6 }}>Profile</div>
-              <select
+              <Dropdown
                 value={profile}
-                onChange={(e) => setProfile(e.target.value)}
+                onChange={setProfile}
                 style={inputStyle}
-              >
-                <option value="rest">Rest</option>
-                <option value="work">Work</option>
-                <option value="deep_work">Deep Work</option>
-              </select>
+                options={[
+                  { value: 'rest', label: 'Rest' },
+                  { value: 'work', label: 'Work' },
+                  { value: 'deep_work', label: 'Deep Work' },
+                ]}
+              />
             </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
@@ -754,20 +756,15 @@ function AddBlockModal({ onClose, onCreate, tasks }: AddModalProps) {
           </div>
           <div>
             <div style={{ ...labelStyle, marginBottom: 6 }}>Linked task (optional)</div>
-            <select
-              value={taskId ?? ''}
-              onChange={(e) =>
-                setTaskId(e.target.value === '' ? null : Number(e.target.value))
-              }
+            <Dropdown
+              value={taskId == null ? '' : String(taskId)}
+              onChange={(v) => setTaskId(v === '' ? null : Number(v))}
               style={inputStyle}
-            >
-              <option value="">No task</option>
-              {tasks.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
+              options={[
+                { value: '', label: 'No task' },
+                ...tasks.map((t) => ({ value: String(t.id), label: t.name })),
+              ]}
+            />
           </div>
         </div>
         <div style={{
@@ -923,6 +920,66 @@ function HourLines({ scale }: { scale: TimelineScale }): ReactNode {
     }
   }
   return out;
+}
+
+function CurrentTimeLine({
+  day,
+  now,
+  scale,
+}: {
+  day: number;
+  now: number;
+  scale: TimelineScale;
+}) {
+  if (startOfDay(now) !== day) return null;
+  const hour = (now - day) / HOUR_MS;
+  if (hour < TIMELINE_START_HOUR || hour > TIMELINE_END_HOUR) return null;
+  const y = scale.yOf(hour);
+  return (
+    <div
+      aria-hidden="true"
+      style={{
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        top: y,
+        zIndex: 3,
+        pointerEvents: 'none',
+      }}
+    >
+      <div
+        style={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          top: -1,
+          borderTop: '2px solid var(--accent)',
+          background: 'var(--accent)',
+        }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          left: 6,
+          top: 0,
+          transform: 'translateY(-50%)',
+          width: 42,
+          height: 18,
+          padding: '0 4px',
+          borderRadius: 4,
+          background: 'var(--accent)',
+          color: 'oklch(0.18 0.04 60)',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 10,
+          lineHeight: '18px',
+          textAlign: 'center',
+          fontVariantNumeric: 'tabular-nums',
+        }}
+      >
+        {formatHHMM(now)}
+      </div>
+    </div>
+  );
 }
 
 const SCHED_TEMPLATES = [
@@ -1223,6 +1280,7 @@ export function ScheduleScreen() {
   }, []);
   const [blocks, setBlocks] = useState<TimeBlock[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [groups, setGroups] = useState<TaskGroup[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [adding, setAdding] = useState(false);
   const [history, setHistory] = useState<MutationHistoryEntry[]>([]);
@@ -1230,6 +1288,7 @@ export function ScheduleScreen() {
   const [pxPerHour, setPxPerHour] = useState(DEFAULT_TIMELINE_PX_PER_HOUR);
   const [expandedRuns, setExpandedRuns] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   const daysToShow = VIEW_DAYS[view];
 
@@ -1238,14 +1297,16 @@ export function ScheduleScreen() {
       const now = Date.now();
       const from = viewStartDay(view, now);
       const to = from + daysToShow * DAY_MS;
-      const [list, taskList, historyList] = await Promise.all([
+      const [list, taskList, historyList, groupList] = await Promise.all([
         api.getScheduleRange(from, to),
         api.getTasks(),
         api.getScheduleMutationHistory(from - 7 * DAY_MS, to),
+        api.getTaskGroups(),
       ]);
       setBlocks(list);
       setTasks(taskList);
       setHistory(historyList);
+      setGroups(groupList);
     } catch (err) {
       setError(String(err));
     }
@@ -1255,9 +1316,14 @@ export function ScheduleScreen() {
     refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const dayBuckets = useMemo(() => {
     const buckets: { day: number; segments: BlockSegment[]; blockCount: number }[] = [];
-    const start = viewStartDay(view, Date.now());
+    const start = viewStartDay(view, now);
     for (let i = 0; i < daysToShow; i++) {
       const day = start + i * DAY_MS;
       const segments = buildBlockSegmentsForDay(day, blocks);
@@ -1268,7 +1334,7 @@ export function ScheduleScreen() {
       });
     }
     return buckets;
-  }, [blocks, view, daysToShow]);
+  }, [blocks, view, daysToShow, now]);
 
   const timelineScale = useMemo(
     () => buildTimelineScale(dayBuckets, pxPerHour, expandedRuns),
@@ -1334,6 +1400,12 @@ export function ScheduleScreen() {
     tasks.forEach((t) => map.set(t.id, t));
     return map;
   }, [tasks]);
+
+  const groupColorById = useMemo(() => {
+    const map = new Map<number, string | null>();
+    groups.forEach((g) => map.set(g.id, g.color));
+    return map;
+  }, [groups]);
 
   const selectedBlock = selected ? blocks.find((b) => b.id === selected) ?? null : null;
 
@@ -1576,7 +1648,7 @@ export function ScheduleScreen() {
               background: 'var(--bg)',
               position: 'sticky',
               top: 0,
-              zIndex: 1,
+              zIndex: 8,
             }}>
               <div style={{ height: 40 }} />
             </div>
@@ -1595,7 +1667,7 @@ export function ScheduleScreen() {
                   background: 'var(--bg)',
                   position: 'sticky',
                   top: 0,
-                  zIndex: 1,
+                  zIndex: 8,
                 }}
               >
                 {dayKey(bucket.day)}
@@ -1623,27 +1695,34 @@ export function ScheduleScreen() {
                   position: 'relative',
                   height: timelineScale.height,
                   background:
-                    startOfDay(Date.now()) === bucket.day
+                    startOfDay(now) === bucket.day
                       ? 'color-mix(in oklch, var(--ink) 5%, var(--bg))'
                       : 'transparent',
                 }}
               >
                 <HourLines scale={timelineScale} />
-                {bucket.segments.map((segment) => (
-                  <BlockTile
-                    key={`${segment.block.id}-${segment.startTime}`}
-                    segment={segment}
-                    dayStart={bucket.day}
-                    scale={timelineScale}
-                    task={
-                      segment.block.taskId
-                        ? taskById.get(segment.block.taskId) ?? null
-                        : null
-                    }
-                    selected={segment.block.id === selected}
-                    onClick={() => setSelected(segment.block.id)}
-                  />
-                ))}
+                <CurrentTimeLine day={bucket.day} now={now} scale={timelineScale} />
+                {bucket.segments.map((segment) => {
+                  const task = segment.block.taskId
+                    ? taskById.get(segment.block.taskId) ?? null
+                    : null;
+                  const groupColor =
+                    task?.groupId != null
+                      ? groupColorById.get(task.groupId) ?? null
+                      : null;
+                  return (
+                    <BlockTile
+                      key={`${segment.block.id}-${segment.startTime}`}
+                      segment={segment}
+                      dayStart={bucket.day}
+                      scale={timelineScale}
+                      task={task}
+                      groupColor={groupColor}
+                      selected={segment.block.id === selected}
+                      onClick={() => setSelected(segment.block.id)}
+                    />
+                  );
+                })}
               </div>
             ))}
           </div>

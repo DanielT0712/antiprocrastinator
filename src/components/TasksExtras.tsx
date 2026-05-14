@@ -7,6 +7,7 @@ import {
 } from 'react';
 import { api } from '../api';
 import type { Task, TaskGroup, TaskUpdate } from '../api/types';
+import { Dropdown } from './Dropdown';
 import { Icons } from '../components/Icons';
 import { priorityLabel } from '../lib/format';
 
@@ -1273,96 +1274,108 @@ export function PlanModal({
           }}>
             <div>
               <div style={{ ...labelStyle, marginBottom: 5 }}>Group</div>
-              <select
-                value={draft.groupId ?? ''}
-                onChange={(e) =>
-                  set({
-                    groupId: e.target.value === '' ? null : Number(e.target.value),
-                  })
+              <Dropdown
+                value={draft.groupId == null ? '' : String(draft.groupId)}
+                onChange={(v) =>
+                  set({ groupId: v === '' ? null : Number(v) })
                 }
                 style={inp}
-              >
-                <option value="">No group</option>
-                {groups.map((g) => (
-                  <option key={g.id} value={g.id}>
-                    {g.name}
-                  </option>
-                ))}
-              </select>
+                options={[
+                  { value: '', label: 'No group' },
+                  ...groups.map((g) => ({ value: String(g.id), label: g.name })),
+                ]}
+              />
             </div>
-            <div>
-              <div style={{ ...labelStyle, marginBottom: 5 }}>Priority</div>
-              <select
-                value={draft.priority}
-                onChange={(e) => set({ priority: Number(e.target.value) })}
-                style={inp}
-              >
-                {[1, 2, 3, 4, 5].map((p) => (
-                  <option key={p} value={p}>
-                    P{p} {priorityLabel(p)}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {draft.kind !== 'fixed' && (
+              <div>
+                <div style={{ ...labelStyle, marginBottom: 5 }}>Priority</div>
+                <Dropdown
+                  value={draft.priority}
+                  onChange={(v) => set({ priority: v })}
+                  style={inp}
+                  options={[1, 2, 3, 4, 5].map((p) => ({
+                    value: p,
+                    label: `P${p} ${priorityLabel(p)}`,
+                  }))}
+                />
+              </div>
+            )}
           </div>
 
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
-            gap: 12,
-          }}>
-            <div>
-              <div style={{ ...labelStyle, marginBottom: 5 }}>Estimate (min)</div>
-              <input
-                type="number"
-                min={0}
-                step={5}
-                value={draft.estimatedMinutes ?? ''}
-                onChange={(e) =>
-                  set({
-                    estimatedMinutes:
-                      e.target.value === '' ? null : Number(e.target.value),
-                  })
-                }
-                style={inp}
-              />
-            </div>
-            <div>
-              <div style={{ ...labelStyle, marginBottom: 5 }}>Deadline</div>
-              <input
-                type="date"
-                value={
-                  draft.deadline
-                    ? new Date(draft.deadline).toISOString().substring(0, 10)
-                    : ''
-                }
-                onChange={(e) => {
-                  if (!e.target.value) {
-                    set({ deadline: null });
-                  } else {
+          {draft.kind !== 'fixed' && (
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: 12,
+            }}>
+              <div>
+                <div style={{ ...labelStyle, marginBottom: 5 }}>Estimate (min)</div>
+                <input
+                  type="number"
+                  min={0}
+                  step={5}
+                  value={draft.estimatedMinutes ?? ''}
+                  onChange={(e) =>
                     set({
-                      deadline: new Date(e.target.value + 'T18:00:00').getTime(),
-                    });
+                      estimatedMinutes:
+                        e.target.value === '' ? null : Number(e.target.value),
+                    })
                   }
-                }}
-                style={inp}
-              />
+                  style={inp}
+                />
+              </div>
+              <div>
+                <div style={{ ...labelStyle, marginBottom: 5 }}>Deadline</div>
+                <input
+                  type="datetime-local"
+                  value={(() => {
+                    if (!draft.deadline) return '';
+                    const d = new Date(draft.deadline);
+                    const pad = (n: number) => String(n).padStart(2, '0');
+                    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+                  })()}
+                  onChange={(e) => {
+                    if (!e.target.value) {
+                      set({ deadline: null });
+                    } else {
+                      set({ deadline: new Date(e.target.value).getTime() });
+                    }
+                  }}
+                  style={{ ...inp, fontFamily: 'var(--font-mono)' }}
+                />
+              </div>
             </div>
-          </div>
+          )}
+          {draft.kind === 'fixed' && (
+            <div style={{
+              padding: '10px 12px',
+              border: '1px dashed var(--line)',
+              borderRadius: 6,
+              fontSize: 12,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+              background: 'var(--bg-raise)',
+            }}>
+              Fixed task — planner uses window + recurrence from task detail.
+              No estimate or deadline.
+            </div>
+          )}
 
           <div>
             <div style={{ ...labelStyle, marginBottom: 5 }}>Profile</div>
-            <select
+            <Dropdown
               value={draft.enforcementProfile ?? 'work'}
-              onChange={(e) => set({ enforcementProfile: e.target.value })}
+              onChange={(v) => set({ enforcementProfile: v })}
               style={inp}
-            >
-              <option value="rest">Rest</option>
-              <option value="work">Work</option>
-              <option value="deep_work">Deep Work</option>
-            </select>
+              options={[
+                { value: 'rest', label: 'Rest' },
+                { value: 'work', label: 'Work' },
+                { value: 'deep_work', label: 'Deep Work' },
+              ]}
+            />
           </div>
 
+          {draft.kind !== 'fixed' && (
           <details style={{ borderTop: '1px solid var(--line)', paddingTop: 12 }}>
             <summary style={{
               ...labelStyle,
@@ -1422,6 +1435,7 @@ export function PlanModal({
               Lock blocks once placed
             </label>
           </details>
+          )}
         </div>
 
         <div style={{

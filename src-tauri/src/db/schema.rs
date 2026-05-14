@@ -1,4 +1,4 @@
-pub const CURRENT_SCHEMA_VERSION: i32 = 9;
+pub const CURRENT_SCHEMA_VERSION: i32 = 10;
 
 pub const INITIAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS task_groups (

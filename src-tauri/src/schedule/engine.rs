@@ -93,6 +93,8 @@ struct PlannerTask {
     recurrence_kind: RecurrenceKind,
     recurrence_days_mask: i64,
     recurrence_anchor_date: Option<i64>,
+    recurrence_dates: Option<Vec<i64>>,
+    recurrence_overrides: Option<String>,
     required_share: f64,
     section_allocations: Vec<i64>,
 }
@@ -176,9 +178,88 @@ fn record_schedule_mutation_history(
 
 pub fn start_timer_loop(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
+        // Block-upcoming notifier state. Tracks the next block id we've
+        // surfaced and which threshold buckets already fired so we don't
+        // spam OS notifications every tick.
+        let mut watched_block_id: Option<i64> = None;
+        let mut notified_thresholds: std::collections::HashSet<i64> =
+            std::collections::HashSet::new();
+        let thresholds: [i64; 6] = [60, 30, 10, 5, 3, 1];
+        let lead_time_secs: i64 = 60;
+        let mut overlay_armed = false;
+
+        // Ensure the always-on popup window exists once Tauri is up.
+        let _ = crate::guard::watchdog::show_warning_popup(&app);
+
         loop {
             if let Err(error) = tick_schedule(&app) {
                 log::error!("schedule timer tick failed: {error}");
+            }
+
+            // Block-upcoming watcher: lightweight, runs every second.
+            if let Err(error) = (|| -> Result<(), String> {
+                let database = app.state::<DatabaseState>();
+                let schedule = app.state::<ScheduleState>();
+                let connection = database.connection()?;
+                let next = get_next_block(&connection, &schedule)?;
+                let now = timestamp_ms();
+                let Some(block) = next else {
+                    if overlay_armed {
+                        let _ = crate::guard::watchdog::hide_warning_overlay(&app);
+                        overlay_armed = false;
+                    }
+                    watched_block_id = None;
+                    notified_thresholds.clear();
+                    return Ok(());
+                };
+
+                let secs_until = (block.start_time - now).max(0) / 1_000;
+
+                if watched_block_id != Some(block.id) {
+                    watched_block_id = Some(block.id);
+                    notified_thresholds.clear();
+                }
+
+                let _ = app.emit(
+                    "block-upcoming",
+                    serde_json::json!({
+                        "blockId": block.id,
+                        "title": block.title,
+                        "blockType": block.block_type,
+                        "startTime": block.start_time,
+                        "endTime": block.end_time,
+                        "secondsUntilStart": secs_until,
+                    }),
+                );
+
+                if secs_until > 0 && secs_until <= lead_time_secs {
+                    if !overlay_armed {
+                        let _ = crate::guard::watchdog::show_warning_overlay(&app);
+                        overlay_armed = true;
+                    }
+                    for threshold in thresholds.iter() {
+                        if secs_until == *threshold
+                            && notified_thresholds.insert(*threshold)
+                        {
+                            use tauri_plugin_notification::NotificationExt;
+                            let _ = app
+                                .notification()
+                                .builder()
+                                .title("Block starting soon")
+                                .body(format!(
+                                    "{} block about to start in {secs_until}s",
+                                    block.title
+                                ))
+                                .show();
+                        }
+                    }
+                } else if overlay_armed {
+                    let _ = crate::guard::watchdog::hide_warning_overlay(&app);
+                    overlay_armed = false;
+                }
+                Ok(())
+            })() {
+                log::warn!("block-upcoming watcher tick failed: {error}");
             }
 
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -2944,10 +3025,13 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
                    max_chunk_minutes, min_chunk_minutes, minimum_rest_minutes,
                    work_ratio, rest_ratio, protect_generated_blocks, enforcement_profile,
                    kind, fixed_window_start_minute, fixed_window_end_minute,
-                   recurrence_kind, recurrence_days_mask, recurrence_anchor_date
+                   recurrence_kind, recurrence_days_mask, recurrence_anchor_date,
+                   recurrence_dates, recurrence_overrides
             FROM tasks
-            WHERE estimated_minutes IS NOT NULL
-              AND estimated_minutes > 0
+            WHERE (
+                (estimated_minutes IS NOT NULL AND estimated_minutes > 0)
+                OR kind = 'fixed'
+              )
               AND (deadline IS NULL OR deadline >= ?1)
             ORDER BY priority DESC, deadline ASC, updated_at DESC, name ASC
             "#,
@@ -2956,6 +3040,7 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
 
     let tasks = statement
         .query_map(params![from], |row| {
+            let dates_str: Option<String> = row.get(19)?;
             Ok(PlannerTask {
                 task_id: row.get(0)?,
                 title: row.get(1)?,
@@ -2965,7 +3050,7 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
                     row.get::<_, String>(13)?.as_str(),
                 ),
                 priority: row.get(3)?,
-                estimated_minutes: row.get(4)?,
+                estimated_minutes: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
                 deadline: row.get(5)?,
                 max_chunk_minutes: row.get(6)?,
                 min_chunk_minutes: row.get(7)?,
@@ -2980,6 +3065,10 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
                 ),
                 recurrence_days_mask: row.get(17)?,
                 recurrence_anchor_date: row.get(18)?,
+                recurrence_dates: dates_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Vec<i64>>(s).ok()),
+                recurrence_overrides: row.get::<_, Option<String>>(20)?,
                 required_share: 0.0,
                 section_allocations: vec![],
             })
@@ -3153,12 +3242,16 @@ fn generate_fixed_task_intervals(
     let mut intervals = Vec::new();
 
     for task in tasks.iter().filter(|task| task.kind == TaskKind::Fixed) {
-        let Some(start_minute) = task.fixed_window_start_minute else {
+        let Some(default_start) = task.fixed_window_start_minute else {
             continue;
         };
-        let Some(end_minute) = task.fixed_window_end_minute else {
+        let Some(default_end) = task.fixed_window_end_minute else {
             continue;
         };
+        let overrides: Option<serde_json::Value> = task
+            .recurrence_overrides
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
 
         for offset in 0..=day_count {
             let date = start_date
@@ -3167,6 +3260,14 @@ fn generate_fixed_task_intervals(
             if !fixed_task_occurs_on_date(task, date)? {
                 continue;
             }
+
+            let (start_minute, end_minute) = override_window_for_date(
+                overrides.as_ref(),
+                task,
+                date,
+                default_start,
+                default_end,
+            );
 
             let start_time = timestamp_for_minute(date, start_minute as u16)?;
             let end_date = if end_minute <= start_minute {
@@ -3196,10 +3297,74 @@ fn generate_fixed_task_intervals(
                         .unwrap_or_else(|| "work".to_string()),
                 ),
             });
+
+            // Rest-after-task: append a Break interval if the task asked
+            // for a minimum rest. Protected so replans don't drop it.
+            if let Some(rest_min) = task.minimum_rest_minutes {
+                if rest_min > 0 {
+                    let rest_end = end_time + rest_min * 60_000;
+                    if rest_end > from && end_time < to {
+                        intervals.push(TemplateInterval {
+                            title: format!("Rest after {}", task.title),
+                            block_type: BlockType::Break,
+                            start_time: end_time,
+                            end_time: rest_end.min(to),
+                            task_id: None,
+                            intensity: 1,
+                            source: BlockSource::Planner,
+                            is_protected: true,
+                            enforcement_profile: Some("rest".to_string()),
+                        });
+                    }
+                }
+            }
         }
     }
 
     Ok(intervals)
+}
+
+fn override_window_for_date(
+    overrides: Option<&serde_json::Value>,
+    task: &PlannerTask,
+    date: NaiveDate,
+    default_start: i64,
+    default_end: i64,
+) -> (i64, i64) {
+    let map = match overrides.and_then(|v| v.as_object()) {
+        Some(m) => m,
+        None => return (default_start, default_end),
+    };
+    // Schedule (once): key = local-midnight epoch millis of the date.
+    // Repeating: key = weekday index (0=Mon ... 6=Sun).
+    let candidate_keys: Vec<String> = match task.recurrence_kind {
+        RecurrenceKind::Once | RecurrenceKind::None => {
+            let day_start_ms = date
+                .and_hms_opt(0, 0, 0)
+                .and_then(|dt| dt.and_local_timezone(chrono::Local).earliest())
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or(0);
+            vec![day_start_ms.to_string()]
+        }
+        _ => {
+            let wd = date.weekday().num_days_from_monday() as i64;
+            vec![wd.to_string()]
+        }
+    };
+    for key in candidate_keys {
+        if let Some(entry) = map.get(&key) {
+            let start = entry
+                .get("startMin")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(default_start);
+            let end = entry
+                .get("endMin")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(default_end);
+            return (start, end);
+        }
+    }
+    (default_start, default_end)
 }
 
 fn fixed_task_occurs_on_date(task: &PlannerTask, date: NaiveDate) -> Result<bool, String> {
@@ -3209,6 +3374,13 @@ fn fixed_task_occurs_on_date(task: &PlannerTask, date: NaiveDate) -> Result<bool
         RecurrenceKind::Weekdays => weekday < 5,
         RecurrenceKind::Weekly => task.recurrence_days_mask & (1 << weekday) != 0,
         RecurrenceKind::Once | RecurrenceKind::None => {
+            if let Some(list) = task.recurrence_dates.as_ref() {
+                for stamp in list {
+                    if date_from_timestamp(*stamp)? == date {
+                        return Ok(true);
+                    }
+                }
+            }
             let anchor = task
                 .recurrence_anchor_date
                 .or(task.deadline)

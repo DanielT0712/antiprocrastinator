@@ -4,7 +4,6 @@ import { Sidebar, type Route } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { QuitChallengeModal, SuspendAppModal } from './components/Modals';
 import { SleepPromptModal } from './components/SleepPromptModal';
-import { ProcessWarningOverlay } from './components/ProcessWarningOverlay';
 import { applyTheme } from './lib/themes';
 import { HomeScreen } from './screens/HomeScreen';
 import { ScheduleScreen } from './screens/ScheduleScreen';
@@ -77,6 +76,17 @@ function App() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // Frontend heartbeat: tells Rust the React tree is alive. If this stops
+  // pinging (white screen / crash), strong-guard close handlers bypass
+  // their challenge dialog so the user can still quit.
+  useEffect(() => {
+    api.frontendHeartbeat().catch(() => {});
+    const t = window.setInterval(() => {
+      api.frontendHeartbeat().catch(() => {});
+    }, 5000);
+    return () => window.clearInterval(t);
   }, []);
 
   useEffect(() => {
@@ -221,8 +231,6 @@ function App() {
         onClose={() => setQuitOpen(false)}
         onError={handleError}
       />
-
-      <ProcessWarningOverlay />
 
       {sleepPromptOpen && (
         <SleepPromptModal

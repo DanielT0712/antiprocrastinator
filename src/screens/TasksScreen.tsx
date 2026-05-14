@@ -8,8 +8,11 @@ import {
   useState,
 } from 'react';
 import { api } from '../api';
-import type { NewTask, Task, TaskGroup, TaskUpdate, TimeBlock } from '../api/types';
+import type { NewTask, Task, TaskGroup, TaskUpdate, TimeBlock, UserPreferences } from '../api/types';
+import { Check } from '../components/Check';
+import { Dropdown } from '../components/Dropdown';
 import { Icons } from '../components/Icons';
+import { MultiDatePicker } from '../components/MultiDatePicker';
 import {
   PlanModal,
   RemoveFromPlanModal,
@@ -26,17 +29,6 @@ const labelStyle: CSSProperties = {
   textTransform: 'uppercase',
   letterSpacing: '0.13em',
   color: 'var(--faint)',
-};
-
-const inputStyle: CSSProperties = {
-  background: 'var(--bg)',
-  border: '1px solid var(--line)',
-  borderRadius: 5,
-  color: 'var(--ink)',
-  fontSize: 12,
-  padding: '6px 8px',
-  fontFamily: 'var(--font-sans)',
-  outline: 'none',
 };
 
 const PROFILE_OPTIONS = [
@@ -120,7 +112,7 @@ function GroupChip({
 }
 
 function formatDeadline(deadline: number | null, now: number): string {
-  if (!deadline) return 'No deadline';
+  if (!deadline) return '—';
   const today = new Date(now);
   today.setHours(0, 0, 0, 0);
   const target = new Date(deadline);
@@ -141,19 +133,279 @@ function formatDeadline(deadline: number | null, now: number): string {
   })} ${time}`;
 }
 
-function epochFromDateInput(value: string): number | null {
-  if (!value) return null;
-  const ts = new Date(value + 'T18:00:00').getTime();
-  return Number.isFinite(ts) ? ts : null;
-}
-
-function dateInputFromEpoch(epoch: number | null): string {
+function datetimeInputFromEpoch(epoch: number | null): string {
   if (!epoch) return '';
   const d = new Date(epoch);
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+}
+
+function epochFromDatetimeInput(value: string): number | null {
+  if (!value) return null;
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) ? ts : null;
+}
+
+function fixedDefaultRestMinutes(
+  prefs: UserPreferences | null,
+  startMin: number | null,
+  endMin: number | null,
+): number {
+  const fallback = 15;
+  if (startMin == null || endMin == null) return fallback;
+  const duration = endMin > startMin ? endMin - startMin : 24 * 60 - startMin + endMin;
+  const wr = prefs ? Math.max(1, prefs.workDurationMinutes) : 50;
+  const br = prefs ? Math.max(0, prefs.breakDurationMinutes) : 10;
+  const rest = Math.round((duration * br) / wr);
+  return Math.min(60, Math.max(1, rest || fallback));
+}
+
+type OccurrenceOverride = {
+  startMin?: number | null;
+  endMin?: number | null;
+  estimateMinutes?: number | null;
+};
+
+function parseOverrides(raw: string | null | undefined): Record<string, OccurrenceOverride> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') return parsed as Record<string, OccurrenceOverride>;
+  } catch { /* ignore */ }
+  return {};
+}
+
+function serializeOverrides(map: Record<string, OccurrenceOverride>): string | null {
+  const cleaned: Record<string, OccurrenceOverride> = {};
+  for (const [k, v] of Object.entries(map)) {
+    if (!v) continue;
+    const o: OccurrenceOverride = {};
+    if (v.startMin != null) o.startMin = v.startMin;
+    if (v.endMin != null) o.endMin = v.endMin;
+    if (v.estimateMinutes != null) o.estimateMinutes = v.estimateMinutes;
+    if (Object.keys(o).length > 0) cleaned[k] = o;
+  }
+  return Object.keys(cleaned).length > 0 ? JSON.stringify(cleaned) : null;
+}
+
+function occurrenceKeysFor(task: Task): { key: string; label: string }[] {
+  if (task.recurrenceKind === 'once') {
+    const dates =
+      task.recurrenceDates && task.recurrenceDates.length > 0
+        ? task.recurrenceDates
+        : task.recurrenceAnchorDate != null
+          ? [task.recurrenceAnchorDate]
+          : [];
+    return dates.map((d) => ({
+      key: String(startOfLocalDay(d)),
+      label: new Date(d).toLocaleDateString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+      }),
+    }));
+  }
+  const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const indices =
+    task.recurrenceKind === 'daily'
+      ? [0, 1, 2, 3, 4, 5, 6]
+      : task.recurrenceKind === 'weekdays'
+        ? [0, 1, 2, 3, 4]
+        : task.recurrenceKind === 'weekly'
+          ? [0, 1, 2, 3, 4, 5, 6].filter((i) => (task.recurrenceDaysMask & (1 << i)) !== 0)
+          : [];
+  return indices.map((i) => ({ key: String(i), label: labels[i] }));
+}
+
+function startOfLocalDay(epoch: number): number {
+  const d = new Date(epoch);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function AdvancedOccurrences({
+  draft,
+  onUpdate,
+}: {
+  draft: Task;
+  onUpdate: (patch: Partial<Task>) => void;
+}) {
+  const existing = parseOverrides(draft.recurrenceOverrides);
+  const hasExisting = Object.keys(existing).length > 0;
+  const [open, setOpen] = useState(hasExisting);
+
+  useEffect(() => {
+    if (hasExisting && !open) setOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasExisting]);
+
+  if (draft.recurrenceKind === 'none' && draft.kind !== 'fixed') return null;
+  if (draft.kind === 'fixed' && draft.recurrenceKind === 'none') return null;
+
+  const occurrences = occurrenceKeysFor(draft);
+  if (occurrences.length === 0) return null;
+
+  const setOverride = (key: string, patch: OccurrenceOverride) => {
+    const map = parseOverrides(draft.recurrenceOverrides);
+    map[key] = { ...(map[key] ?? {}), ...patch };
+    onUpdate({ recurrenceOverrides: serializeOverrides(map) });
+  };
+
+  const clearAll = () => onUpdate({ recurrenceOverrides: null });
+
+  const inp: CSSProperties = {
+    width: 80,
+    background: 'var(--bg)',
+    border: '1px solid var(--line)',
+    borderRadius: 5,
+    padding: '5px 7px',
+    fontSize: 12,
+    color: 'var(--ink)',
+    outline: 'none',
+    fontFamily: 'var(--font-mono)',
+    boxSizing: 'border-box',
+  };
+
+  const toggleAdvanced = () => {
+    const next = !open;
+    if (!next) clearAll();
+    setOpen(next);
+  };
+  return (
+    <div style={{ marginTop: 14, borderTop: '1px dashed var(--line)', paddingTop: 12 }}>
+      <div
+        onClick={toggleAdvanced}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 8,
+          fontSize: 13,
+          color: 'var(--ink)',
+          cursor: 'pointer',
+        }}
+      >
+        <Check
+          checked={open}
+          stopPropagation
+          onChange={(v) => {
+            if (!v) clearAll();
+            setOpen(v);
+          }}
+        />
+        Advanced
+        <span style={{ color: 'var(--muted)', fontSize: 11, fontFamily: 'var(--font-mono)' }}>
+          per-occurrence override
+        </span>
+      </div>
+      {open && (
+        <div style={{
+          marginTop: 10,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}>
+          {occurrences.map(({ key, label }) => {
+            const ov = existing[key] ?? {};
+            return (
+              <div
+                key={key}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '6px 8px',
+                  border: '1px solid var(--line)',
+                  borderRadius: 6,
+                  background: 'var(--bg)',
+                }}
+              >
+                <span style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--muted)',
+                  width: 80,
+                  flexShrink: 0,
+                }}>
+                  {label}
+                </span>
+                {draft.kind === 'fixed' ? (
+                  <>
+                    <input
+                      type="time"
+                      value={minutesToTime(
+                        ov.startMin ?? draft.fixedWindowStartMinute,
+                      )}
+                      onChange={(e) => {
+                        const m = timeToMinutes(e.target.value);
+                        if (m != null) setOverride(key, { startMin: m });
+                      }}
+                      style={inp}
+                    />
+                    <span style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)' }}>–</span>
+                    <input
+                      type="time"
+                      value={minutesToTime(
+                        ov.endMin ?? draft.fixedWindowEndMinute,
+                      )}
+                      onChange={(e) => {
+                        const m = timeToMinutes(e.target.value);
+                        if (m != null) setOverride(key, { endMin: m });
+                      }}
+                      style={inp}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <input
+                      type="number"
+                      min={0}
+                      step={5}
+                      value={ov.estimateMinutes ?? ''}
+                      placeholder={String(draft.estimatedMinutes ?? 60)}
+                      onChange={(e) =>
+                        setOverride(key, {
+                          estimateMinutes:
+                            e.target.value === '' ? null : Number(e.target.value),
+                        })
+                      }
+                      style={inp}
+                    />
+                    <span style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                      min
+                    </span>
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function fixedWindowMinutes(task: Task): number | null {
+  const s = task.fixedWindowStartMinute;
+  const e = task.fixedWindowEndMinute;
+  if (s == null || e == null) return null;
+  return e > s ? e - s : 24 * 60 - s + e;
+}
+
+function defaultScheduleDate(windowStartMinute: number | null | undefined): number {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  if (windowStartMinute != null) {
+    const now = new Date();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    if (nowMin >= windowStartMinute) {
+      d.setDate(d.getDate() + 1);
+    }
+  }
+  return d.getTime();
 }
 
 function minutesToTime(minutes: number | null | undefined): string {
@@ -172,207 +424,142 @@ function timeToMinutes(value: string): number | null {
   return hh * 60 + mm;
 }
 
+function gcd(a: number, b: number): number {
+  a = Math.abs(a);
+  b = Math.abs(b);
+  while (b) {
+    [a, b] = [b, a % b];
+  }
+  return a || 1;
+}
+
+function ratioDefaults(prefs: UserPreferences | null): { work: number; rest: number } {
+  if (!prefs) return { work: 3, rest: 1 };
+  const w = Math.max(1, prefs.workDurationMinutes);
+  const r = Math.max(1, prefs.breakDurationMinutes);
+  const d = gcd(w, r);
+  return { work: w / d, rest: r / d };
+}
+
 function RatioFields({
   work,
   rest,
+  defaults,
   onChange,
 }: {
   work: number | null;
   rest: number | null;
+  defaults?: { work: number; rest: number };
   onChange: (work: number | null, rest: number | null) => void;
 }) {
   const box: CSSProperties = {
-    width: '100%',
-    background: 'var(--bg)',
-    border: '1px solid var(--line)',
-    borderRadius: 5,
-    padding: '7px 9px',
-    fontSize: 13,
+    width: 36,
+    background: 'transparent',
+    border: 'none',
     color: 'var(--ink)',
-    outline: 'none',
     fontFamily: 'var(--font-mono)',
-    boxSizing: 'border-box',
+    fontSize: 13,
     textAlign: 'center',
+    outline: 'none',
+    padding: '6px 2px',
   };
   const parse = (value: string, min: number) =>
     value === '' ? null : Math.max(min, Number(value));
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 8, alignItems: 'center' }}>
+    <div style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      border: '1px solid var(--line)',
+      borderRadius: 6,
+      background: 'var(--bg)',
+      width: 'fit-content',
+    }}>
       <input
         type="number"
         min={1}
         step={1}
         value={work ?? ''}
-        placeholder="3"
+        placeholder={String(defaults?.work ?? 3)}
         onChange={(e) => onChange(parse(e.target.value, 1), rest)}
+        className="ap-ratio-input"
         style={box}
       />
-      <span style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)' }}>:</span>
+      <span style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)', fontSize: 13 }}>:</span>
       <input
         type="number"
         min={0}
         step={1}
         value={rest ?? ''}
-        placeholder="1"
+        placeholder={String(defaults?.rest ?? 1)}
         onChange={(e) => onChange(work, parse(e.target.value, 0))}
+        className="ap-ratio-input"
         style={box}
       />
     </div>
   );
 }
 
-interface QuickAddProps {
-  groups: TaskGroup[];
-  onAdd: (task: NewTask) => Promise<void>;
-  compressed?: boolean;
-}
-
-function QuickAdd({ groups, onAdd, compressed = false }: QuickAddProps) {
-  const [name, setName] = useState('');
-  const [groupId, setGroupId] = useState<string>('');
-  const [priority, setPriority] = useState(3);
-  const [estimate, setEstimate] = useState(60);
-  const [deadline, setDeadline] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const submit = async () => {
-    if (busy || !name.trim()) return;
-    setBusy(true);
-    try {
-      await onAdd({
-        name: name.trim(),
-        groupId: groupId === '' ? null : Number(groupId),
-        priority,
-        estimatedMinutes: estimate || null,
-        deadline: epochFromDateInput(deadline),
-      });
-      setName('');
-      setEstimate(60);
-      setDeadline('');
-    } finally {
-      setBusy(false);
-    }
+function blankTask(): Task {
+  const now = Date.now();
+  return {
+    id: 0,
+    name: '',
+    groupId: null,
+    priority: 3,
+    estimatedMinutes: 60,
+    deadline: null,
+    maxChunkMinutes: null,
+    minChunkMinutes: null,
+    minimumRestMinutes: null,
+    workRatio: null,
+    restRatio: null,
+    protectGeneratedBlocks: false,
+    enforcementProfile: 'work',
+    kind: 'flexible',
+    fixedWindowStartMinute: null,
+    fixedWindowEndMinute: null,
+    recurrenceKind: 'none',
+    recurrenceDaysMask: 0,
+    recurrenceAnchorDate: null,
+    recurrenceDates: null,
+    recurrenceOverrides: null,
+    averagePriority: 3,
+    averageActualMinutes: null,
+    completionCount: 0,
+    createdAt: now,
+    updatedAt: now,
   };
-
-  return (
-    <div style={{
-      borderBottom: '1px solid var(--line)',
-      padding: '10px 24px',
-      display: 'flex',
-      gap: 8,
-      alignItems: 'center',
-      flexWrap: 'wrap',
-      background: 'var(--bg-raise)',
-      // When compressed, cap height and vert-scroll wrapped rows so
-      // QuickAdd never dominates the screen.
-      maxHeight: compressed ? 90 : undefined,
-      overflowY: compressed ? 'auto' : 'visible',
-    }}>
-      <span style={{ ...labelStyle, marginRight: 4 }}>Quick add</span>
-      <input
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') submit();
-        }}
-        placeholder="Task name…"
-        style={{ ...inputStyle, flex: '1 1 220px', minWidth: 180 }}
-      />
-      <select
-        value={groupId}
-        onChange={(e) => setGroupId(e.target.value)}
-        style={{ ...inputStyle, width: 130 }}
-      >
-        <option value="">No group</option>
-        {groups.map((g) => (
-          <option key={g.id} value={g.id}>
-            {g.name}
-          </option>
-        ))}
-      </select>
-      <select
-        value={priority}
-        onChange={(e) => setPriority(Number(e.target.value))}
-        style={{ ...inputStyle, width: 110 }}
-      >
-        {[1, 2, 3, 4, 5].map((p) => (
-          <option key={p} value={p}>
-            P{p} {priorityLabel(p)}
-          </option>
-        ))}
-      </select>
-      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-        <input
-          type="number"
-          min={5}
-          step={5}
-          value={estimate}
-          onChange={(e) => setEstimate(Number(e.target.value))}
-          style={{ ...inputStyle, width: 64, fontFamily: 'var(--font-mono)', textAlign: 'right' }}
-        />
-        <span style={{ color: 'var(--faint)', fontSize: 11, fontFamily: 'var(--font-mono)' }}>
-          min
-        </span>
-      </div>
-      <input
-        type="date"
-        value={deadline}
-        onChange={(e) => setDeadline(e.target.value)}
-        title="Deadline (optional)"
-        style={{ ...inputStyle, width: 132, fontFamily: 'var(--font-mono)' }}
-      />
-      <button
-        onClick={submit}
-        disabled={busy || !name.trim()}
-        style={{
-          padding: '6px 12px',
-          background: busy || !name.trim() ? 'var(--line)' : 'var(--accent)',
-          color: busy || !name.trim() ? 'var(--muted)' : 'oklch(0.18 0.04 60)',
-          border: '1px solid var(--accent)',
-          borderRadius: 5,
-          fontSize: 12,
-          cursor: busy || !name.trim() ? 'not-allowed' : 'pointer',
-          fontFamily: 'var(--font-sans)',
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 5,
-        }}
-      >
-        <Icons.plus size={12} /> Add
-      </button>
-      <span style={{
-        fontSize: 10.5,
-        color: 'var(--faint)',
-        fontFamily: 'var(--font-mono)',
-      }}>
-        added to library · open task to plan
-      </span>
-    </div>
-  );
 }
 
 interface DrawerProps {
   task: Task;
   groups: TaskGroup[];
+  prefs: UserPreferences | null;
+  mode?: 'edit' | 'add';
   onClose: () => void;
-  onUpdate: (id: number, updates: TaskUpdate) => Promise<void>;
-  onDelete: (id: number) => Promise<void>;
-  planned: boolean;
-  onAddToPlan: () => void;
-  onRemoveFromPlan: () => void;
+  onUpdate?: (id: number, updates: TaskUpdate) => Promise<void>;
+  onCreate?: (task: NewTask) => Promise<void>;
+  onDelete?: (id: number) => Promise<void>;
+  planned?: boolean;
+  onAddToPlan?: () => void;
+  onRemoveFromPlan?: () => void;
 }
 
 function Drawer({
   task,
   groups,
+  prefs,
+  mode = 'edit',
   onClose,
   onUpdate,
+  onCreate,
   onDelete,
-  planned,
+  planned = false,
   onAddToPlan,
   onRemoveFromPlan,
 }: DrawerProps) {
   const [draft, setDraft] = useState<Task>(task);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => setDraft(task), [task.id]);
   useEffect(() => {
@@ -385,53 +572,121 @@ function Drawer({
 
   const set = (patch: Partial<Task>) => setDraft((d) => ({ ...d, ...patch }));
   const isSleepTask = task.id === SLEEP_TASK_ID;
+  const isAdd = mode === 'add';
+
+  const canSubmit =
+    draft.name.trim().length > 0 &&
+    (draft.kind !== 'fixed' ||
+      (draft.fixedWindowStartMinute != null &&
+        draft.fixedWindowEndMinute != null &&
+        draft.fixedWindowEndMinute > draft.fixedWindowStartMinute)) &&
+    (draft.kind !== 'fixed' || draft.recurrenceKind !== 'none') &&
+    (draft.recurrenceKind !== 'weekly' || draft.recurrenceDaysMask !== 0) &&
+    (draft.recurrenceKind !== 'once' ||
+      draft.kind !== 'fixed' ||
+      (draft.recurrenceDates && draft.recurrenceDates.length > 0) ||
+      draft.recurrenceAnchorDate != null);
 
   const save = async () => {
-    const updates: TaskUpdate = {};
-    if (draft.name !== task.name) updates.name = draft.name;
-    if (draft.groupId !== task.groupId) updates.groupId = draft.groupId;
-    if (draft.priority !== task.priority) updates.priority = draft.priority;
-    if (draft.estimatedMinutes !== task.estimatedMinutes) {
-      updates.estimatedMinutes = draft.estimatedMinutes;
+    if (busy || !canSubmit) return;
+    setBusy(true);
+    try {
+      if (isAdd) {
+        if (!onCreate) return;
+        const isFixed = draft.kind === 'fixed';
+        await onCreate({
+          name: draft.name.trim(),
+          groupId: draft.groupId,
+          priority: draft.priority,
+          estimatedMinutes: isFixed ? null : draft.estimatedMinutes || null,
+          deadline: isFixed ? null : draft.deadline,
+          maxChunkMinutes: draft.maxChunkMinutes,
+          minChunkMinutes: draft.minChunkMinutes,
+          minimumRestMinutes: draft.minimumRestMinutes,
+          workRatio: draft.workRatio,
+          restRatio: draft.restRatio,
+          protectGeneratedBlocks: draft.protectGeneratedBlocks,
+          enforcementProfile: draft.enforcementProfile,
+          kind: draft.kind,
+          fixedWindowStartMinute: isFixed ? draft.fixedWindowStartMinute : null,
+          fixedWindowEndMinute: isFixed ? draft.fixedWindowEndMinute : null,
+          recurrenceKind: draft.recurrenceKind,
+          recurrenceDaysMask:
+            draft.recurrenceKind === 'weekly' ? draft.recurrenceDaysMask : null,
+          recurrenceAnchorDate:
+            draft.recurrenceKind === 'once' ? draft.recurrenceAnchorDate : null,
+          recurrenceDates:
+            draft.recurrenceKind === 'once' && draft.recurrenceDates && draft.recurrenceDates.length > 0
+              ? draft.recurrenceDates
+              : null,
+          recurrenceOverrides: draft.recurrenceOverrides ?? null,
+        });
+        onClose();
+        return;
+      }
+      if (!onUpdate) return;
+      const updates: TaskUpdate = {};
+      if (draft.name !== task.name) updates.name = draft.name;
+      if (draft.groupId !== task.groupId) updates.groupId = draft.groupId;
+      if (draft.priority !== task.priority) updates.priority = draft.priority;
+      if (draft.estimatedMinutes !== task.estimatedMinutes) {
+        updates.estimatedMinutes = draft.estimatedMinutes;
+      }
+      if (draft.deadline !== task.deadline) updates.deadline = draft.deadline;
+      if (draft.maxChunkMinutes !== task.maxChunkMinutes) {
+        updates.maxChunkMinutes = draft.maxChunkMinutes;
+      }
+      if (draft.minChunkMinutes !== task.minChunkMinutes) {
+        updates.minChunkMinutes = draft.minChunkMinutes;
+      }
+      if (draft.minimumRestMinutes !== task.minimumRestMinutes) {
+        updates.minimumRestMinutes = draft.minimumRestMinutes;
+      }
+      if (draft.workRatio !== task.workRatio) updates.workRatio = draft.workRatio;
+      if (draft.restRatio !== task.restRatio) updates.restRatio = draft.restRatio;
+      if (draft.protectGeneratedBlocks !== task.protectGeneratedBlocks) {
+        updates.protectGeneratedBlocks = draft.protectGeneratedBlocks;
+      }
+      if (draft.enforcementProfile !== task.enforcementProfile) {
+        updates.enforcementProfile = draft.enforcementProfile;
+      }
+      if (draft.kind !== task.kind) updates.kind = draft.kind;
+      if (draft.fixedWindowStartMinute !== task.fixedWindowStartMinute) {
+        updates.fixedWindowStartMinute = draft.fixedWindowStartMinute;
+      }
+      if (draft.fixedWindowEndMinute !== task.fixedWindowEndMinute) {
+        updates.fixedWindowEndMinute = draft.fixedWindowEndMinute;
+      }
+      if (draft.recurrenceKind !== task.recurrenceKind) {
+        updates.recurrenceKind = draft.recurrenceKind;
+      }
+      if (draft.recurrenceDaysMask !== task.recurrenceDaysMask) {
+        updates.recurrenceDaysMask = draft.recurrenceDaysMask;
+      }
+      if (draft.recurrenceAnchorDate !== task.recurrenceAnchorDate) {
+        updates.recurrenceAnchorDate = draft.recurrenceAnchorDate;
+      }
+      const drA = draft.recurrenceDates ?? null;
+      const tkA = task.recurrenceDates ?? null;
+      const sameDates =
+        (drA == null && tkA == null) ||
+        (drA != null &&
+          tkA != null &&
+          drA.length === tkA.length &&
+          drA.every((v, i) => v === tkA[i]));
+      if (!sameDates) {
+        updates.recurrenceDates = drA;
+      }
+      if ((draft.recurrenceOverrides ?? null) !== (task.recurrenceOverrides ?? null)) {
+        updates.recurrenceOverrides = draft.recurrenceOverrides ?? null;
+      }
+      if (Object.keys(updates).length > 0) {
+        await onUpdate(task.id, updates);
+      }
+      onClose();
+    } finally {
+      setBusy(false);
     }
-    if (draft.deadline !== task.deadline) updates.deadline = draft.deadline;
-    if (draft.maxChunkMinutes !== task.maxChunkMinutes) {
-      updates.maxChunkMinutes = draft.maxChunkMinutes;
-    }
-    if (draft.minChunkMinutes !== task.minChunkMinutes) {
-      updates.minChunkMinutes = draft.minChunkMinutes;
-    }
-    if (draft.minimumRestMinutes !== task.minimumRestMinutes) {
-      updates.minimumRestMinutes = draft.minimumRestMinutes;
-    }
-    if (draft.workRatio !== task.workRatio) updates.workRatio = draft.workRatio;
-    if (draft.restRatio !== task.restRatio) updates.restRatio = draft.restRatio;
-    if (draft.protectGeneratedBlocks !== task.protectGeneratedBlocks) {
-      updates.protectGeneratedBlocks = draft.protectGeneratedBlocks;
-    }
-    if (draft.enforcementProfile !== task.enforcementProfile) {
-      updates.enforcementProfile = draft.enforcementProfile;
-    }
-    if (draft.kind !== task.kind) updates.kind = draft.kind;
-    if (draft.fixedWindowStartMinute !== task.fixedWindowStartMinute) {
-      updates.fixedWindowStartMinute = draft.fixedWindowStartMinute;
-    }
-    if (draft.fixedWindowEndMinute !== task.fixedWindowEndMinute) {
-      updates.fixedWindowEndMinute = draft.fixedWindowEndMinute;
-    }
-    if (draft.recurrenceKind !== task.recurrenceKind) {
-      updates.recurrenceKind = draft.recurrenceKind;
-    }
-    if (draft.recurrenceDaysMask !== task.recurrenceDaysMask) {
-      updates.recurrenceDaysMask = draft.recurrenceDaysMask;
-    }
-    if (draft.recurrenceAnchorDate !== task.recurrenceAnchorDate) {
-      updates.recurrenceAnchorDate = draft.recurrenceAnchorDate;
-    }
-    if (Object.keys(updates).length > 0) {
-      await onUpdate(task.id, updates);
-    }
-    onClose();
   };
 
   const drawerInp: CSSProperties = {
@@ -478,7 +733,7 @@ function Drawer({
             justifyContent: 'space-between',
             marginBottom: 12,
           }}>
-            <span style={labelStyle}>Task detail</span>
+            <span style={labelStyle}>{isAdd ? 'New task' : 'Task detail'}</span>
             <button
               onClick={onClose}
               style={{
@@ -495,6 +750,14 @@ function Drawer({
           <input
             value={draft.name}
             onChange={(e) => set({ name: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && isAdd && canSubmit) {
+                e.preventDefault();
+                save();
+              }
+            }}
+            autoFocus={isAdd}
+            placeholder={isAdd ? 'Task name…' : undefined}
             style={{
               width: '100%',
               background: 'transparent',
@@ -511,69 +774,51 @@ function Drawer({
         <div style={{ flex: 1, overflow: 'auto', padding: '18px 22px 90px' }}>
           <FieldRow>
             <FieldCell label="Group">
-              <select
-                value={draft.groupId ?? ''}
-                onChange={(e) =>
-                  set({ groupId: e.target.value === '' ? null : Number(e.target.value) })
+              <Dropdown
+                value={draft.groupId == null ? '' : String(draft.groupId)}
+                onChange={(v) =>
+                  set({ groupId: v === '' ? null : Number(v) })
                 }
                 style={drawerInp}
-              >
-                <option value="">No group</option>
-                {groups.map((g) => (
-                  <option key={g.id} value={g.id}>
-                    {g.name}
-                  </option>
-                ))}
-              </select>
-            </FieldCell>
-            <FieldCell label="Priority">
-              <select
-                value={draft.priority}
-                onChange={(e) => set({ priority: Number(e.target.value) })}
-                style={drawerInp}
-              >
-                {[1, 2, 3, 4, 5].map((p) => (
-                  <option key={p} value={p}>
-                    P{p} — {priorityLabel(p)}
-                  </option>
-                ))}
-              </select>
-            </FieldCell>
-            <FieldCell label="Estimate (min)">
-              <input
-                type="number"
-                min={0}
-                step={5}
-                value={draft.estimatedMinutes ?? ''}
-                onChange={(e) =>
-                  set({
-                    estimatedMinutes:
-                      e.target.value === '' ? null : Number(e.target.value),
-                  })
-                }
-                style={drawerInp}
+                options={[
+                  { value: '', label: 'No group' },
+                  ...groups.map((g) => ({ value: String(g.id), label: g.name })),
+                ]}
               />
             </FieldCell>
-            <FieldCell label="Deadline">
-              <input
-                type="date"
-                value={dateInputFromEpoch(draft.deadline)}
-                onChange={(e) => set({ deadline: epochFromDateInput(e.target.value) })}
-                style={drawerInp}
-              />
-            </FieldCell>
+            {draft.kind !== 'fixed' && (
+              <FieldCell label="Priority">
+                <Dropdown
+                  value={draft.priority}
+                  onChange={(v) => set({ priority: v })}
+                  style={drawerInp}
+                  options={[1, 2, 3, 4, 5].map((p) => ({
+                    value: p,
+                    label: `P${p} — ${priorityLabel(p)}`,
+                  }))}
+                />
+              </FieldCell>
+            )}
+            {draft.kind !== 'fixed' && (
+              <FieldCell label="Deadline">
+                <input
+                  type="datetime-local"
+                  value={datetimeInputFromEpoch(draft.deadline)}
+                  onChange={(e) => set({ deadline: epochFromDatetimeInput(e.target.value) })}
+                  style={{ ...drawerInp, fontFamily: 'var(--font-mono)' }}
+                />
+              </FieldCell>
+            )}
             <FieldCell label="Profile">
-              <select
+              <Dropdown
                 value={draft.enforcementProfile ?? 'work'}
-                onChange={(e) => set({ enforcementProfile: e.target.value })}
+                onChange={(v) => set({ enforcementProfile: v })}
                 style={drawerInp}
-              >
-                {PROFILE_OPTIONS.filter((o) => o.v !== 'emergency').map((o) => (
-                  <option key={o.v} value={o.v}>
-                    {o.l}
-                  </option>
-                ))}
-              </select>
+                options={PROFILE_OPTIONS.filter((o) => o.v !== 'emergency').map((o) => ({
+                  value: o.v,
+                  label: o.l,
+                }))}
+              />
             </FieldCell>
           </FieldRow>
 
@@ -603,19 +848,31 @@ function Drawer({
                 <button
                   key={opt.v}
                   disabled={isSleepTask}
-                  onClick={() =>
-                    set({
+                  onClick={() => {
+                    const startMin =
+                      opt.v === 'fixed'
+                        ? draft.fixedWindowStartMinute ?? 9 * 60
+                        : draft.fixedWindowStartMinute;
+                    const endMin =
+                      opt.v === 'fixed'
+                        ? draft.fixedWindowEndMinute ?? 10 * 60
+                        : draft.fixedWindowEndMinute;
+                    const patch: Partial<Task> = {
                       kind: opt.v,
-                      fixedWindowStartMinute:
-                        opt.v === 'fixed'
-                          ? draft.fixedWindowStartMinute ?? 9 * 60
-                          : draft.fixedWindowStartMinute,
-                      fixedWindowEndMinute:
-                        opt.v === 'fixed'
-                          ? draft.fixedWindowEndMinute ?? 10 * 60
-                          : draft.fixedWindowEndMinute,
-                    })
-                  }
+                      fixedWindowStartMinute: startMin,
+                      fixedWindowEndMinute: endMin,
+                    };
+                    if (opt.v === 'fixed' && draft.recurrenceKind === 'none') {
+                      patch.recurrenceKind = 'once';
+                      if (
+                        (!draft.recurrenceDates || draft.recurrenceDates.length === 0) &&
+                        draft.recurrenceAnchorDate == null
+                      ) {
+                        patch.recurrenceDates = [defaultScheduleDate(startMin)];
+                      }
+                    }
+                    set(patch);
+                  }}
                   style={{
                     padding: '7px 14px',
                     fontSize: 12.5,
@@ -677,68 +934,59 @@ function Drawer({
             <div style={{ ...labelStyle, marginBottom: 6 }}>
               {draft.kind === 'fixed' ? 'When' : 'Repeat'}
             </div>
-            {isSleepTask ? (
-              <div
-                style={{
-                  display: 'inline-flex',
-                  width: 'fit-content',
-                  padding: '6px 11px',
-                  fontSize: 12,
-                  background: 'var(--accent-soft)',
-                  color: 'var(--accent-ink)',
-                  border: '1px solid var(--accent)',
-                  borderRadius: 5,
-                  fontFamily: 'var(--font-sans)',
-                }}
-              >
-                Daily fixed task
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {(draft.kind === 'fixed'
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {(draft.kind === 'fixed'
                 ? ([
-                    { v: 'once' as const, l: 'Once' },
-                    { v: 'weekdays' as const, l: 'Weekdays' },
-                    { v: 'weekly' as const, l: 'Custom days' },
-                  ])
-                : ([
-                    { v: 'none' as const, l: 'No repeat' },
+                    { v: 'once' as const, l: 'Schedule' },
                     { v: 'daily' as const, l: 'Daily' },
                     { v: 'weekdays' as const, l: 'Weekdays' },
                     { v: 'weekly' as const, l: 'Custom days' },
                   ])
-              ).map((opt) => (
-                <button
-                  key={opt.v}
-                  onClick={() => set({ recurrenceKind: opt.v })}
-                  style={{
-                    padding: '6px 11px',
-                    fontSize: 12,
-                    background:
-                      draft.recurrenceKind === opt.v
-                        ? 'var(--accent-soft)'
-                        : 'transparent',
-                    color:
-                      draft.recurrenceKind === opt.v
-                        ? 'var(--accent-ink)'
-                        : 'var(--ink)',
-                    border:
-                      '1px solid ' +
-                      (draft.recurrenceKind === opt.v
-                        ? 'var(--accent)'
-                        : 'var(--line)'),
-                    borderRadius: 5,
-                    cursor: 'pointer',
-                    fontFamily: 'var(--font-sans)',
-                  }}
-                >
-                  {opt.l}
-                </button>
-              ))}
-              </div>
-            )}
+                : ([
+                    { v: 'none' as const, l: 'Once' },
+                    { v: 'daily' as const, l: 'Daily' },
+                    { v: 'weekdays' as const, l: 'Weekdays' },
+                    { v: 'weekly' as const, l: 'Custom days' },
+                    { v: 'once' as const, l: 'Schedule' },
+                  ])
+              ).map((opt) => {
+                const sel = draft.recurrenceKind === opt.v;
+                return (
+                  <button
+                    key={opt.v}
+                    disabled={isSleepTask}
+                    onClick={() => {
+                      const patch: Partial<Task> = { recurrenceKind: opt.v };
+                      if (
+                        opt.v === 'once' &&
+                        (!draft.recurrenceDates || draft.recurrenceDates.length === 0) &&
+                        draft.recurrenceAnchorDate == null
+                      ) {
+                        patch.recurrenceDates = [
+                          defaultScheduleDate(draft.fixedWindowStartMinute),
+                        ];
+                      }
+                      set(patch);
+                    }}
+                    style={{
+                      padding: '6px 11px',
+                      fontSize: 12,
+                      background: sel ? 'var(--accent-soft)' : 'transparent',
+                      color: sel ? 'var(--accent-ink)' : 'var(--ink)',
+                      border: '1px solid ' + (sel ? 'var(--accent)' : 'var(--line)'),
+                      borderRadius: 5,
+                      cursor: isSleepTask ? 'not-allowed' : 'pointer',
+                      opacity: isSleepTask && !sel ? 0.35 : 1,
+                      fontFamily: 'var(--font-sans)',
+                    }}
+                  >
+                    {opt.l}
+                  </button>
+                );
+              })}
+            </div>
 
-            {!isSleepTask && draft.recurrenceKind === 'weekly' && (
+            {draft.recurrenceKind === 'weekly' && (
               <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                 {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((label, idx) => {
                   const bit = 1 << idx;
@@ -746,6 +994,7 @@ function Drawer({
                   return (
                     <button
                       key={label}
+                      disabled={isSleepTask}
                       onClick={() =>
                         set({
                           recurrenceDaysMask: selected
@@ -762,7 +1011,8 @@ function Drawer({
                         border:
                           '1px solid ' + (selected ? 'var(--accent)' : 'var(--line)'),
                         borderRadius: 4,
-                        cursor: 'pointer',
+                        cursor: isSleepTask ? 'not-allowed' : 'pointer',
+                        opacity: isSleepTask && !selected ? 0.35 : 1,
                         fontFamily: 'var(--font-mono)',
                       }}
                     >
@@ -773,133 +1023,269 @@ function Drawer({
               </div>
             )}
 
-            {!isSleepTask && draft.recurrenceKind === 'once' && (
-              <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 12, color: 'var(--muted)' }}>On</span>
-                <input
-                  type="date"
-                  value={dateInputFromEpoch(draft.recurrenceAnchorDate)}
-                  onChange={(e) =>
+            {draft.recurrenceKind === 'once' && (
+              <div style={{ marginTop: 10 }}>
+                <MultiDatePicker
+                  disabled={isSleepTask}
+                  values={
+                    draft.recurrenceDates && draft.recurrenceDates.length > 0
+                      ? draft.recurrenceDates
+                      : draft.recurrenceAnchorDate != null
+                        ? [draft.recurrenceAnchorDate]
+                        : []
+                  }
+                  onChange={(next) =>
                     set({
-                      recurrenceAnchorDate: epochFromDateInput(e.target.value),
+                      recurrenceDates: next.length > 0 ? next : null,
+                      recurrenceAnchorDate: null,
                     })
                   }
-                  style={{ ...drawerInp, width: 160 }}
                 />
               </div>
             )}
+
+            {draft.kind !== 'fixed' && draft.recurrenceKind !== 'none' && (
+              <div style={{
+                marginTop: 10,
+                fontSize: 11,
+                color: 'var(--muted)',
+                fontFamily: 'var(--font-mono)',
+                lineHeight: 1.45,
+              }}>
+                Recreates this task on the days selected with an updated deadline.
+              </div>
+            )}
+
+            {draft.kind !== 'fixed' && (
+              <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={labelStyle}>Estimate</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={5}
+                  value={draft.estimatedMinutes ?? ''}
+                  placeholder="60"
+                  onChange={(e) =>
+                    set({
+                      estimatedMinutes:
+                        e.target.value === '' ? null : Number(e.target.value),
+                    })
+                  }
+                  style={{ ...drawerInp, width: 90, fontFamily: 'var(--font-mono)' }}
+                />
+                <span style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>min</span>
+              </div>
+            )}
+
+            <AdvancedOccurrences
+              draft={draft}
+              onUpdate={(patch) => set(patch)}
+            />
           </div>
 
-          <div style={{
-            marginTop: 14,
-            border: '1px solid var(--line)',
-            borderRadius: 8,
-            padding: 14,
-          }}>
-            <div style={{ ...labelStyle, marginBottom: 8 }}>Planner knobs</div>
-            <FieldRow>
-              <FieldCell label="Max chunk (min)">
-                <input
-                  type="number"
-                  min={0}
-                  value={draft.maxChunkMinutes ?? ''}
-                  onChange={(e) =>
-                    set({
-                      maxChunkMinutes:
-                        e.target.value === '' ? null : Number(e.target.value),
-                    })
-                  }
-                  style={drawerInp}
-                />
-              </FieldCell>
-              <FieldCell label="Min chunk (min)">
-                <input
-                  type="number"
-                  min={0}
-                  value={draft.minChunkMinutes ?? ''}
-                  onChange={(e) =>
-                    set({
-                      minChunkMinutes:
-                        e.target.value === '' ? null : Number(e.target.value),
-                    })
-                  }
-                  style={drawerInp}
-                />
-              </FieldCell>
-              <FieldCell label="Min rest (min)">
-                <input
-                  type="number"
-                  min={0}
-                  value={draft.minimumRestMinutes ?? ''}
-                  onChange={(e) =>
-                    set({
-                      minimumRestMinutes:
-                        e.target.value === '' ? null : Number(e.target.value),
-                    })
-                  }
-                  style={drawerInp}
-                />
-              </FieldCell>
-              <FieldCell label="Work:rest ratio">
-                <RatioFields
-                  work={draft.workRatio}
-                  rest={draft.restRatio}
-                  onChange={(workRatio, restRatio) => set({ workRatio, restRatio })}
-                />
-              </FieldCell>
-              <FieldCell label="Protect blocks" hint="Planner can't reflow these once placed">
-                <label style={{
+          {draft.kind !== 'fixed' && (
+            <div style={{
+              marginTop: 14,
+              border: '1px solid var(--line)',
+              borderRadius: 8,
+              padding: 14,
+            }}>
+              <div style={{ ...labelStyle, marginBottom: 8 }}>Planner knobs</div>
+              <FieldRow>
+                <FieldCell label="Max chunk (min)">
+                  <input
+                    type="number"
+                    min={0}
+                    value={draft.maxChunkMinutes ?? ''}
+                    placeholder={
+                      prefs ? String(Math.max(1, prefs.workDurationMinutes)) : '50'
+                    }
+                    onChange={(e) =>
+                      set({
+                        maxChunkMinutes:
+                          e.target.value === '' ? null : Number(e.target.value),
+                      })
+                    }
+                    style={drawerInp}
+                  />
+                </FieldCell>
+                <FieldCell label="Min chunk (min)">
+                  <input
+                    type="number"
+                    min={0}
+                    value={draft.minChunkMinutes ?? ''}
+                    placeholder="1"
+                    onChange={(e) =>
+                      set({
+                        minChunkMinutes:
+                          e.target.value === '' ? null : Number(e.target.value),
+                      })
+                    }
+                    style={drawerInp}
+                  />
+                </FieldCell>
+                <FieldCell label="Min rest (min)">
+                  <input
+                    type="number"
+                    min={0}
+                    value={draft.minimumRestMinutes ?? ''}
+                    placeholder={prefs ? String(prefs.minimumRestMinutes) : '5'}
+                    onChange={(e) =>
+                      set({
+                        minimumRestMinutes:
+                          e.target.value === '' ? null : Number(e.target.value),
+                      })
+                    }
+                    style={drawerInp}
+                  />
+                </FieldCell>
+                <FieldCell label="Work:rest ratio">
+                  <RatioFields
+                    work={draft.workRatio}
+                    rest={draft.restRatio}
+                    defaults={ratioDefaults(prefs)}
+                    onChange={(workRatio, restRatio) => set({ workRatio, restRatio })}
+                  />
+                </FieldCell>
+                <FieldCell label="Protect blocks" hint="Planner can't reflow these once placed">
+                  <div
+                    onClick={() => set({ protectGeneratedBlocks: !draft.protectGeneratedBlocks })}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      fontSize: 13,
+                      color: 'var(--ink)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <Check
+                      checked={draft.protectGeneratedBlocks}
+                      onChange={(v) => set({ protectGeneratedBlocks: v })}
+                    />
+                    Lock blocks
+                  </div>
+                </FieldCell>
+              </FieldRow>
+            </div>
+          )}
+
+          {draft.kind === 'fixed' && (
+            <div style={{
+              marginTop: 14,
+              border: '1px solid var(--line)',
+              borderRadius: 8,
+              padding: 14,
+            }}>
+              <div
+                onClick={() => {
+                  if (isSleepTask) return;
+                  const wantOn = draft.minimumRestMinutes == null;
+                  set({
+                    minimumRestMinutes: wantOn
+                      ? draft.minimumRestMinutes ??
+                        fixedDefaultRestMinutes(
+                          prefs,
+                          draft.fixedWindowStartMinute,
+                          draft.fixedWindowEndMinute,
+                        )
+                      : null,
+                  });
+                }}
+                style={{
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: 8,
                   fontSize: 13,
                   color: 'var(--ink)',
-                  cursor: 'pointer',
+                  cursor: isSleepTask ? 'not-allowed' : 'pointer',
+                }}
+              >
+                <Check
+                  disabled={isSleepTask}
+                  checked={draft.minimumRestMinutes != null}
+                  onChange={(v) =>
+                    set({
+                      minimumRestMinutes: v
+                        ? draft.minimumRestMinutes ??
+                          fixedDefaultRestMinutes(
+                            prefs,
+                            draft.fixedWindowStartMinute,
+                            draft.fixedWindowEndMinute,
+                          )
+                        : null,
+                    })
+                  }
+                />
+                Rest after task
+              </div>
+              {draft.minimumRestMinutes != null && (
+                <div style={{
+                  marginTop: 10,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
                 }}>
+                  <span style={{ ...labelStyle }}>Rest (min)</span>
                   <input
-                    type="checkbox"
-                    checked={draft.protectGeneratedBlocks}
-                    onChange={(e) => set({ protectGeneratedBlocks: e.target.checked })}
-                    style={{ accentColor: 'var(--accent)' }}
+                    type="number"
+                    min={1}
+                    disabled={isSleepTask}
+                    value={draft.minimumRestMinutes ?? ''}
+                    placeholder={String(
+                      fixedDefaultRestMinutes(
+                        prefs,
+                        draft.fixedWindowStartMinute,
+                        draft.fixedWindowEndMinute,
+                      ),
+                    )}
+                    onChange={(e) =>
+                      set({
+                        minimumRestMinutes:
+                          e.target.value === '' ? null : Number(e.target.value),
+                      })
+                    }
+                    style={{ ...drawerInp, width: 90 }}
                   />
-                  Lock blocks
-                </label>
-              </FieldCell>
-            </FieldRow>
-          </div>
-
-          <div style={{ marginTop: 22 }}>
-            <div style={{ ...labelStyle, marginBottom: 6 }}>History</div>
-            <div style={{
-              fontSize: 12,
-              color: 'var(--muted)',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 3,
-              fontFamily: 'var(--font-mono)',
-            }}>
-              <span>
-                Created{' '}
-                <span style={{ color: 'var(--ink)' }}>
-                  {new Date(task.createdAt).toLocaleString()}
-                </span>
-              </span>
-              <span>
-                Updated{' '}
-                <span style={{ color: 'var(--ink)' }}>
-                  {new Date(task.updatedAt).toLocaleString()}
-                </span>
-              </span>
-              <span>
-                Completed{' '}
-                <span style={{ color: 'var(--ink)' }}>{task.completionCount}</span>{' '}
-                times · avg priority{' '}
-                <span style={{ color: 'var(--ink)' }}>
-                  {task.averagePriority.toFixed(1)}
-                </span>
-              </span>
+                </div>
+              )}
             </div>
-          </div>
+          )}
+
+          {!isAdd && (
+            <div style={{ marginTop: 22 }}>
+              <div style={{ ...labelStyle, marginBottom: 6 }}>History</div>
+              <div style={{
+                fontSize: 12,
+                color: 'var(--muted)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 3,
+                fontFamily: 'var(--font-mono)',
+              }}>
+                <span>
+                  Created{' '}
+                  <span style={{ color: 'var(--ink)' }}>
+                    {new Date(task.createdAt).toLocaleString()}
+                  </span>
+                </span>
+                <span>
+                  Updated{' '}
+                  <span style={{ color: 'var(--ink)' }}>
+                    {new Date(task.updatedAt).toLocaleString()}
+                  </span>
+                </span>
+                <span>
+                  Completed{' '}
+                  <span style={{ color: 'var(--ink)' }}>{task.completionCount}</span>{' '}
+                  times · avg priority{' '}
+                  <span style={{ color: 'var(--ink)' }}>
+                    {task.averagePriority.toFixed(1)}
+                  </span>
+                </span>
+              </div>
+            </div>
+          )}
         </div>
         <div style={{
           padding: '12px 18px',
@@ -909,7 +1295,7 @@ function Drawer({
           alignItems: 'center',
           background: 'var(--bg)',
         }}>
-          {!isSleepTask && (
+          {!isAdd && !isSleepTask && onDelete && (
             <button
               onClick={() => {
                 if (confirm(`Delete "${task.name}"?`)) onDelete(task.id);
@@ -931,7 +1317,7 @@ function Drawer({
             </button>
           )}
           <span style={{ flex: 1 }} />
-          {!isSleepTask && (planned ? (
+          {!isAdd && !isSleepTask && (planned ? (
             <button
               onClick={onRemoveFromPlan}
               style={{
@@ -978,17 +1364,18 @@ function Drawer({
           </button>
           <button
             onClick={save}
+            disabled={busy || !canSubmit}
             style={{
               padding: '6px 14px',
-              background: 'var(--accent)',
-              color: 'oklch(0.18 0.04 60)',
+              background: busy || !canSubmit ? 'var(--line)' : 'var(--accent)',
+              color: busy || !canSubmit ? 'var(--muted)' : 'oklch(0.18 0.04 60)',
               border: '1px solid var(--accent)',
               borderRadius: 5,
               fontSize: 12.5,
-              cursor: 'pointer',
+              cursor: busy || !canSubmit ? 'not-allowed' : 'pointer',
             }}
           >
-            Save
+            {isAdd ? 'Add' : 'Save'}
           </button>
         </div>
       </div>
@@ -1265,6 +1652,7 @@ function ActiveTaskCard({
 }) {
   const [hover, setHover] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const isFixed = task.kind === 'fixed';
   const pressure = tasksPressure(task, blocks);
   const overdue = task.deadline != null && task.deadline < Date.now();
   const totalPlannedMin = blocks.reduce(
@@ -1288,7 +1676,11 @@ function ActiveTaskCard({
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
-        background: hover || expanded ? 'var(--bg-raise)' : 'transparent',
+        background: hover || expanded
+          ? 'var(--bg-raise)'
+          : isFixed
+            ? 'color-mix(in oklch, var(--accent) 14%, transparent)'
+            : 'transparent',
         borderBottom: '1px solid var(--line)',
         transition: 'background 80ms',
       }}
@@ -1308,7 +1700,9 @@ function ActiveTaskCard({
           width: 3,
           height: 28,
           borderRadius: 2,
-          background: overdue ? 'var(--danger)' : pressureColor(pressure),
+          background: overdue
+            ? 'var(--danger)'
+            : group?.color ?? pressureColor(pressure),
           justifySelf: 'start',
         }} />
         <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -1352,14 +1746,20 @@ function ActiveTaskCard({
           color: 'var(--ink)',
           whiteSpace: 'nowrap',
         }}>
-          {formatDuration(remainingMin)}
-          <span style={{
-            color: 'var(--faint)',
-            fontSize: 10.5,
-            marginLeft: 4,
-          }}>
-            / {formatDuration(task.estimatedMinutes)}
-          </span>
+          {isFixed ? (
+            formatDuration(fixedWindowMinutes(task))
+          ) : (
+            <>
+              {formatDuration(remainingMin)}
+              <span style={{
+                color: 'var(--faint)',
+                fontSize: 10.5,
+                marginLeft: 4,
+              }}>
+                / {formatDuration(task.estimatedMinutes)}
+              </span>
+            </>
+          )}
         </div>
         <div style={{
           display: 'flex',
@@ -1367,19 +1767,29 @@ function ActiveTaskCard({
           gap: 8,
           minWidth: 0,
         }}>
-          <PressureBar value={pressure} />
-          <span style={{
-            fontSize: 11,
-            color: 'var(--muted)',
-            fontFamily: 'var(--font-mono)',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-          }}>
-            {pressureLabel(pressure)}
-          </span>
+          {isFixed ? (
+            <span style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>—</span>
+          ) : (
+            <>
+              <PressureBar value={pressure} />
+              <span style={{
+                fontSize: 11,
+                color: 'var(--muted)',
+                fontFamily: 'var(--font-mono)',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}>
+                {pressureLabel(pressure)}
+              </span>
+            </>
+          )}
         </div>
-        <PriorityChip p={task.priority} />
+        {isFixed ? (
+          <span style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>—</span>
+        ) : (
+          <PriorityChip p={task.priority} />
+        )}
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -1440,6 +1850,22 @@ function sleepTaskFromTemplate(template: unknown): Task {
   const days = (template as { days?: Array<{ sleepStartMinute?: number | null; sleepEndMinute?: number | null }> } | null)?.days ?? [];
   const start = days.find((day) => day.sleepStartMinute != null)?.sleepStartMinute ?? 23 * 60;
   const end = days.find((day) => day.sleepEndMinute != null)?.sleepEndMinute ?? 7 * 60;
+  const overrides: Record<string, { startMin?: number; endMin?: number }> = {};
+  days.forEach((day, idx) => {
+    const s = day.sleepStartMinute;
+    const e = day.sleepEndMinute;
+    const sDiff = s != null && s !== start;
+    const eDiff = e != null && e !== end;
+    if (sDiff || eDiff) {
+      overrides[String(idx)] = {
+        ...(sDiff && s != null ? { startMin: s } : {}),
+        ...(eDiff && e != null ? { endMin: e } : {}),
+      };
+    }
+  });
+  const overridesJson = Object.keys(overrides).length > 0
+    ? JSON.stringify(overrides)
+    : null;
   const now = Date.now();
   return {
     id: SLEEP_TASK_ID,
@@ -1461,6 +1887,8 @@ function sleepTaskFromTemplate(template: unknown): Task {
     recurrenceKind: 'daily',
     recurrenceDaysMask: ALL_WEEKDAYS_MASK,
     recurrenceAnchorDate: null,
+    recurrenceDates: null,
+    recurrenceOverrides: overridesJson,
     averagePriority: 1,
     averageActualMinutes: null,
     completionCount: 0,
@@ -1485,8 +1913,14 @@ export function TasksScreen() {
   const [removeModalTaskId, setRemoveModalTaskId] = useState<number | null>(null);
   const [activeSort, setActiveSort] = useState<
     'pressure' | 'deadline' | 'priority' | 'next-block'
-  >('pressure');
+  >('next-block');
   const [error, setError] = useState<string | null>(null);
+  const [prefs, setPrefs] = useState<UserPreferences | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  useEffect(() => {
+    api.getPreferences().then(setPrefs).catch(() => {});
+  }, []);
 
   // Track content area width via ResizeObserver. Threshold accounts
   // for the active-grid min (~724px) + 200px rail + padding, so the
@@ -1667,14 +2101,25 @@ export function TasksScreen() {
         const currentSleep = sleepTaskFromTemplate(existing);
         const start = updates.fixedWindowStartMinute ?? currentSleep.fixedWindowStartMinute ?? 23 * 60;
         const end = updates.fixedWindowEndMinute ?? currentSleep.fixedWindowEndMinute ?? 7 * 60;
+        const overridesRaw =
+          updates.recurrenceOverrides !== undefined
+            ? updates.recurrenceOverrides
+            : currentSleep.recurrenceOverrides;
+        let overrides: Record<string, { startMin?: number; endMin?: number }> = {};
+        if (overridesRaw) {
+          try { overrides = JSON.parse(overridesRaw); } catch { /* ignore */ }
+        }
         await api.saveWeeklyTemplate({
           ...existing,
-          days: baseDays.map((day) => ({
-            ...day,
-            enabled: day.enabled ?? true,
-            sleepStartMinute: start,
-            sleepEndMinute: end,
-          })),
+          days: baseDays.map((day, idx) => {
+            const ov = overrides[String(idx)] ?? {};
+            return {
+              ...day,
+              enabled: day.enabled ?? true,
+              sleepStartMinute: ov.startMin ?? start,
+              sleepEndMinute: ov.endMin ?? end,
+            };
+          }),
           fixedBlocks:
             (existing?.fixedBlocks as unknown[] | undefined) ?? [],
         });
@@ -1742,7 +2187,9 @@ export function TasksScreen() {
 
   const activeTasks = useMemo(() => {
     const planned = tasks.filter(
-      (t) => (blocksByTaskId.get(t.id) ?? []).length > 0,
+      (t) =>
+        t.id === SLEEP_TASK_ID ||
+        (blocksByTaskId.get(t.id) ?? []).length > 0,
     );
     if (activeSort === 'pressure') {
       planned.sort(
@@ -1879,25 +2326,43 @@ export function TasksScreen() {
               )}
             </div>
           )}
-          <div style={{
-            fontSize: 11.5,
-            color: 'var(--muted)',
-            fontFamily: 'var(--font-mono)',
-            flexShrink: 0,
-            whiteSpace: 'nowrap',
-            marginLeft: tab === 'library' ? 0 : 'auto',
-          }}>
-            {tab === 'library'
-              ? `${filtered.length} of ${tasks.length}`
-              : `${ACTIVE_HORIZON_DAYS}d horizon`}
-          </div>
+          {tab !== 'library' && (
+            <div style={{
+              fontSize: 11.5,
+              color: 'var(--muted)',
+              fontFamily: 'var(--font-mono)',
+              flexShrink: 0,
+              whiteSpace: 'nowrap',
+              marginLeft: 'auto',
+            }}>
+              {`${ACTIVE_HORIZON_DAYS}d horizon`}
+            </div>
+          )}
+          {tab === 'library' && (
+            <button
+              onClick={() => setAdding(true)}
+              style={{
+                padding: '7px 12px',
+                background: 'var(--accent)',
+                color: 'oklch(0.18 0.04 60)',
+                border: '1px solid var(--accent)',
+                borderRadius: 6,
+                fontSize: 12,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-sans)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
+                flexShrink: 0,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <Icons.plus size={12} /> Add task
+            </button>
+          )}
         </div>
         <div style={{ height: 8 }} />
       </div>
-
-      {tab === 'library' && (
-        <QuickAdd groups={groups} onAdd={create} compressed={narrowLayout} />
-      )}
 
       {tab === 'active' ? (
         <div style={{ flex: 1, overflow: 'auto', padding: '20px 28px 40px' }}>
@@ -1975,17 +2440,11 @@ export function TasksScreen() {
                 }}>
                   Sort
                 </span>
-                <select
+                <Dropdown
                   value={activeSort}
-                  onChange={(e) =>
-                    setActiveSort(
-                      e.target.value as
-                        | 'pressure'
-                        | 'deadline'
-                        | 'priority'
-                        | 'next-block',
-                    )
-                  }
+                  onChange={setActiveSort}
+                  width={140}
+                  align="right"
                   style={{
                     background: 'var(--bg)',
                     border: '1px solid var(--line)',
@@ -1996,12 +2455,14 @@ export function TasksScreen() {
                     fontFamily: 'var(--font-sans)',
                     outline: 'none',
                   }}
-                >
-                  <option value="pressure">Pressure</option>
-                  <option value="deadline">Deadline</option>
-                  <option value="priority">Priority</option>
-                  <option value="next-block">Next block</option>
-                </select>
+                  options={[
+                    { value: 'pressure', label: 'Pressure' },
+                    { value: 'deadline', label: 'Deadline' },
+                    { value: 'priority', label: 'Priority' },
+                    { value: 'next-block', label: 'Next block' },
+                  ]}
+                />
+
               </div>
               <div style={{
                 display: 'grid',
@@ -2080,20 +2541,22 @@ export function TasksScreen() {
                 background: 'var(--bg)',
               }}>
                 <th style={{ ...th, width: 36, padding: '8px 4px 8px 14px' }}>
-                  <input
-                    type="checkbox"
+                  <Check
                     checked={
                       filtered.length > 0 &&
                       filtered.every((t) => selectedRows.has(t.id))
                     }
-                    onChange={(e) => {
-                      if (e.target.checked) {
+                    indeterminate={
+                      filtered.some((t) => selectedRows.has(t.id)) &&
+                      !filtered.every((t) => selectedRows.has(t.id))
+                    }
+                    onChange={(v) => {
+                      if (v) {
                         setSelectedRows(new Set(filtered.map((t) => t.id)));
                       } else {
                         setSelectedRows(new Set());
                       }
                     }}
-                    style={{ accentColor: 'var(--accent)', cursor: 'pointer' }}
                   />
                 </th>
                 <th style={th}>Name</th>
@@ -2108,8 +2571,11 @@ export function TasksScreen() {
             <tbody>
               {filtered.map((t) => {
                 const overdue = t.deadline != null && t.deadline < Date.now();
-                const planned = (blocksByTaskId.get(t.id) ?? []).length > 0;
+                const planned =
+                  t.id === SLEEP_TASK_ID ||
+                  (blocksByTaskId.get(t.id) ?? []).length > 0;
                 const sel = selectedRows.has(t.id);
+                const isFixedRow = t.kind === 'fixed';
                 return (
                   <tr
                     key={t.id}
@@ -2119,23 +2585,28 @@ export function TasksScreen() {
                       borderBottom: '1px solid var(--line)',
                       background: sel
                         ? 'color-mix(in oklch, var(--accent) 8%, transparent)'
-                        : 'transparent',
+                        : isFixedRow
+                          ? 'color-mix(in oklch, var(--accent) 14%, transparent)'
+                          : 'transparent',
                     }}
                     onMouseEnter={(e) => {
                       if (!sel)
                         e.currentTarget.style.background = 'var(--bg-raise)';
                     }}
                     onMouseLeave={(e) => {
-                      if (!sel) e.currentTarget.style.background = 'transparent';
+                      if (!sel)
+                        e.currentTarget.style.background = isFixedRow
+                          ? 'color-mix(in oklch, var(--accent) 14%, transparent)'
+                          : 'transparent';
                     }}
                   >
                     <td
                       style={{ padding: '6px 4px 6px 14px', verticalAlign: 'middle' }}
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <input
-                        type="checkbox"
+                      <Check
                         checked={sel}
+                        stopPropagation
                         onChange={() => {
                           setSelectedRows((prev) => {
                             const next = new Set(prev);
@@ -2143,10 +2614,6 @@ export function TasksScreen() {
                             else next.add(t.id);
                             return next;
                           });
-                        }}
-                        style={{
-                          accentColor: 'var(--accent)',
-                          cursor: 'pointer',
                         }}
                       />
                     </td>
@@ -2169,12 +2636,18 @@ export function TasksScreen() {
                     )}
                     {showPriority && (
                       <td style={td}>
-                        <PriorityChip p={t.priority} />
+                        {t.kind === 'fixed' ? (
+                          <span style={{ color: 'var(--faint)' }}>—</span>
+                        ) : (
+                          <PriorityChip p={t.priority} />
+                        )}
                       </td>
                     )}
                     {showEstimate && (
                       <td style={{ ...td, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-                        {formatDuration(t.estimatedMinutes)}
+                        {t.kind === 'fixed'
+                          ? formatDuration(fixedWindowMinutes(t))
+                          : formatDuration(t.estimatedMinutes)}
                       </td>
                     )}
                     <td style={{
@@ -2270,12 +2743,25 @@ export function TasksScreen() {
         <Drawer
           task={openTask}
           groups={groups}
+          prefs={prefs}
+          mode="edit"
           onClose={() => setOpenTaskId(null)}
           onUpdate={update}
           onDelete={remove}
           planned={(blocksByTaskId.get(openTask.id) ?? []).length > 0}
           onAddToPlan={() => setPlanModalTaskId(openTask.id)}
           onRemoveFromPlan={() => setRemoveModalTaskId(openTask.id)}
+        />
+      )}
+
+      {adding && (
+        <Drawer
+          task={blankTask()}
+          groups={groups}
+          prefs={prefs}
+          mode="add"
+          onClose={() => setAdding(false)}
+          onCreate={create}
         />
       )}
 

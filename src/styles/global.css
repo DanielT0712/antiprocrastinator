@@ -47,6 +47,13 @@ body {
 
 button { font-family: inherit; }
 input, select, textarea { font-family: inherit; color: var(--ink); }
+
+.ap-ratio-input::-webkit-inner-spin-button,
+.ap-ratio-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.ap-ratio-input { -moz-appearance: textfield; appearance: textfield; }
 select option { background: var(--bg-raise); color: var(--ink); }
 ::selection { background: var(--accent-soft); color: var(--ink); }
 

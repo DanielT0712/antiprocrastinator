@@ -23,6 +23,8 @@ use tauri::{
 pub const QUIT_CHALLENGE_PHRASE: &str = "I WANT TO PROCRASTINATE";
 pub const QUIT_REQUIRED_EVENT: &str = "guard-quit-required";
 pub const MAIN_WINDOW_LABEL: &str = "main";
+pub const WARNING_OVERLAY_LABEL_PREFIX: &str = "warning_overlay_";
+pub const WARNING_POPUP_LABEL: &str = "warning_popup";
 pub const MAIN_TRAY_ID: &str = "main";
 pub const TRAY_SHOW_ID: &str = "tray_show_main";
 pub const TRAY_REQUEST_QUIT_ID: &str = "tray_request_quit";
@@ -37,6 +39,7 @@ pub const GUARD_MAX_RESTARTS_PER_WINDOW: u32 = 3;
 pub struct GuardState {
     active: Mutex<bool>,
     allow_exit_once: Mutex<bool>,
+    last_frontend_heartbeat_ms: Mutex<Option<i64>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +138,39 @@ impl GuardState {
         Self {
             active: Mutex::new(true),
             allow_exit_once: Mutex::new(false),
+            last_frontend_heartbeat_ms: Mutex::new(None),
+        }
+    }
+
+    pub fn record_frontend_heartbeat(&self) {
+        if let Ok(mut guard) = self.last_frontend_heartbeat_ms.lock() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            *guard = Some(now);
+        }
+    }
+
+    /// True when the React UI has pinged within the last `stale_ms` and we
+    /// can therefore trust the in-app challenge dialog to actually appear.
+    /// If the bundle ever fails to mount (white screen), the dialog never
+    /// renders, so strong-guard quit-blocking would trap the user forever
+    /// — bypass it instead.
+    pub fn frontend_alive(&self, stale_ms: i64) -> bool {
+        let last = match self.last_frontend_heartbeat_ms.lock() {
+            Ok(g) => *g,
+            Err(_) => return false,
+        };
+        match last {
+            None => false,
+            Some(ts) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                now - ts < stale_ms
+            }
         }
     }
 
@@ -199,6 +235,130 @@ pub fn show_main_window<R: Runtime, M: Manager<R>>(manager: &M) -> Result<(), St
     let _ = window.unminimize();
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())
+}
+
+/// Spawn one borderless, click-through, always-on-top tint overlay per
+/// monitor. Pointer events pass through so the user can still interact
+/// with whatever's beneath. This is the visual layer only — the
+/// countdown text lives in a separate unclosable popup window.
+pub fn show_warning_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let monitors = app.available_monitors().map_err(|e| e.to_string())?;
+    for (idx, monitor) in monitors.iter().enumerate() {
+        let label = format!("{WARNING_OVERLAY_LABEL_PREFIX}{idx}");
+        let window = match app.get_webview_window(&label) {
+            Some(w) => w,
+            None => tauri::WebviewWindowBuilder::new(
+                app,
+                &label,
+                tauri::WebviewUrl::App("index.html?view=overlay".into()),
+            )
+            .title("AntiProcrastinator overlay")
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .resizable(false)
+            .closable(false)
+            .minimizable(false)
+            .maximizable(false)
+            .shadow(false)
+            .visible(false)
+            .build()
+            .map_err(|e| e.to_string())?,
+        };
+        let size = monitor.size();
+        let pos = monitor.position();
+        let _ = window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y));
+        let _ = window.set_size(tauri::PhysicalSize::new(size.width, size.height));
+        let _ = window.set_ignore_cursor_events(true);
+        let _ = window.set_always_on_top(true);
+        let _ = window.show();
+    }
+    Ok(())
+}
+
+pub fn hide_warning_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    // Close every overlay window we previously spawned. Labels start with
+    // the known prefix so iterating webview_windows() is enough. Popup
+    // is intentionally NOT hidden — it's always-on with ticking text.
+    for (label, win) in app.webview_windows() {
+        if label.starts_with(WARNING_OVERLAY_LABEL_PREFIX) {
+            let _ = win.hide();
+        }
+    }
+    Ok(())
+}
+
+/// Small unclosable always-on-top popup with the countdown text. No
+/// traffic-light buttons (decorations off + closable/min/max all false)
+/// so the user can't dismiss it from the OS.
+pub fn show_warning_popup<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let window = match app.get_webview_window(WARNING_POPUP_LABEL) {
+        Some(w) => w,
+        None => tauri::WebviewWindowBuilder::new(
+            app,
+            WARNING_POPUP_LABEL,
+            tauri::WebviewUrl::App("index.html?view=popup".into()),
+        )
+        .title("AntiProcrastinator warning")
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .resizable(false)
+        .closable(false)
+        .minimizable(false)
+        .maximizable(false)
+        .shadow(true)
+        .inner_size(480.0, 160.0)
+        .visible(false)
+        .build()
+        .map_err(|e| e.to_string())?,
+    };
+
+    if let Ok(Some(monitor)) = window.primary_monitor() {
+        let m_size = monitor.size();
+        let m_pos = monitor.position();
+        // Center horizontally near the top of the primary monitor.
+        let scale = monitor.scale_factor().max(1.0);
+        let win_w = (480.0 * scale) as i32;
+        let win_h = (160.0 * scale) as i32;
+        let x = m_pos.x + (m_size.width as i32 - win_w) / 2;
+        let y = m_pos.y + (m_size.height as i32 / 12).max(48);
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+
+    let _ = window.set_always_on_top(true);
+    let _ = window.show();
+    Ok(())
+}
+
+pub fn hide_warning_popup<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(WARNING_POPUP_LABEL) {
+        let _ = window.hide();
+    }
+    Ok(())
+}
+
+pub fn set_main_window_topmost<R: Runtime, M: Manager<R>>(
+    manager: &M,
+    on: bool,
+) -> Result<(), String> {
+    let window = match manager.get_webview_window(MAIN_WINDOW_LABEL) {
+        Some(w) => w,
+        None => return Ok(()),
+    };
+    window
+        .set_always_on_top(on)
+        .map_err(|error| error.to_string())?;
+    if on {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    Ok(())
 }
 
 pub fn hide_main_window<R: Runtime, M: Manager<R>>(manager: &M) -> Result<(), String> {

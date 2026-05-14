@@ -94,6 +94,10 @@ pub struct Task {
     pub recurrence_kind: RecurrenceKind,
     pub recurrence_days_mask: i64,
     pub recurrence_anchor_date: Option<i64>,
+    #[serde(default)]
+    pub recurrence_dates: Option<Vec<i64>>,
+    #[serde(default)]
+    pub recurrence_overrides: Option<String>,
     pub average_priority: f64,
     pub average_actual_minutes: Option<f64>,
     pub completion_count: i64,
@@ -146,6 +150,10 @@ pub struct NewTask {
     pub recurrence_days_mask: Option<i64>,
     #[serde(default)]
     pub recurrence_anchor_date: Option<i64>,
+    #[serde(default)]
+    pub recurrence_dates: Option<Vec<i64>>,
+    #[serde(default)]
+    pub recurrence_overrides: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -172,6 +180,8 @@ pub struct TaskUpdate {
     pub recurrence_kind: Option<RecurrenceKind>,
     pub recurrence_days_mask: Option<i64>,
     pub recurrence_anchor_date: Option<Option<i64>>,
+    pub recurrence_dates: Option<Option<Vec<i64>>>,
+    pub recurrence_overrides: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

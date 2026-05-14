@@ -255,6 +255,8 @@ pub struct EnforcementStatus {
     pub focused_window: Option<FocusedWindowInfo>,
     pub warnings: Vec<ProcessWarning>,
     pub last_killed_processes: Vec<String>,
+    #[serde(default, skip_serializing)]
+    pub window_topmost: bool,
 }
 
 impl Default for EnforcementStatus {
@@ -266,6 +268,7 @@ impl Default for EnforcementStatus {
             focused_window: None,
             warnings: vec![],
             last_killed_processes: vec![],
+            window_topmost: false,
         }
     }
 }

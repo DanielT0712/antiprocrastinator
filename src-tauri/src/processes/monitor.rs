@@ -3097,6 +3097,31 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
                 },
             )
             .map_err(|error| error.to_string())?;
+
+            // OS-level toast. Only fires on round-second boundaries
+            // (every ~5s and at the final 3,2,1) so we don't spam
+            // Notification Center with one per scan tick.
+            let should_notify = seconds_until_kill <= 3
+                || seconds_until_kill % 5 == 0;
+            if should_notify {
+                use tauri_plugin_notification::NotificationExt;
+                let body = match candidate.match_reason.as_ref() {
+                    Some(reason) => format!(
+                        "Closing {} in {}s ({reason})",
+                        candidate.process_name, seconds_until_kill
+                    ),
+                    None => format!(
+                        "Closing {} in {}s",
+                        candidate.process_name, seconds_until_kill
+                    ),
+                };
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Blocked app detected")
+                    .body(body)
+                    .show();
+            }
         }
     }
 
@@ -3111,6 +3136,16 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
             match_reason: warning.match_reason.clone(),
         })
         .collect();
+
+    let has_warnings = !runtime.warnings.is_empty();
+    if has_warnings != runtime.status.window_topmost {
+        if has_warnings {
+            let _ = crate::guard::watchdog::show_warning_overlay(app);
+        } else {
+            let _ = crate::guard::watchdog::hide_warning_overlay(app);
+        }
+        runtime.status.window_topmost = has_warnings;
+    }
 
     Ok(())
 }

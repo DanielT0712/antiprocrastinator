@@ -316,14 +316,15 @@ function RatioInput({
   onChange: (work: number, rest: number) => void;
 }) {
   const box: CSSProperties = {
-    width: 48,
+    width: 36,
     background: 'transparent',
     border: 'none',
     color: 'var(--ink)',
     fontFamily: 'var(--font-mono)',
-    fontSize: 12.5,
+    fontSize: 13,
     textAlign: 'center',
     outline: 'none',
+    padding: '6px 2px',
   };
   const setPart = (which: 'work' | 'rest', value: string) => {
     const parsed = Math.max(which === 'work' ? 1 : 0, Number(value) || 0);
@@ -336,11 +337,27 @@ function RatioInput({
       border: '1px solid var(--line)',
       borderRadius: 6,
       background: 'var(--bg)',
-      overflow: 'hidden',
+      width: 'fit-content',
     }}>
-      <input type="number" min={1} step={1} value={work} onChange={(e) => setPart('work', e.target.value)} style={box} />
+      <input
+        type="number"
+        min={1}
+        step={1}
+        value={work}
+        onChange={(e) => setPart('work', e.target.value)}
+        className="ap-ratio-input"
+        style={box}
+      />
       <span style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)', fontSize: 13 }}>:</span>
-      <input type="number" min={0} step={1} value={rest} onChange={(e) => setPart('rest', e.target.value)} style={box} />
+      <input
+        type="number"
+        min={0}
+        step={1}
+        value={rest}
+        onChange={(e) => setPart('rest', e.target.value)}
+        className="ap-ratio-input"
+        style={box}
+      />
     </div>
   );
 }
