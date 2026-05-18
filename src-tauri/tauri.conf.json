@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "AntiProcrastinator",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "com.antiprocrastinator",
   "build": {
     "frontendDist": "../dist",
@@ -36,6 +36,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }
