@@ -115,6 +115,7 @@ pub fn run() {
             guard::commands::suspend_guard,
             guard::commands::get_guard_status,
             guard::commands::frontend_heartbeat,
+            guard::commands::get_active_warning,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -307,9 +308,7 @@ fn handle_quit_request(app: &tauri::AppHandle, source: &str) {
     }
 
     if strong_guard_active {
-        log::warn!(
-            "frontend heartbeat stale during quit ({source}); bypassing strong guard"
-        );
+        log::warn!("frontend heartbeat stale during quit ({source}); bypassing strong guard");
     }
 
     let _ = guard::watchdog::disable_supervisor(app);

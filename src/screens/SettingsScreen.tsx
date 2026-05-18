@@ -81,9 +81,54 @@ function HoverPop({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const idRef = useRef(Symbol('hp'));
+  const triggerRef = useRef<HTMLSpanElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+
+  const computePos = () => {
+    const trigger = triggerRef.current;
+    const pop = popRef.current;
+    if (!trigger) return;
+    const tr = trigger.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    // Estimate popover size; clamp to max 360x220 if not yet measured.
+    const pw = pop?.offsetWidth ?? 320;
+    const ph = pop?.offsetHeight ?? 120;
+    const gap = 8;
+
+    // Prefer below + left-aligned; flip if it doesn't fit.
+    let top = tr.bottom + gap;
+    if (top + ph > vh - 4) {
+      const above = tr.top - gap - ph;
+      if (above >= 4) top = above;
+      else top = Math.max(4, vh - ph - 4);
+    }
+    let left = tr.left;
+    if (left + pw > vw - 4) left = Math.max(4, vw - pw - 4);
+    if (left < 4) left = 4;
+    setPos({ top, left });
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    computePos();
+    // Re-measure after first paint so size-dependent flip is accurate.
+    const t = setTimeout(computePos, 0);
+    const onScroll = () => computePos();
+    const onResize = () => computePos();
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onResize);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const show = () => {
     if (closeTimer.current) clearTimeout(closeTimer.current);
@@ -114,6 +159,7 @@ function HoverPop({
 
   return (
     <span
+      ref={triggerRef}
       style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}
       onMouseEnter={show}
       onMouseLeave={hide}
@@ -123,11 +169,14 @@ function HoverPop({
       {children}
       {open && (
         <div
+          ref={popRef}
           role="tooltip"
+          onMouseEnter={show}
+          onMouseLeave={hide}
           style={{
-            position: 'absolute',
-            top: 'calc(100% + 8px)',
-            left: 0,
+            position: 'fixed',
+            top: pos?.top ?? -9999,
+            left: pos?.left ?? -9999,
             minWidth: 280,
             maxWidth: 360,
             padding: '12px 14px',
@@ -136,8 +185,9 @@ function HoverPop({
             borderRadius: 8,
             boxShadow:
               '0 12px 28px -10px rgba(0,0,0,0.45), 0 4px 10px -4px rgba(0,0,0,0.3)',
-            zIndex: 50,
+            zIndex: 9999,
             pointerEvents: 'auto',
+            visibility: pos ? 'visible' : 'hidden',
           }}
         >
           {title && (
@@ -371,19 +421,22 @@ function SegBtn<T extends string>({
   onChange: (next: T) => void;
   options: { value: T; label: string; explain?: string }[];
 }) {
+  // No overflow:hidden on the wrapper — that clipped HoverPop popovers
+  // that anchor inside each option button. Per-button radii preserve
+  // the segmented look without clipping.
   return (
     <div style={{
       display: 'inline-flex',
       border: '1px solid var(--line)',
       borderRadius: 6,
       background: 'var(--bg)',
-      overflow: 'hidden',
     }}>
-      {options.map((o) => {
+      {options.map((o, idx) => {
         const active = o.value === value;
+        const isFirst = idx === 0;
+        const isLast = idx === options.length - 1;
         const btn = (
           <button
-            key={String(o.value)}
             onClick={() => onChange(o.value)}
             style={{
               padding: '6px 12px',
@@ -395,12 +448,18 @@ function SegBtn<T extends string>({
               cursor: 'pointer',
               fontFamily: 'var(--font-sans)',
               fontWeight: active ? 500 : 400,
+              borderTopLeftRadius: isFirst ? 6 : 0,
+              borderBottomLeftRadius: isFirst ? 6 : 0,
+              borderTopRightRadius: isLast ? 6 : 0,
+              borderBottomRightRadius: isLast ? 6 : 0,
             }}
           >
             {o.label}
           </button>
         );
-        if (!o.explain) return btn;
+        if (!o.explain) {
+          return <span key={String(o.value)}>{btn}</span>;
+        }
         return (
           <HoverPop key={String(o.value)} title={o.label} body={o.explain}>
             {btn}
@@ -891,6 +950,45 @@ export function SettingsScreen() {
                   }
                 />
                 <SettingsRow
+                  title="Block-end prompt style"
+                  help="What you see 5 minutes before a block ends."
+                  control={
+                    <SegBtn
+                      value={prefs.blockEndStyle ?? 'modal'}
+                      onChange={(v) => update({ blockEndStyle: v })}
+                      options={[
+                        {
+                          value: 'modal',
+                          label: 'Modal',
+                          explain:
+                            'Centered dialog. Takes focus until you choose an action.',
+                        },
+                        {
+                          value: 'banner',
+                          label: 'Banner',
+                          explain:
+                            'Small notification in the top-right corner of your screen.',
+                        },
+                        {
+                          value: 'silent',
+                          label: 'Silent',
+                          explain: 'No prompt. The next block just begins.',
+                        },
+                      ]}
+                    />
+                  }
+                />
+                <SettingsRow
+                  title="Daily focus summary"
+                  help="End-of-day notification summarizing what you finished."
+                  control={
+                    <Toggle
+                      on={prefs.dailySummary ?? true}
+                      onChange={(v) => update({ dailySummary: v })}
+                    />
+                  }
+                />
+                <SettingsRow
                   last
                   title="Classification popups"
                   help="Prompt you to classify newly seen apps and browser tabs."
@@ -1110,12 +1208,12 @@ export function SettingsScreen() {
             <>
               <SectionTitle
                 title="Enforcement"
-                blurb="How the process monitor reacts when something it should block is running."
+                blurb="How blocked apps are detected, warned, and closed."
               />
               <SettingsCard title="Warnings">
                 <SettingsRow
                   title="When blocked"
-                  help="Close the app/site immediately, or show a countdown first so the user can save work."
+                  help="Close immediately, or warn first so there is time to save."
                   control={
                     <div style={{
                       display: 'inline-flex',
@@ -1172,7 +1270,7 @@ export function SettingsScreen() {
                   <>
                     <SettingsRow
                       title="Warn for"
-                      help="Time before the countdown starts."
+                      help="Time between detection and close."
                       control={
                         <Stepper
                           value={prefs.processWarningSeconds}
@@ -1187,7 +1285,7 @@ export function SettingsScreen() {
                     />
                     <SettingsRow
                       title="Countdown to kill"
-                      help="Time after the warning before the process is closed."
+                      help="When to keep the warning surface visible."
                       control={
                         <Stepper
                           value={prefs.processCountdownSeconds}
@@ -1202,12 +1300,47 @@ export function SettingsScreen() {
                         />
                       }
                     />
+                    <SettingsRow
+                      title="Warning display"
+                      help="How the close-app warning and countdown appear."
+                      control={
+                        <SegBtn
+                          value={prefs.warningDisplay ?? 'banner'}
+                          onChange={(v) => update({ warningDisplay: v })}
+                          options={[
+                            {
+                              value: 'fullscreen',
+                              label: 'Fullscreen',
+                              explain:
+                                'Click-through overlay across the screen.',
+                            },
+                            {
+                              value: 'window',
+                              label: 'Windowed',
+                              explain:
+                                'Small always-on-top warning window.',
+                            },
+                            {
+                              value: 'banner',
+                              label: 'Banner',
+                              explain:
+                                'macOS notification banner.',
+                            },
+                            {
+                              value: 'menubar',
+                              label: 'Menubar only',
+                              explain: 'Tray tooltip only. No popup.',
+                            },
+                          ]}
+                        />
+                      }
+                    />
                   </>
                 )}
                 <SettingsRow
                   last
                   title="Scan interval"
-                  help="How often running processes are checked. Lower = faster reaction, more CPU."
+                  help="How often running processes are checked."
                   control={
                     <Stepper
                       value={prefs.processScanIntervalSeconds}

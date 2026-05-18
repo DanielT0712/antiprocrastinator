@@ -5,6 +5,8 @@ import type { TimeBlock } from './api/types';
 interface ProcessWarn {
   processName: string;
   secondsUntilKill: number;
+  message?: string;
+  failed?: boolean;
   receivedAt: number;
 }
 
@@ -69,6 +71,33 @@ export function WarningPopup() {
   useEffect(() => {
     let cancelled = false;
     const cleanups: Array<() => void> = [];
+    const refreshActiveWarning = async () => {
+      try {
+        const active = await api.getActiveWarning();
+        if (
+          cancelled ||
+          !active ||
+          !['process', 'process_kill_failed'].includes(active.kind) ||
+          !active.processName
+        ) return;
+        setProcWarns((prev) => {
+          const next = new Map(prev);
+          next.set(active.processName!, {
+            processName: active.processName!,
+            secondsUntilKill: active.killAt
+              ? Math.max(0, Math.ceil((active.killAt - Date.now()) / 1_000))
+              : 0,
+            message: active.message,
+            failed: active.kind === 'process_kill_failed',
+            receivedAt: Date.now(),
+          });
+          return next;
+        });
+      } catch {
+        /* ignore */
+      }
+    };
+    refreshActiveWarning();
     (async () => {
       const u = await onAppEvent('process-warning', (p: ProcessWarningEvent) => {
         setProcWarns((prev) => {
@@ -139,7 +168,9 @@ export function WarningPopup() {
     (topProc && topProc.secondsUntilKill <= 3) ||
     (blockWarn != null && blockWarn.secondsUntilStart <= 5);
   const warningText = topProc
-    ? `${topProc.processName} closing in ${topProc.secondsUntilKill}s`
+    ? topProc.failed
+      ? topProc.message ?? `Could not close ${topProc.processName}`
+      : `${topProc.processName} closing in ${topProc.secondsUntilKill}s`
     : blockWarn
       ? `${blockWarn.title} block starts in ${blockWarn.secondsUntilStart}s`
       : null;

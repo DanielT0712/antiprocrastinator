@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AppCategory,
+  ActiveWarning,
   BlockDecisionPrompt,
   ClassificationAction,
   EmergencyBlockRequest,
@@ -111,6 +112,7 @@ export const api = {
 
   // Guard
   getGuardStatus: () => invoke<GuardStatus>('get_guard_status'),
+  getActiveWarning: () => invoke<ActiveWarning | null>('get_active_warning'),
   frontendHeartbeat: () => invoke<void>('frontend_heartbeat'),
   requestQuit: () =>
     invoke<{ warning: string; requiredPhrase: string }>('request_quit'),
@@ -241,6 +243,14 @@ export interface ProcessKilledEvent {
   timestamp: number;
 }
 
+export interface ProcessKillFailedEvent {
+  processName: string;
+  pid: number;
+  reason: string;
+  windowTitle: string | null;
+  timestamp: number;
+}
+
 export interface BlockUpcomingEvent {
   blockId: number;
   title: string;
@@ -260,6 +270,7 @@ export type AppEventMap = {
   'guard-quit-required': GuardQuitRequiredEvent;
   'process-warning': ProcessWarningEvent;
   'process-killed': ProcessKilledEvent;
+  'process-kill-failed': ProcessKillFailedEvent;
 };
 
 export function onAppEvent<K extends keyof AppEventMap>(

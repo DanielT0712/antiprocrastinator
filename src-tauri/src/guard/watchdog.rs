@@ -40,6 +40,9 @@ pub struct GuardState {
     active: Mutex<bool>,
     allow_exit_once: Mutex<bool>,
     last_frontend_heartbeat_ms: Mutex<Option<i64>>,
+    popup_show_until_ms: Mutex<i64>,
+    popup_visible: Mutex<bool>,
+    active_warning: Mutex<Option<ActiveWarning>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +77,19 @@ pub struct QuitRequiredEvent {
     pub minimized_to_tray: bool,
     pub warning: String,
     pub required_phrase: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveWarning {
+    pub kind: String,
+    pub process_name: Option<String>,
+    pub title: Option<String>,
+    pub message: String,
+    pub match_reason: Option<String>,
+    pub warning_count: u32,
+    pub kill_at: Option<i64>,
+    pub received_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +155,59 @@ impl GuardState {
             active: Mutex::new(true),
             allow_exit_once: Mutex::new(false),
             last_frontend_heartbeat_ms: Mutex::new(None),
+            popup_show_until_ms: Mutex::new(0),
+            popup_visible: Mutex::new(false),
+            active_warning: Mutex::new(None),
+        }
+    }
+
+    pub fn request_popup_show_until(&self, ts_ms: i64) {
+        if let Ok(mut guard) = self.popup_show_until_ms.lock() {
+            if ts_ms > *guard {
+                *guard = ts_ms;
+            }
+        }
+    }
+
+    pub fn popup_show_until(&self) -> i64 {
+        self.popup_show_until_ms.lock().map(|g| *g).unwrap_or(0)
+    }
+
+    pub fn force_hide_popup(&self) {
+        if let Ok(mut g) = self.popup_show_until_ms.lock() {
+            *g = 0;
+        }
+    }
+
+    pub fn set_active_warning(&self, warning: ActiveWarning) {
+        if let Ok(mut guard) = self.active_warning.lock() {
+            *guard = Some(warning);
+        }
+    }
+
+    pub fn active_warning(&self) -> Option<ActiveWarning> {
+        self.active_warning
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    pub fn clear_active_warning(&self) {
+        if let Ok(mut guard) = self.active_warning.lock() {
+            *guard = None;
+        }
+    }
+
+    pub fn clear_active_warning_for_process(&self, process_name: &str) {
+        if let Ok(mut guard) = self.active_warning.lock() {
+            let should_clear = guard
+                .as_ref()
+                .and_then(|warning| warning.process_name.as_deref())
+                .map(|name| name == process_name)
+                .unwrap_or(false);
+            if should_clear {
+                *guard = None;
+            }
         }
     }
 
@@ -342,6 +411,60 @@ pub fn hide_warning_popup<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> 
     Ok(())
 }
 
+/// Warning surface selected by the user in Settings → Warnings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarningDisplay {
+    Fullscreen,
+    Window,
+    Banner,
+    Menubar,
+}
+
+impl WarningDisplay {
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "fullscreen" => Self::Fullscreen,
+            "window" => Self::Window,
+            "menubar" => Self::Menubar,
+            _ => Self::Banner,
+        }
+    }
+}
+
+/// Run on the schedule tick. Reads `popup_show_until_ms` and toggles the
+/// popup window when the desired state crosses the current state. Only
+/// actually shows the popup when the user's warning-display preference
+/// is `window`.
+pub fn reconcile_warning_popup<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let guard = app.state::<GuardState>();
+    let mode = current_warning_display(app);
+    let until = guard.popup_show_until();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let want = mode == WarningDisplay::Window && now < until;
+    let mut cache = guard.popup_visible.lock().map_err(|e| e.to_string())?;
+    if want == *cache {
+        return Ok(());
+    }
+    if want {
+        show_warning_popup(app)?;
+    } else {
+        hide_warning_popup(app)?;
+    }
+    *cache = want;
+    Ok(())
+}
+
+pub fn current_warning_display<R: Runtime>(app: &AppHandle<R>) -> WarningDisplay {
+    let config = app.state::<crate::config::manager::ConfigState>();
+    match config.get_preferences() {
+        Ok(prefs) => WarningDisplay::parse(&prefs.warning_display),
+        Err(_) => WarningDisplay::Banner,
+    }
+}
+
 pub fn set_main_window_topmost<R: Runtime, M: Manager<R>>(
     manager: &M,
     on: bool,
@@ -398,6 +521,20 @@ pub fn setup_system_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 
     tray.build(app).map_err(|error| error.to_string())?;
     Ok(())
+}
+
+pub fn set_tray_warning<R: Runtime>(
+    app: &AppHandle<R>,
+    warning: Option<&ActiveWarning>,
+) -> Result<(), String> {
+    let Some(tray) = app.tray_by_id(MAIN_TRAY_ID) else {
+        return Ok(());
+    };
+    let tooltip = warning
+        .map(|warning| format!("AntiProcrastinator: {}", warning.message))
+        .unwrap_or_else(|| "AntiProcrastinator".to_string());
+    tray.set_tooltip(Some(tooltip))
+        .map_err(|error| error.to_string())
 }
 
 pub fn handle_tray_event<R: Runtime>(app: &AppHandle<R>, event: &TrayIconEvent) {
@@ -883,7 +1020,9 @@ fn find_running_helper_pid(identifier: &str, current_pid: u32) -> Option<u32> {
             .and_then(|path| path.file_name())
             .and_then(|name| name.to_str())
             .is_some_and(|name| name == HELPER_BINARY_NAME)
-            || command.iter().any(|part| part.ends_with(HELPER_BINARY_NAME));
+            || command
+                .iter()
+                .any(|part| part.ends_with(HELPER_BINARY_NAME));
         let has_identifier = command.iter().any(|part| part.as_ref() == identifier);
         (is_helper && has_identifier).then_some(raw_pid)
     })

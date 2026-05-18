@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
-import { onAppEvent, type BlockUpcomingEvent, type ProcessWarningEvent } from './api';
+import { api, onAppEvent, type BlockUpcomingEvent, type ProcessWarningEvent } from './api';
 
 interface ProcessWarn {
   processName: string;
   secondsUntilKill: number;
   matchReason: string | null;
+  message?: string;
+  failed?: boolean;
   receivedAt: number;
 }
 
@@ -24,6 +26,35 @@ export function Overlay() {
   useEffect(() => {
     let cancelled = false;
     const cleanups: Array<() => void> = [];
+    const refreshActiveWarning = async () => {
+      try {
+        const active = await api.getActiveWarning();
+        if (
+          cancelled ||
+          !active ||
+          !['process', 'process_kill_failed'].includes(active.kind) ||
+          !active.processName
+        ) return;
+        setProcWarns((prev) => {
+          const next = new Map(prev);
+          next.set(active.processName!, {
+            processName: active.processName!,
+            secondsUntilKill: active.killAt
+              ? Math.max(0, Math.ceil((active.killAt - Date.now()) / 1_000))
+              : 0,
+            matchReason: active.matchReason,
+            message: active.message,
+            failed: active.kind === 'process_kill_failed',
+            receivedAt: Date.now(),
+          });
+          return next;
+        });
+      } catch {
+        /* ignore */
+      }
+    };
+
+    refreshActiveWarning();
 
     (async () => {
       const u = await onAppEvent('process-warning', (p: ProcessWarningEvent) => {
@@ -107,11 +138,17 @@ export function Overlay() {
     (blockWarn && blockWarn.secondsUntilStart <= 5);
 
   const message = topProc
-    ? `${topProc.processName} closing in ${topProc.secondsUntilKill}s`
+    ? topProc.failed
+      ? topProc.message ?? `Could not close ${topProc.processName}`
+      : `${topProc.processName} closing in ${topProc.secondsUntilKill}s`
     : blockWarn
       ? `${blockWarn.title} block starts in ${blockWarn.secondsUntilStart}s`
       : '';
-  const headline = topProc ? 'Blocked app detected' : 'Block starting soon';
+  const headline = topProc
+    ? topProc.failed
+      ? 'Close failed'
+      : 'Blocked app detected'
+    : 'Block starting soon';
 
   return (
     <div

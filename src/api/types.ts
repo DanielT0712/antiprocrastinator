@@ -154,6 +154,9 @@ export interface UserPreferences {
   maximumRestMultiplier: number;
   processWarningSeconds: number;
   processCountdownSeconds: number;
+  warningDisplay: 'fullscreen' | 'window' | 'banner' | 'menubar';
+  blockEndStyle: 'modal' | 'banner' | 'silent';
+  dailySummary: boolean;
   processScanIntervalSeconds: number;
   notificationsEnabled: boolean;
   minimizeToTray: boolean;
@@ -179,6 +182,25 @@ export interface GuardStatus {
   supervisorMode: 'enforced' | 'suspended' | 'disabled';
   suspendedUntilEpochSecs: number | null;
   helperRunning: boolean;
+}
+
+export interface ActiveWarning {
+  kind: string;
+  processName: string | null;
+  title: string | null;
+  message: string;
+  matchReason: string | null;
+  warningCount: number;
+  killAt: number | null;
+  receivedAt: number;
+}
+
+export interface ProcessKillFailure {
+  processName: string;
+  pid: number;
+  reason: string;
+  windowTitle: string | null;
+  occurredAt: number;
 }
 
 export type ProcessAction =

@@ -187,9 +187,7 @@ pub fn start_timer_loop(app: AppHandle) {
         let thresholds: [i64; 6] = [60, 30, 10, 5, 3, 1];
         let lead_time_secs: i64 = 60;
         let mut overlay_armed = false;
-
-        // Ensure the always-on popup window exists once Tauri is up.
-        let _ = crate::guard::watchdog::show_warning_popup(&app);
+        let mut burst_fired_for_block: Option<i64> = None;
 
         loop {
             if let Err(error) = tick_schedule(&app) {
@@ -200,7 +198,11 @@ pub fn start_timer_loop(app: AppHandle) {
             if let Err(error) = (|| -> Result<(), String> {
                 let database = app.state::<DatabaseState>();
                 let schedule = app.state::<ScheduleState>();
+                let config = app.state::<crate::config::manager::ConfigState>();
+                let guard = app.state::<crate::guard::watchdog::GuardState>();
                 let connection = database.connection()?;
+                let preferences = config.get_preferences()?;
+                let countdown_secs = preferences.process_countdown_seconds.max(1) as i64;
                 let next = get_next_block(&connection, &schedule)?;
                 let now = timestamp_ms();
                 let Some(block) = next else {
@@ -210,6 +212,7 @@ pub fn start_timer_loop(app: AppHandle) {
                     }
                     watched_block_id = None;
                     notified_thresholds.clear();
+                    burst_fired_for_block = None;
                     return Ok(());
                 };
 
@@ -218,6 +221,7 @@ pub fn start_timer_loop(app: AppHandle) {
                 if watched_block_id != Some(block.id) {
                     watched_block_id = Some(block.id);
                     notified_thresholds.clear();
+                    burst_fired_for_block = None;
                 }
 
                 let _ = app.emit(
@@ -232,14 +236,28 @@ pub fn start_timer_loop(app: AppHandle) {
                     }),
                 );
 
+                let mode = crate::guard::watchdog::current_warning_display(&app);
                 if secs_until > 0 && secs_until <= lead_time_secs {
-                    if !overlay_armed {
+                    if mode == crate::guard::watchdog::WarningDisplay::Fullscreen && !overlay_armed
+                    {
                         let _ = crate::guard::watchdog::show_warning_overlay(&app);
                         overlay_armed = true;
+                    }
+                    // 5s burst the first time we surface this block.
+                    if burst_fired_for_block != Some(block.id) {
+                        guard.request_popup_show_until(now + 5_000);
+                        burst_fired_for_block = Some(block.id);
+                    }
+                    // Final-countdown phase: keep popup visible the last
+                    // `process_countdown_seconds` until the block starts.
+                    if secs_until <= countdown_secs {
+                        guard.request_popup_show_until(now + 1_500);
                     }
                     for threshold in thresholds.iter() {
                         if secs_until == *threshold
                             && notified_thresholds.insert(*threshold)
+                            && preferences.notifications_enabled
+                            && mode == crate::guard::watchdog::WarningDisplay::Banner
                         {
                             use tauri_plugin_notification::NotificationExt;
                             let _ = app
@@ -257,6 +275,9 @@ pub fn start_timer_loop(app: AppHandle) {
                     let _ = crate::guard::watchdog::hide_warning_overlay(&app);
                     overlay_armed = false;
                 }
+
+                // Tick popup visibility based on accumulated requests.
+                let _ = crate::guard::watchdog::reconcile_warning_popup(&app);
                 Ok(())
             })() {
                 log::warn!("block-upcoming watcher tick failed: {error}");
@@ -810,8 +831,8 @@ fn rebuild_schedule_internal(
             from,
             end_of_day(date_from_timestamp(from)?)?,
         )?;
-    normalize_generated_blocks(&mut fixed_blocks);
-    persist_generated_blocks(connection, &fixed_blocks)?;
+        normalize_generated_blocks(&mut fixed_blocks);
+        persist_generated_blocks(connection, &fixed_blocks)?;
         let pseudo_deadline = end_of_day(date_from_timestamp(from)?)?;
         return build_schedule_mutation_result(
             connection,
@@ -827,7 +848,8 @@ fn rebuild_schedule_internal(
     if flexible_tasks.is_empty() {
         let horizon = end_of_day(date_from_timestamp(from)?)?;
         clear_generated_future_blocks(connection, from)?;
-        let mut fixed_blocks = generate_fixed_template_blocks(connection, &template, from, horizon)?;
+        let mut fixed_blocks =
+            generate_fixed_template_blocks(connection, &template, from, horizon)?;
         fixed_blocks.extend(generate_fixed_task_intervals(&tasks, from, horizon)?);
         normalize_generated_blocks(&mut fixed_blocks);
         persist_generated_blocks(connection, &fixed_blocks)?;
@@ -856,7 +878,11 @@ fn rebuild_schedule_internal(
     }
     let boundary_rest_intervals = generate_rest_after_preserved_work(
         &rest_source_intervals,
-        &[generated_fixed_intervals.clone(), fixed_task_intervals.clone()].concat(),
+        &[
+            generated_fixed_intervals.clone(),
+            fixed_task_intervals.clone(),
+        ]
+        .concat(),
         &tasks,
         preferences,
         pseudo_deadline,
@@ -2769,15 +2795,18 @@ fn generate_rest_after_preserved_work(
             }
             let next_occupied_start = occupied
                 .iter()
-                .filter(|occupied| occupied.start_time >= start && occupied.start_time > interval.start_time)
+                .filter(|occupied| {
+                    occupied.start_time >= start && occupied.start_time > interval.start_time
+                })
                 .map(|occupied| occupied.start_time)
                 .min()
                 .unwrap_or(horizon);
-            let rest_minutes =
-                preferred_rest_after_interval(interval, tasks, preferences).max(i64::from(
-                    preferences.minimum_rest_minutes.max(1),
-                ));
-            let end = min(start + rest_minutes * 60_000, min(next_occupied_start, horizon));
+            let rest_minutes = preferred_rest_after_interval(interval, tasks, preferences)
+                .max(i64::from(preferences.minimum_rest_minutes.max(1)));
+            let end = min(
+                start + rest_minutes * 60_000,
+                min(next_occupied_start, horizon),
+            );
             (end > start).then_some(TemplateInterval {
                 title: BlockType::Break.default_title().to_string(),
                 block_type: BlockType::Break,
@@ -2809,7 +2838,11 @@ fn preferred_rest_after_interval(
         .and_then(|task| task.rest_ratio)
         .unwrap_or(i64::from(preferences.break_duration_minutes))
         .max(0);
-    preferred_break_minutes((interval.end_time - interval.start_time) / 60_000, work_ratio, rest_ratio)
+    preferred_break_minutes(
+        (interval.end_time - interval.start_time) / 60_000,
+        work_ratio,
+        rest_ratio,
+    )
 }
 
 fn generate_template_blocks(
@@ -3046,9 +3079,7 @@ fn load_plannable_tasks(connection: &Connection, from: i64) -> Result<Vec<Planne
                 title: row.get(1)?,
                 group_id: row.get(2)?,
                 enforcement_profile: row.get(12)?,
-                kind: crate::tasks::models::task_kind_from_str(
-                    row.get::<_, String>(13)?.as_str(),
-                ),
+                kind: crate::tasks::models::task_kind_from_str(row.get::<_, String>(13)?.as_str()),
                 priority: row.get(3)?,
                 estimated_minutes: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
                 deadline: row.get(5)?,
@@ -3256,7 +3287,9 @@ fn generate_fixed_task_intervals(
         for offset in 0..=day_count {
             let date = start_date
                 .checked_add_days(Days::new(offset))
-                .ok_or_else(|| "date range overflow while generating fixed task intervals".to_string())?;
+                .ok_or_else(|| {
+                    "date range overflow while generating fixed task intervals".to_string()
+                })?;
             if !fixed_task_occurs_on_date(task, date)? {
                 continue;
             }
@@ -4572,8 +4605,8 @@ mod tests {
 
         rebuild_schedule(&connection, from, &preferences).expect("schedule should rebuild");
 
-        let blocks = get_schedule_range(&connection, from, deadline)
-            .expect("schedule range should load");
+        let blocks =
+            get_schedule_range(&connection, from, deadline).expect("schedule range should load");
         let work_blocks = blocks
             .iter()
             .filter(|block| block.block_type == BlockType::Work)
@@ -5012,6 +5045,7 @@ mod tests {
             EmergencyBlockRequest {
                 title: Some("Urgent call".to_string()),
                 duration_minutes: 999,
+                reason: None,
             },
         )
         .expect("emergency block should start")

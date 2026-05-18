@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::{
     config::manager::ConfigState,
     db::DatabaseState,
+    guard::watchdog::ActiveWarning,
     schedule::{engine as schedule_engine, models::BlockSource},
 };
 
@@ -53,6 +54,7 @@ struct WarningState {
     process_name: String,
     window_title: Option<String>,
     match_reason: Option<String>,
+    popup_burst_fired: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +97,12 @@ pub fn start_monitor_loop(app: AppHandle) {
                 log::error!("process monitor scan failed: {error}");
             }
 
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            let interval_secs = app
+                .state::<ConfigState>()
+                .get_preferences()
+                .map(|preferences| preferences.process_scan_interval_seconds.clamp(1, 60))
+                .unwrap_or(5);
+            tokio::time::sleep(Duration::from_secs(u64::from(interval_secs))).await;
         }
     });
 }
@@ -2970,6 +2977,7 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     runtime.status.active_profile = Some(active_profile.clone());
     runtime.status.focused_window = focused_window.clone();
     runtime.status.last_killed_processes.clear();
+    runtime.status.last_kill_failures.clear();
     let mut prompted_app_keys = std::mem::take(&mut runtime.prompted_app_keys);
     let mut prompted_browser_target_keys =
         std::mem::take(&mut runtime.prompted_browser_target_keys);
@@ -3037,6 +3045,7 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
                 process_name: candidate.process_name.clone(),
                 window_title: candidate.window_title.clone(),
                 match_reason: candidate.match_reason.clone(),
+                popup_burst_fired: false,
             });
 
         warning.pid = Some(candidate.pid);
@@ -3051,8 +3060,22 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
             ((warning.kill_at - now).max(0) / 1_000) as u32
         };
 
+        let warning_message = match candidate.match_reason.as_ref() {
+            Some(reason) => format!(
+                "Closing {} in {}s ({reason})",
+                candidate.process_name, seconds_until_kill
+            ),
+            None => format!(
+                "Closing {} in {}s",
+                candidate.process_name, seconds_until_kill
+            ),
+        };
+
         if warn_seconds == 0 || now >= warning.kill_at {
             if kill_process(candidate.pid) {
+                app.state::<crate::guard::watchdog::GuardState>()
+                    .clear_active_warning_for_process(&candidate.process_name);
+                let _ = crate::guard::watchdog::set_tray_warning(app, None);
                 let connection = database.connection()?;
                 connection
                     .execute(
@@ -3083,9 +3106,62 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
                     }),
                 )
                 .map_err(|error| error.to_string())?;
+                runtime.warnings.remove(&candidate.key);
+            } else {
+                let reason = format!(
+                    "Could not kill process {} (pid {}). macOS may have denied the signal, the process may have exited, or stronger automation permissions may be required.",
+                    candidate.process_name, candidate.pid
+                );
+                log::warn!("{reason}");
+                runtime
+                    .status
+                    .last_kill_failures
+                    .push(super::models::ProcessKillFailure {
+                        process_name: candidate.process_name.clone(),
+                        pid: candidate.pid,
+                        reason: reason.clone(),
+                        window_title: candidate.window_title.clone(),
+                        occurred_at: now,
+                    });
+                let failure_warning = ActiveWarning {
+                    kind: "process_kill_failed".to_string(),
+                    process_name: Some(candidate.process_name.clone()),
+                    title: candidate.window_title.clone(),
+                    message: reason.clone(),
+                    match_reason: candidate.match_reason.clone(),
+                    warning_count,
+                    kill_at: None,
+                    received_at: now,
+                };
+                app.state::<crate::guard::watchdog::GuardState>()
+                    .set_active_warning(failure_warning.clone());
+                let _ = crate::guard::watchdog::set_tray_warning(app, Some(&failure_warning));
+                app.emit(
+                    "process-kill-failed",
+                    serde_json::json!({
+                        "processName": candidate.process_name,
+                        "pid": candidate.pid,
+                        "reason": reason,
+                        "windowTitle": candidate.window_title,
+                        "timestamp": now
+                    }),
+                )
+                .map_err(|error| error.to_string())?;
             }
-            runtime.warnings.remove(&candidate.key);
         } else {
+            let active_warning = ActiveWarning {
+                kind: "process".to_string(),
+                process_name: Some(candidate.process_name.clone()),
+                title: candidate.window_title.clone(),
+                message: warning_message,
+                match_reason: candidate.match_reason.clone(),
+                warning_count,
+                kill_at: Some(warning.kill_at),
+                received_at: now,
+            };
+            app.state::<crate::guard::watchdog::GuardState>()
+                .set_active_warning(active_warning.clone());
+
             app.emit(
                 "process-warning",
                 ProcessWarning {
@@ -3101,8 +3177,10 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
             // OS-level toast. Only fires on round-second boundaries
             // (every ~5s and at the final 3,2,1) so we don't spam
             // Notification Center with one per scan tick.
-            let should_notify = seconds_until_kill <= 3
-                || seconds_until_kill % 5 == 0;
+            let mode = crate::guard::watchdog::current_warning_display(app);
+            let should_notify = preferences.notifications_enabled
+                && mode == crate::guard::watchdog::WarningDisplay::Banner
+                && (seconds_until_kill <= 3 || seconds_until_kill % 5 == 0);
             if should_notify {
                 use tauri_plugin_notification::NotificationExt;
                 let body = match candidate.match_reason.as_ref() {
@@ -3122,8 +3200,27 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
                     .body(body)
                     .show();
             }
+            if mode == crate::guard::watchdog::WarningDisplay::Menubar {
+                let _ = crate::guard::watchdog::set_tray_warning(app, Some(&active_warning));
+            }
+
+            // Popup: 5s burst on first surfacing, then keep popup
+            // visible during the countdown window (last N seconds, N
+            // from preferences.process_countdown_seconds).
+            let guard = app.state::<crate::guard::watchdog::GuardState>();
+            if !warning.popup_burst_fired {
+                guard.request_popup_show_until(now + 5_000);
+                warning.popup_burst_fired = true;
+            }
+            let countdown_threshold = preferences.process_countdown_seconds as i64;
+            if i64::from(seconds_until_kill) <= countdown_threshold {
+                guard.request_popup_show_until(now + 1_500);
+            }
         }
     }
+
+    // Reconcile popup window visibility against accumulated requests.
+    let _ = crate::guard::watchdog::reconcile_warning_popup(app);
 
     runtime.status.warnings = runtime
         .warnings
@@ -3137,14 +3234,25 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         })
         .collect();
 
-    let has_warnings = !runtime.warnings.is_empty();
-    if has_warnings != runtime.status.window_topmost {
-        if has_warnings {
+    if runtime.warnings.is_empty() {
+        app.state::<crate::guard::watchdog::GuardState>()
+            .clear_active_warning();
+        let _ = crate::guard::watchdog::set_tray_warning(app, None);
+    }
+
+    let mode = crate::guard::watchdog::current_warning_display(app);
+    if mode != crate::guard::watchdog::WarningDisplay::Menubar {
+        let _ = crate::guard::watchdog::set_tray_warning(app, None);
+    }
+    let want_overlay =
+        !runtime.warnings.is_empty() && mode == crate::guard::watchdog::WarningDisplay::Fullscreen;
+    if want_overlay != runtime.status.window_topmost {
+        if want_overlay {
             let _ = crate::guard::watchdog::show_warning_overlay(app);
         } else {
             let _ = crate::guard::watchdog::hide_warning_overlay(app);
         }
-        runtime.status.window_topmost = has_warnings;
+        runtime.status.window_topmost = want_overlay;
     }
 
     Ok(())
@@ -3497,13 +3605,63 @@ fn resolve_effective_action(
         });
 
     match classification_action {
-        ClassificationAction::AlwaysBan => Some(ProcessAction::AlwaysBlock),
+        ClassificationAction::AlwaysBan => return Some(ProcessAction::AlwaysBlock),
         ClassificationAction::BanDuringWork if active_profile != "rest" => {
-            Some(ProcessAction::BlockDuringWork)
+            return Some(ProcessAction::BlockDuringWork);
         }
-        ClassificationAction::NeverBan | ClassificationAction::Unclassified => None,
-        ClassificationAction::BanDuringWork => None,
+        ClassificationAction::NeverBan => return None,
+        ClassificationAction::BanDuringWork => return None,
+        ClassificationAction::Unclassified => {}
     }
+
+    resolve_category_default_action(known_app, browser_target, active_profile)
+}
+
+fn resolve_category_default_action(
+    known_app: Option<&KnownApp>,
+    browser_target: Option<&KnownBrowserTarget>,
+    active_profile: &str,
+) -> Option<ProcessAction> {
+    let mut category_names = Vec::new();
+    if let Some(target) = browser_target {
+        if let Some(category_name) = target.category_name.as_ref() {
+            category_names.push(category_name.as_str());
+        }
+    }
+    if let Some(app) = known_app {
+        if let Some(category_name) = app.effective_category.as_ref() {
+            category_names.push(category_name.as_str());
+        }
+        if let Some(category_name) = app.category_guess.as_ref() {
+            category_names.push(category_name.as_str());
+        }
+        for category_name in &app.categories {
+            category_names.push(category_name.as_str());
+        }
+    }
+
+    let mut fallback = None;
+    for category_name in category_names {
+        let Some(category) = categories::built_in_categories()
+            .into_iter()
+            .find(|category| category.name.eq_ignore_ascii_case(category_name))
+        else {
+            continue;
+        };
+        match category.default_action {
+            ProcessAction::AlwaysBlock => return Some(ProcessAction::AlwaysBlock),
+            ProcessAction::BlockDuringWork | ProcessAction::AllowDuringBreak
+                if active_profile != "rest" =>
+            {
+                fallback = Some(ProcessAction::BlockDuringWork);
+            }
+            ProcessAction::Warn => fallback = Some(ProcessAction::Warn),
+            ProcessAction::AlwaysAllow
+            | ProcessAction::BlockDuringWork
+            | ProcessAction::AllowDuringBreak => {}
+        }
+    }
+    fallback
 }
 
 fn profile_lineage(connection: &Connection, active_profile: &str) -> Result<Vec<String>, String> {
@@ -4128,13 +4286,13 @@ mod tests {
     use super::{
         classify_app_candidate, clean_browser_window_title, create_known_app,
         create_known_browser_target, get_known_apps, match_browser_target, running_app_candidate,
-        update_known_app, upsert_known_app, FocusedWindowInfo, ProcessInfo,
+        update_known_app, upsert_known_app, FocusedWindowInfo, KnownApp, ProcessInfo,
     };
     use crate::{
         db::migrations::run_migrations,
         processes::models::{
             ClassificationAction, KnownAppInput, KnownAppUpdate, KnownBrowserTarget,
-            KnownBrowserTargetInput,
+            KnownBrowserTargetInput, ProcessAction,
         },
     };
 
@@ -4287,6 +4445,33 @@ mod tests {
         assert!(confidence >= 0.9);
 
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn builtin_game_category_blocks_unclassified_apps_during_custom_work_profiles() {
+        let app = KnownApp {
+            app_key: "steam".to_string(),
+            display_name: "Steam".to_string(),
+            executable_name: Some("steam".to_string()),
+            executable_path: Some("/Applications/Steam.app/Contents/MacOS/steam".to_string()),
+            app_path: Some("/Applications/Steam.app".to_string()),
+            platform: "macos".to_string(),
+            source: "process".to_string(),
+            category_guess: Some("Games".to_string()),
+            category_override: None,
+            effective_category: Some("Games".to_string()),
+            categories: vec!["Games".to_string()],
+            classification_action: ClassificationAction::Unclassified,
+            confidence: 0.95,
+            classification_status: "unclassified".to_string(),
+            first_seen_at: 0,
+            last_seen_running_at: Some(0),
+            updated_at: 0,
+        };
+
+        let action = super::resolve_category_default_action(Some(&app), None, "school");
+
+        assert_eq!(action, Some(ProcessAction::AlwaysBlock));
     }
 
     #[test]

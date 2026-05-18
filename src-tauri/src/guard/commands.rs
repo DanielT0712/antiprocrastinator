@@ -1,7 +1,8 @@
 use tauri::{AppHandle, State};
 
 use super::watchdog::{
-    GuardState, GuardStatus, QuitChallenge, TimedSuspendRequest, QUIT_CHALLENGE_PHRASE,
+    ActiveWarning, GuardState, GuardStatus, QuitChallenge, TimedSuspendRequest,
+    QUIT_CHALLENGE_PHRASE,
 };
 
 #[tauri::command]
@@ -55,6 +56,11 @@ pub fn suspend_guard(
 pub fn frontend_heartbeat(guard: State<'_, GuardState>) -> Result<(), String> {
     guard.record_frontend_heartbeat();
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_active_warning(guard: State<'_, GuardState>) -> Result<Option<ActiveWarning>, String> {
+    Ok(guard.active_warning())
 }
 
 #[tauri::command]

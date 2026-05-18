@@ -15,6 +15,18 @@ pub enum TaskChunkClusteringMode {
     SeparateSameTaskChunks,
 }
 
+fn default_warning_display() -> String {
+    "banner".to_string()
+}
+
+fn default_block_end_style() -> String {
+    "modal".to_string()
+}
+
+fn default_daily_summary() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UserPreferences {
@@ -25,6 +37,12 @@ pub struct UserPreferences {
     pub maximum_rest_multiplier: f32,
     pub process_warning_seconds: u32,
     pub process_countdown_seconds: u32,
+    #[serde(default = "default_warning_display")]
+    pub warning_display: String,
+    #[serde(default = "default_block_end_style")]
+    pub block_end_style: String,
+    #[serde(default = "default_daily_summary")]
+    pub daily_summary: bool,
     pub process_scan_interval_seconds: u32,
     pub notifications_enabled: bool,
     pub minimize_to_tray: bool,
@@ -54,6 +72,9 @@ impl Default for UserPreferences {
             maximum_rest_multiplier: 1.5,
             process_warning_seconds: 30,
             process_countdown_seconds: 30,
+            warning_display: default_warning_display(),
+            block_end_style: default_block_end_style(),
+            daily_summary: default_daily_summary(),
             process_scan_interval_seconds: 5,
             notifications_enabled: true,
             minimize_to_tray: true,
