@@ -207,6 +207,37 @@ function decisionForApp(
   return null;
 }
 
+function categoryDefaultDecision(
+  categoryName: string | null | undefined,
+  profileName: string,
+): EnforcementDecision {
+  if (!categoryName) return 'allow';
+  const normalized = categoryName.toLowerCase();
+  if (normalized === 'games') return 'block';
+  if (
+    (normalized === 'social media' || normalized === 'entertainment') &&
+    profileName !== 'rest'
+  ) {
+    return 'block';
+  }
+  return 'allow';
+}
+
+function resolvedAppDecision(
+  app: KnownApp,
+  profileName: string,
+  overrides: EnforcementProfileOverride[],
+): EnforcementDecision {
+  if (app.classificationAction === 'always_ban') return 'block';
+  const override = decisionForApp(app, profileName, overrides);
+  if (override) return override;
+  if (app.classificationAction === 'never_ban') return 'allow';
+  if (app.classificationAction === 'ban_during_work') {
+    return profileName === 'rest' ? 'allow' : 'block';
+  }
+  return categoryDefaultDecision(app.effectiveCategory ?? app.categoryGuess, profileName);
+}
+
 function detectDrawerPreset(
   app: KnownApp,
   profiles: EnforcementProfile[],
@@ -498,16 +529,7 @@ export function AppDrawer({
               overflow: 'hidden',
             }}>
               {profiles.map((p, i) => {
-                const direct = overrides.find(
-                  (o) =>
-                    o.profileName === p.name &&
-                    o.subjectType === 'app' &&
-                    o.subjectKey === app.appKey,
-                );
-                const resolved =
-                  direct?.decision ??
-                  decisionForApp(app, p.name, overrides) ??
-                  'allow';
+                const resolved = resolvedAppDecision(app, p.name, overrides);
                 const blocked =
                   p.name === 'emergency' &&
                   app.effectiveCategory != null &&
@@ -1699,7 +1721,7 @@ export function CategoryDrawer({
         x.subjectType === 'category' &&
         x.subjectKey === category.name,
     );
-    return o?.decision ?? 'allow';
+    return o?.decision ?? categoryDefaultDecision(category.name, profileName);
   }
 
   const profileDesc = (name: string): string => {

@@ -8,6 +8,8 @@ import "./styles/global.css";
 const params = new URLSearchParams(window.location.search);
 const view = params.get("view");
 
+document.documentElement.dataset.view = view ?? 'app';
+
 const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
 
 if (view === "overlay") {

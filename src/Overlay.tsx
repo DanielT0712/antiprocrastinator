@@ -4,6 +4,7 @@ import { api, onAppEvent, type BlockUpcomingEvent, type ProcessWarningEvent } fr
 interface ProcessWarn {
   processName: string;
   secondsUntilKill: number;
+  killAt: number | null;
   matchReason: string | null;
   message?: string;
   failed?: boolean;
@@ -22,6 +23,7 @@ interface BlockUpcoming extends BlockUpcomingEvent {
 export function Overlay() {
   const [procWarns, setProcWarns] = useState<Map<string, ProcessWarn>>(new Map());
   const [blockWarn, setBlockWarn] = useState<BlockUpcoming | null>(null);
+  const [, setNowTick] = useState(Date.now());
 
   useEffect(() => {
     let cancelled = false;
@@ -29,12 +31,15 @@ export function Overlay() {
     const refreshActiveWarning = async () => {
       try {
         const active = await api.getActiveWarning();
+        if (cancelled) return;
         if (
-          cancelled ||
           !active ||
           !['process', 'process_kill_failed'].includes(active.kind) ||
           !active.processName
-        ) return;
+        ) {
+          setProcWarns(new Map());
+          return;
+        }
         setProcWarns((prev) => {
           const next = new Map(prev);
           next.set(active.processName!, {
@@ -42,6 +47,7 @@ export function Overlay() {
             secondsUntilKill: active.killAt
               ? Math.max(0, Math.ceil((active.killAt - Date.now()) / 1_000))
               : 0,
+            killAt: active.killAt,
             matchReason: active.matchReason,
             message: active.message,
             failed: active.kind === 'process_kill_failed',
@@ -63,7 +69,9 @@ export function Overlay() {
           next.set(p.processName, {
             processName: p.processName,
             secondsUntilKill: p.secondsUntilKill,
+            killAt: Date.now() + p.secondsUntilKill * 1_000,
             matchReason: p.matchReason,
+            failed: false,
             receivedAt: Date.now(),
           });
           return next;
@@ -76,10 +84,14 @@ export function Overlay() {
     (async () => {
       const u = await onAppEvent('process-killed', (p) => {
         setProcWarns((prev) => {
-          if (!prev.has(p.processName)) return prev;
+          const killed = p.processName.toLowerCase();
           const next = new Map(prev);
-          next.delete(p.processName);
-          return next;
+          for (const [key, warning] of prev) {
+            if (warning.processName.toLowerCase() === killed) {
+              next.delete(key);
+            }
+          }
+          return next.size === prev.size ? prev : next;
         });
       });
       if (cancelled) u();
@@ -99,12 +111,17 @@ export function Overlay() {
     })();
 
     const sweep = setInterval(() => {
+      setNowTick(Date.now());
+      refreshActiveWarning();
       setProcWarns((prev) => {
         const now = Date.now();
         let changed = false;
         const next = new Map(prev);
         for (const [k, w] of prev) {
-          if (now - w.receivedAt > 8_000) {
+          const stale = w.killAt == null
+            ? now - w.receivedAt > 8_000
+            : now > w.killAt + 2_000;
+          if (stale) {
             next.delete(k);
             changed = true;
           }
@@ -123,9 +140,14 @@ export function Overlay() {
     };
   }, []);
 
-  const procSorted = Array.from(procWarns.values()).sort(
-    (a, b) => a.secondsUntilKill - b.secondsUntilKill,
-  );
+  const procSorted = Array.from(procWarns.values())
+    .map((warning) => ({
+      ...warning,
+      secondsUntilKill: warning.killAt
+        ? Math.max(0, Math.ceil((warning.killAt - Date.now()) / 1_000))
+        : warning.secondsUntilKill,
+    }))
+    .sort((a, b) => a.secondsUntilKill - b.secondsUntilKill);
   const topProc = procSorted[0];
 
   const hasAny = topProc != null || blockWarn != null;

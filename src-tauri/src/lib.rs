@@ -1,4 +1,5 @@
 use tauri::{Manager, RunEvent, WindowEvent};
+use tauri_plugin_window_state::StateFlags;
 
 const APP_MENU_QUIT_ID: &str = "app_menu_quit";
 
@@ -20,7 +21,17 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             let _ = guard::watchdog::show_main_window(app);
         }))
-        .plugin(tauri_plugin_window_state::Builder::new().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_filter(|label| label == "main")
+                .with_state_flags(
+                    StateFlags::SIZE
+                        | StateFlags::POSITION
+                        | StateFlags::MAXIMIZED
+                        | StateFlags::FULLSCREEN,
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .on_menu_event(|app, event| {
             if event.id() == guard::watchdog::TRAY_SHOW_ID {
@@ -121,7 +132,7 @@ pub fn run() {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
+                        .level(log::LevelFilter::Debug)
                         .build(),
                 )?;
             }

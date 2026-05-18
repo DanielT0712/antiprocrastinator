@@ -432,7 +432,11 @@ pub fn effective_enforcement_profile(
         }
 
         return Ok(match block.block_type {
-            BlockType::Break | BlockType::Sleep | BlockType::Meal => "rest".to_string(),
+            BlockType::Break | BlockType::Meal => "rest".to_string(),
+            BlockType::Sleep => block
+                .enforcement_profile
+                .clone()
+                .unwrap_or_else(|| "rest".to_string()),
             _ => block
                 .enforcement_profile
                 .clone()
@@ -442,11 +446,14 @@ pub fn effective_enforcement_profile(
 
     Ok(get_current_block(connection, schedule)?
         .and_then(|block| {
-            if matches!(
-                block.block_type,
-                BlockType::Break | BlockType::Sleep | BlockType::Meal
-            ) {
+            if matches!(block.block_type, BlockType::Break | BlockType::Meal) {
                 Some("rest".to_string())
+            } else if block.block_type == BlockType::Sleep {
+                Some(
+                    block
+                        .enforcement_profile
+                        .unwrap_or_else(|| "rest".to_string()),
+                )
             } else {
                 block.enforcement_profile
             }
@@ -565,18 +572,39 @@ pub fn update_time_block(
     let existing = get_block_by_id(connection, id)?
         .ok_or_else(|| format!("time block {id} does not exist"))?;
 
+    if updates
+        .block_type
+        .is_some_and(|block_type| block_type != existing.block_type)
+    {
+        return Err("block type cannot be changed from the schedule inspector".to_string());
+    }
+    if updates
+        .task_id
+        .as_ref()
+        .is_some_and(|task_id| *task_id != existing.task_id)
+    {
+        return Err("linked task cannot be changed from the schedule inspector".to_string());
+    }
+    if updates.enforcement_profile.is_some() && existing.block_type != BlockType::Sleep {
+        return Err("enforcement profile can only be changed for sleep blocks".to_string());
+    }
+
     let title = updates.title.unwrap_or(existing.title);
-    let block_type = updates.block_type.unwrap_or(existing.block_type);
+    let block_type = existing.block_type;
     let start_time = updates.start_time.unwrap_or(existing.start_time);
     let end_time = updates.end_time.unwrap_or(existing.end_time);
-    let task_id = updates.task_id.unwrap_or(existing.task_id);
+    let task_id = existing.task_id;
     let status = updates.status.unwrap_or(existing.status);
     let intensity = updates.intensity.unwrap_or(existing.intensity);
     let source = updates.source.unwrap_or(existing.source);
     let is_protected = updates.is_protected.unwrap_or(existing.is_protected);
-    let enforcement_profile = updates
-        .enforcement_profile
-        .unwrap_or(existing.enforcement_profile.clone());
+    let enforcement_profile = match updates.enforcement_profile {
+        Some(profile) if existing.block_type == BlockType::Sleep => {
+            validate_schedule_enforcement_profile(profile.as_deref())?;
+            profile
+        }
+        _ => existing.enforcement_profile.clone(),
+    };
 
     validate_time_block_input(&title, start_time, end_time, intensity)?;
 
@@ -2708,6 +2736,9 @@ fn load_preserved_intervals(
     Ok(existing
         .into_iter()
         .filter(|block| {
+            if block.start_time < from && block.end_time > from {
+                return true;
+            }
             !matches!(
                 (block.source, block.status, block.is_protected),
                 (BlockSource::Template, BlockStatus::Scheduled, _)
@@ -2864,8 +2895,12 @@ fn generate_template_blocks(
         let day_template = find_day_template(template, weekday_from_chrono(date.weekday()));
 
         if let Some(day_template) = day_template {
-            let fixed_intervals =
-                build_fixed_intervals_for_day(date, day_template, &template.fixed_blocks)?;
+            let fixed_intervals = build_fixed_intervals_for_day(
+                date,
+                day_template,
+                &template.fixed_blocks,
+                &template_sleep_profile(template),
+            )?;
             reserved.extend(fixed_intervals.clone());
             generated.extend(fixed_intervals);
         }
@@ -2957,6 +2992,7 @@ fn build_fixed_intervals_for_day(
     date: NaiveDate,
     day_template: &DayTemplate,
     fixed_blocks: &[FixedTemplateBlock],
+    sleep_enforcement_profile: &str,
 ) -> Result<Vec<TemplateInterval>, String> {
     let mut intervals = Vec::new();
 
@@ -2965,14 +3001,18 @@ fn build_fixed_intervals_for_day(
             day_template.sleep_start_minute,
             day_template.sleep_end_minute,
         ) {
-            intervals.extend(build_interval(
+            let mut sleep_intervals = build_interval(
                 "Sleep".to_string(),
                 BlockType::Sleep,
                 date,
                 start_minute,
                 duration_between(start_minute, end_minute),
                 1,
-            )?);
+            )?;
+            for interval in &mut sleep_intervals {
+                interval.enforcement_profile = Some(sleep_enforcement_profile.to_string());
+            }
+            intervals.extend(sleep_intervals);
         }
     }
 
@@ -3022,6 +3062,13 @@ fn build_interval(
             _ => "rest".to_string(),
         }),
     }])
+}
+
+fn template_sleep_profile(template: &WeeklyTemplate) -> String {
+    match template.sleep_enforcement_profile.as_str() {
+        "work" | "deep_work" => template.sleep_enforcement_profile.clone(),
+        _ => "rest".to_string(),
+    }
 }
 
 fn merge_intervals(
@@ -3224,7 +3271,9 @@ fn generate_fixed_template_blocks(
     to: i64,
 ) -> Result<Vec<TemplateInterval>, String> {
     let preserved_manual = load_preserved_intervals(connection, from, to)?;
-    let start_date = date_from_timestamp(from)?;
+    let start_date = date_from_timestamp(from)?
+        .checked_sub_days(Days::new(1))
+        .ok_or_else(|| "date range overflow while generating fixed intervals".to_string())?;
     let end_date = date_from_timestamp(to - 1)?;
     let day_count = end_date.signed_duration_since(start_date).num_days().max(0) as u64;
     let mut fixed = Vec::new();
@@ -3239,6 +3288,7 @@ fn generate_fixed_template_blocks(
                 date,
                 day_template,
                 &template.fixed_blocks,
+                &template_sleep_profile(template),
             )?);
         }
     }
@@ -3248,13 +3298,12 @@ fn generate_fixed_template_blocks(
         .filter(|interval| interval.start_time < to && interval.end_time > from)
         .filter(|interval| {
             !preserved_manual.iter().any(|manual| {
-                manual.source == BlockSource::Manual
-                    && intervals_overlap(
-                        interval.start_time,
-                        interval.end_time,
-                        manual.start_time,
-                        manual.end_time,
-                    )
+                intervals_overlap(
+                    interval.start_time,
+                    interval.end_time,
+                    manual.start_time,
+                    manual.end_time,
+                )
             })
         })
         .collect())
@@ -4150,16 +4199,15 @@ fn consume_candidate_chunk(remaining_chunks: &mut [(usize, Vec<i64>)], task_inde
 }
 
 fn clear_generated_future_blocks(connection: &Connection, from: i64) -> Result<(), String> {
-    let clear_from = timestamp_for_minute(date_from_timestamp(from)?, 0)?;
     connection
         .execute(
             r#"
             DELETE FROM time_blocks
-            WHERE end_time > ?1
+            WHERE start_time >= ?1
               AND status IN ('scheduled', 'active', 'paused')
               AND source IN ('template', 'planner')
             "#,
-            params![clear_from],
+            params![from],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -4333,6 +4381,10 @@ fn validate_template(template: &WeeklyTemplate) -> Result<(), String> {
     if template.default_work_minutes == 0 || template.default_break_minutes == 0 {
         return Err("default work and break durations must be greater than 0".to_string());
     }
+    match template.sleep_enforcement_profile.as_str() {
+        "rest" | "work" | "deep_work" => {}
+        other => return Err(format!("unsupported sleep enforcement profile: {other}")),
+    }
 
     for day in &template.days {
         if let Some(minutes) = day.work_minutes {
@@ -4498,6 +4550,18 @@ fn block_type_from_str(value: &str) -> Result<BlockType, String> {
     }
 }
 
+fn validate_schedule_enforcement_profile(profile: Option<&str>) -> Result<(), String> {
+    let Some(profile) = profile else {
+        return Ok(());
+    };
+    match profile {
+        "rest" | "work" | "deep_work" => Ok(()),
+        other => Err(format!(
+            "unsupported enforcement profile for schedule block: {other}"
+        )),
+    }
+}
+
 fn block_status_to_str(status: BlockStatus) -> &'static str {
     match status {
         BlockStatus::Scheduled => "scheduled",
@@ -4545,17 +4609,17 @@ mod tests {
 
     use super::{
         add_time_block, apply_weekly_template, complete_current_block, continue_current_block,
-        effective_enforcement_block_type, extend_current_block, get_block_by_id, get_current_block,
-        get_schedule_range, pause_current_block, rebuild_schedule, resume_current_block,
-        save_weekly_template, start_emergency_block, sync_overdue_work_block, timestamp_for_minute,
-        ScheduleState,
+        effective_enforcement_block_type, effective_enforcement_profile, extend_current_block,
+        get_block_by_id, get_current_block, get_schedule_range, pause_current_block,
+        rebuild_schedule, resume_current_block, save_weekly_template, start_emergency_block,
+        sync_overdue_work_block, timestamp_for_minute, update_time_block, ScheduleState,
     };
     use crate::{
         config::models::UserPreferences,
         db::migrations::run_migrations,
         schedule::models::{
             BlockSource, BlockStatus, BlockType, EmergencyBlockRequest, FixedTemplateBlock,
-            NewTimeBlock, TimeBlock, Weekday, WeeklyTemplate,
+            NewTimeBlock, TimeBlock, TimeBlockUpdate, Weekday, WeeklyTemplate,
         },
     };
 
@@ -4576,6 +4640,83 @@ mod tests {
 
     fn preferences() -> UserPreferences {
         UserPreferences::default()
+    }
+
+    #[test]
+    fn update_time_block_rejects_type_task_and_profile_changes() {
+        let (connection, _) = setup();
+        let now = now_ms();
+        let block = add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "School".to_string(),
+                block_type: BlockType::Work,
+                start_time: now + 60_000,
+                end_time: now + 3_600_000,
+                task_id: None,
+                intensity: 3,
+                source: Some(BlockSource::Manual),
+                is_protected: None,
+                enforcement_profile: Some("work".to_string()),
+            },
+        )
+        .expect("block should create");
+
+        for updates in [
+            TimeBlockUpdate {
+                block_type: Some(BlockType::Break),
+                ..TimeBlockUpdate::default()
+            },
+            TimeBlockUpdate {
+                task_id: Some(Some(1)),
+                ..TimeBlockUpdate::default()
+            },
+            TimeBlockUpdate {
+                enforcement_profile: Some(Some("deep_work".to_string())),
+                ..TimeBlockUpdate::default()
+            },
+        ] {
+            assert!(update_time_block(&connection, block.id, updates).is_err());
+        }
+    }
+
+    #[test]
+    fn update_time_block_allows_sleep_profile_change() {
+        let (connection, schedule) = setup();
+        let now = now_ms();
+        let block = add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Sleep".to_string(),
+                block_type: BlockType::Sleep,
+                start_time: now - 60_000,
+                end_time: now + 3_600_000,
+                task_id: None,
+                intensity: 1,
+                source: Some(BlockSource::Manual),
+                is_protected: Some(true),
+                enforcement_profile: Some("rest".to_string()),
+            },
+        )
+        .expect("sleep block should create");
+
+        let updated = update_time_block(
+            &connection,
+            block.id,
+            TimeBlockUpdate {
+                block_type: Some(BlockType::Sleep),
+                task_id: Some(None),
+                enforcement_profile: Some(Some("work".to_string())),
+                ..TimeBlockUpdate::default()
+            },
+        )
+        .expect("sleep profile should update");
+
+        assert_eq!(updated.enforcement_profile.as_deref(), Some("work"));
+        assert_eq!(
+            effective_enforcement_profile(&connection, &schedule).expect("profile should resolve"),
+            "work"
+        );
     }
 
     #[test]
@@ -4622,6 +4763,121 @@ mod tests {
             })
             .expect("break should exist between first two work chunks");
         assert!(between.duration_secs() / 60 >= 10);
+    }
+
+    #[test]
+    fn rebuild_preserves_overnight_sleep_block_that_started_before_from() {
+        let (connection, _) = setup();
+        let preferences = UserPreferences {
+            work_duration_minutes: 60,
+            break_duration_minutes: 15,
+            minimum_rest_minutes: 10,
+            ..UserPreferences::default()
+        };
+        let sleep_start_date =
+            NaiveDate::from_ymd_opt(2026, 5, 18).expect("date should exist");
+        let from_date = NaiveDate::from_ymd_opt(2026, 5, 19).expect("date should exist");
+        let sleep_start =
+            timestamp_for_minute(sleep_start_date, 23 * 60).expect("sleep start should be valid");
+        let sleep_end =
+            timestamp_for_minute(from_date, 7 * 60).expect("sleep end should be valid");
+        let from = timestamp_for_minute(from_date, 30).expect("from should be valid");
+        let deadline = timestamp_for_minute(from_date, 3 * 60).expect("deadline should be valid");
+
+        add_time_block(
+            &connection,
+            NewTimeBlock {
+                title: "Sleep".to_string(),
+                block_type: BlockType::Sleep,
+                start_time: sleep_start,
+                end_time: sleep_end,
+                task_id: None,
+                intensity: 1,
+                source: Some(BlockSource::Template),
+                is_protected: Some(false),
+                enforcement_profile: Some("rest".to_string()),
+            },
+        )
+        .expect("overnight sleep block should create");
+
+        connection
+            .execute(
+                r#"
+                INSERT INTO tasks (
+                    name, priority, estimated_minutes, deadline, max_chunk_minutes,
+                    minimum_rest_minutes, created_at, updated_at
+                )
+                VALUES ('Do not schedule during sleep', 5, 60, ?1, 60, 10, ?2, ?2)
+                "#,
+                params![deadline, from],
+            )
+            .expect("task should insert");
+
+        rebuild_schedule(&connection, from, &preferences).expect("schedule should rebuild");
+
+        let blocks = get_schedule_range(&connection, sleep_start, sleep_end)
+            .expect("schedule range should load");
+        let sleep = blocks
+            .iter()
+            .find(|block| block.block_type == BlockType::Sleep)
+            .expect("overnight sleep should remain");
+        assert_eq!(sleep.start_time, sleep_start);
+        assert_eq!(sleep.end_time, sleep_end);
+        assert!(blocks
+            .iter()
+            .filter(|block| block.block_type == BlockType::Work)
+            .all(|block| block.start_time >= sleep_end || block.end_time <= sleep_start));
+    }
+
+    #[test]
+    fn rebuild_regenerates_missing_overnight_sleep_from_previous_day() {
+        let (connection, _) = setup();
+        let preferences = UserPreferences {
+            work_duration_minutes: 60,
+            break_duration_minutes: 15,
+            minimum_rest_minutes: 10,
+            ..UserPreferences::default()
+        };
+        let template = WeeklyTemplate::default();
+        save_weekly_template(&connection, template).expect("template should save");
+
+        let sleep_start_date =
+            NaiveDate::from_ymd_opt(2026, 5, 18).expect("date should exist");
+        let from_date = NaiveDate::from_ymd_opt(2026, 5, 19).expect("date should exist");
+        let sleep_start =
+            timestamp_for_minute(sleep_start_date, 23 * 60).expect("sleep start should be valid");
+        let sleep_end =
+            timestamp_for_minute(from_date, 7 * 60).expect("sleep end should be valid");
+        let from = timestamp_for_minute(from_date, 30).expect("from should be valid");
+        let deadline = timestamp_for_minute(from_date, 3 * 60).expect("deadline should be valid");
+
+        connection
+            .execute(
+                r#"
+                INSERT INTO tasks (
+                    name, priority, estimated_minutes, deadline, max_chunk_minutes,
+                    minimum_rest_minutes, created_at, updated_at
+                )
+                VALUES ('Do not schedule during regenerated sleep', 5, 60, ?1, 60, 10, ?2, ?2)
+                "#,
+                params![deadline, from],
+            )
+            .expect("task should insert");
+
+        rebuild_schedule(&connection, from, &preferences).expect("schedule should rebuild");
+
+        let blocks = get_schedule_range(&connection, sleep_start, sleep_end)
+            .expect("schedule range should load");
+        let sleep = blocks
+            .iter()
+            .find(|block| block.block_type == BlockType::Sleep)
+            .expect("overnight sleep should be regenerated");
+        assert_eq!(sleep.start_time, sleep_start);
+        assert_eq!(sleep.end_time, sleep_end);
+        assert!(blocks
+            .iter()
+            .filter(|block| block.block_type == BlockType::Work)
+            .all(|block| block.start_time >= sleep_end || block.end_time <= sleep_start));
     }
 
     #[test]

@@ -90,6 +90,7 @@ dependencies = [
  "dirs 5.0.1",
  "log",
  "objc2",
+ "objc2-foundation",
  "once_cell",
  "rusqlite",
  "serde",

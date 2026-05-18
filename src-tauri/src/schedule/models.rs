@@ -175,6 +175,8 @@ pub struct WeeklyTemplate {
     pub default_work_minutes: u16,
     #[serde(default = "default_break_minutes")]
     pub default_break_minutes: u16,
+    #[serde(default = "default_sleep_enforcement_profile")]
+    pub sleep_enforcement_profile: String,
     #[serde(default)]
     pub days: Vec<DayTemplate>,
     #[serde(default)]
@@ -186,6 +188,7 @@ impl Default for WeeklyTemplate {
         Self {
             default_work_minutes: default_work_minutes(),
             default_break_minutes: default_break_minutes(),
+            sleep_enforcement_profile: default_sleep_enforcement_profile(),
             days: Weekday::all()
                 .into_iter()
                 .map(|day| DayTemplate {
@@ -270,4 +273,8 @@ fn default_work_minutes() -> u16 {
 
 fn default_break_minutes() -> u16 {
     30
+}
+
+fn default_sleep_enforcement_profile() -> String {
+    "rest".to_string()
 }

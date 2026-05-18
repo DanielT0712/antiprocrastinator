@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::Mutex,
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -285,35 +286,82 @@ pub fn scan_processes() -> Vec<ProcessInfo> {
     #[cfg(target_os = "windows")]
     let visible_pids = taskbar_pids();
 
-    system
-        .processes()
-        .iter()
-        .filter_map(|(pid, process)| {
-            let exe = process.exe().map(|p| p.to_path_buf());
-            #[cfg(target_os = "windows")]
-            {
-                // Prefer a taskbar / EnumWindows match when we have one,
-                // otherwise fall back to the path-based heuristic.
-                let raw_pid = pid.as_u32();
-                let in_taskbar = visible_pids.contains(&raw_pid);
-                if !in_taskbar && !is_user_facing_app(exe.as_deref()) {
-                    return None;
-                }
+    let mut kept = Vec::new();
+    let mut scanned_count = 0usize;
+    let mut filtered_user_facing_count = 0usize;
+
+    for (pid, process) in system.processes() {
+        scanned_count += 1;
+        let exe = process.exe().map(|p| p.to_path_buf());
+        let name = process.name().to_string_lossy().to_string();
+        let exe_display = exe.as_ref().map(|path| path.display().to_string());
+
+        #[cfg(target_os = "windows")]
+        let is_kept = {
+            // Prefer a taskbar / EnumWindows match when we have one,
+            // otherwise fall back to the path-based heuristic.
+            let raw_pid = pid.as_u32();
+            let in_taskbar = visible_pids.contains(&raw_pid);
+            in_taskbar || is_user_facing_app(exe.as_deref())
+        };
+        #[cfg(not(target_os = "windows"))]
+        let is_kept = is_user_facing_app(exe.as_deref());
+
+        if !is_kept {
+            filtered_user_facing_count += 1;
+            if is_interesting_process_for_debug(&name, exe_display.as_deref()) {
+                log::debug!(
+                    "[enforcement] scan filtered: pid={} name={} exe={:?} reason=not_user_facing",
+                    pid.as_u32(),
+                    name,
+                    exe_display,
+                );
             }
-            #[cfg(not(target_os = "windows"))]
-            {
-                if !is_user_facing_app(exe.as_deref()) {
-                    return None;
-                }
-            }
-            Some(ProcessInfo {
-                pid: pid.as_u32(),
-                name: process.name().to_string_lossy().to_string(),
-                exe_path: exe.map(|p| p.display().to_string()),
-                memory_bytes: process.memory(),
-            })
-        })
-        .collect()
+            continue;
+        }
+
+        log::debug!(
+            "[enforcement] scan kept: pid={} name={} exe={:?}",
+            pid.as_u32(),
+            name,
+            exe_display,
+        );
+        kept.push(ProcessInfo {
+            pid: pid.as_u32(),
+            name,
+            exe_path: exe_display,
+            memory_bytes: process.memory(),
+        });
+    }
+
+    log::debug!(
+        "[enforcement] scan summary: scanned={} kept={} filtered_not_user_facing={}",
+        scanned_count,
+        kept.len(),
+        filtered_user_facing_count,
+    );
+    kept
+}
+
+fn is_interesting_process_for_debug(name: &str, exe_path: Option<&str>) -> bool {
+    let name = name.to_lowercase();
+    let exe_path = exe_path.unwrap_or("").to_lowercase();
+    [
+        "steam",
+        "epic",
+        "riot",
+        "battle.net",
+        "battlenet",
+        "discord",
+        "spotify",
+        "youtube",
+        "chrome",
+        "safari",
+        "firefox",
+        "arc",
+    ]
+    .iter()
+    .any(|needle| name.contains(needle) || exe_path.contains(needle))
 }
 
 #[cfg(target_os = "windows")]
@@ -394,6 +442,9 @@ fn is_user_facing_app(exe: Option<&Path>) -> bool {
             if categories::is_macos_embedded_helper_path(&display) {
                 return false;
             }
+            return true;
+        }
+        if is_steam_client_main_executable(&display) {
             return true;
         }
         for root in [
@@ -2476,6 +2527,9 @@ fn classify_app_candidate(display_name: &str, path: Option<&str>) -> (Option<Str
         if is_own_app_path(path_str) {
             return (Some("System".to_string()), 0.99);
         }
+        if is_steam_client_main_executable(path_str) {
+            return (Some("Games".to_string()), 0.95);
+        }
         if categories::is_macos_embedded_helper_path(path_str) {
             return (Some("System".to_string()), 0.97);
         }
@@ -2862,6 +2916,12 @@ fn is_steam_game_path(path: &str) -> bool {
     normalized.contains("/steamapps/common/")
 }
 
+fn is_steam_client_main_executable(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_lowercase();
+    normalized.contains("/library/application support/steam/steam.appbundle/steam/contents/macos/")
+        && normalized.ends_with("/steam_osx")
+}
+
 fn is_steam_shortcut_bundle(path: &str) -> bool {
     steam_app_id_from_shortcut(path).is_some()
 }
@@ -2914,6 +2974,10 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     let process_state = app.state::<ProcessMonitorState>();
 
     let processes = scan_processes();
+    log::debug!(
+        "[enforcement] scan start: kept_processes={}",
+        processes.len()
+    );
     {
         let connection = database.connection()?;
         ensure_enforcement_defaults(&connection)?;
@@ -2953,6 +3017,19 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         .map(|block| block.source == BlockSource::Emergency)
         .unwrap_or(false);
     let now = timestamp_ms();
+    log::debug!(
+        "[enforcement] context: block_id={:?} block_title={:?} block_type={:?} active_block_type={:?} active_profile={} focused={:?} warning_display={} warn_seconds={} countdown_seconds={} scan_interval={}",
+        current_block.as_ref().map(|block| block.id),
+        current_block.as_ref().map(|block| block.title.as_str()),
+        current_block.as_ref().map(|block| block.block_type),
+        active_block_type,
+        active_profile,
+        focused_window,
+        preferences.warning_display,
+        preferences.process_warning_seconds,
+        preferences.process_countdown_seconds,
+        preferences.process_scan_interval_seconds,
+    );
     let mut runtime = process_state
         .runtime
         .lock()
@@ -2982,24 +3059,39 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     let mut prompted_browser_target_keys =
         std::mem::take(&mut runtime.prompted_browser_target_keys);
 
-    let enforcement_connection = database.connection()?;
-    let candidates = build_enforcement_candidates(
-        &enforcement_connection,
-        &processes,
-        &known_apps,
-        &known_browser_targets,
-        &rules,
-        &active_profile,
-        emergency_mode,
-        &preferences.emergency_allowed_apps,
-        preferences.classification_popups_enabled,
-        &mut prompted_app_keys,
-        &mut prompted_browser_target_keys,
-        app,
-        focused_window.as_ref(),
-    );
+    let candidates = {
+        let enforcement_connection = database.connection()?;
+        build_enforcement_candidates(
+            &enforcement_connection,
+            &processes,
+            &known_apps,
+            &known_browser_targets,
+            &rules,
+            &active_profile,
+            emergency_mode,
+            &preferences.emergency_allowed_apps,
+            preferences.classification_popups_enabled,
+            &mut prompted_app_keys,
+            &mut prompted_browser_target_keys,
+            app,
+            focused_window.as_ref(),
+        )
+    };
     runtime.prompted_app_keys = prompted_app_keys;
     runtime.prompted_browser_target_keys = prompted_browser_target_keys;
+    log::debug!(
+        "[enforcement] candidates built: count={} keys={:?}",
+        candidates.len(),
+        candidates
+            .iter()
+            .map(|candidate| format!(
+                "{}:{}:{}",
+                candidate.key,
+                candidate.process_name,
+                process_action_to_str(candidate.action)
+            ))
+            .collect::<Vec<_>>()
+    );
     let active_keys: HashSet<String> = candidates
         .iter()
         .map(|candidate| candidate.key.clone())
@@ -3008,7 +3100,8 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
 
     for candidate in candidates {
         let normalized_name = normalize_process_name(&candidate.process_name);
-        let warning_count = if runtime.warnings.contains_key(&candidate.key) {
+        let had_existing_warning = runtime.warnings.contains_key(&candidate.key);
+        let warning_count = if had_existing_warning {
             runtime
                 .reopen_counts
                 .get(&candidate.key)
@@ -3048,6 +3141,18 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
                 popup_burst_fired: false,
             });
 
+        log::debug!(
+            "[enforcement] candidate active: key={} process={} pid={} action={} warning_count={} warn_seconds={} kill_at={} existing_warning={}",
+            candidate.key,
+            candidate.process_name,
+            candidate.pid,
+            process_action_to_str(candidate.action),
+            warning_count,
+            warn_seconds,
+            warning.kill_at,
+            had_existing_warning,
+        );
+
         warning.pid = Some(candidate.pid);
         warning.process_name = candidate.process_name.clone();
         warning.window_title = candidate.window_title.clone();
@@ -3072,7 +3177,23 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
         };
 
         if warn_seconds == 0 || now >= warning.kill_at {
+            log::debug!(
+                "[enforcement] kill attempt: key={} process={} pid={} action={} warn_seconds={} now={} kill_at={}",
+                candidate.key,
+                candidate.process_name,
+                candidate.pid,
+                process_action_to_str(candidate.action),
+                warn_seconds,
+                now,
+                warning.kill_at,
+            );
             if kill_process(candidate.pid) {
+                log::info!(
+                    "[enforcement] kill succeeded: process={} pid={} action={}",
+                    candidate.process_name,
+                    candidate.pid,
+                    process_action_to_str(candidate.action),
+                );
                 app.state::<crate::guard::watchdog::GuardState>()
                     .clear_active_warning_for_process(&candidate.process_name);
                 let _ = crate::guard::watchdog::set_tray_warning(app, None);
@@ -3173,6 +3294,15 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
                 },
             )
             .map_err(|error| error.to_string())?;
+            log::debug!(
+                "[enforcement] warning emitted: key={} process={} seconds_until_kill={} warning_count={} display={} notifications_enabled={}",
+                candidate.key,
+                candidate.process_name,
+                seconds_until_kill,
+                warning_count,
+                preferences.warning_display,
+                preferences.notifications_enabled,
+            );
 
             // OS-level toast. Only fires on round-second boundaries
             // (every ~5s and at the final 3,2,1) so we don't spam
@@ -3246,11 +3376,14 @@ fn scan_and_enforce(app: &AppHandle) -> Result<(), String> {
     }
     let want_overlay =
         !runtime.warnings.is_empty() && mode == crate::guard::watchdog::WarningDisplay::Fullscreen;
-    if want_overlay != runtime.status.window_topmost {
-        if want_overlay {
-            let _ = crate::guard::watchdog::show_warning_overlay(app);
-        } else {
-            let _ = crate::guard::watchdog::hide_warning_overlay(app);
+    if want_overlay {
+        if let Err(error) = crate::guard::watchdog::show_warning_overlay(app) {
+            log::error!("[enforcement] warning overlay show failed: {error}");
+        }
+        runtime.status.window_topmost = true;
+    } else if runtime.status.window_topmost {
+        if let Err(error) = crate::guard::watchdog::hide_warning_overlay(app) {
+            log::error!("[enforcement] warning overlay hide failed: {error}");
         }
         runtime.status.window_topmost = want_overlay;
     }
@@ -3312,6 +3445,20 @@ fn build_enforcement_candidates(
         let browser = is_browser_process_name(&normalized_name);
         let running_candidate = running_app_candidate(process);
         let known_app = known_app_map.get(&running_candidate.app_key);
+        log::debug!(
+            "[enforcement] evaluate process: pid={} name={} normalized={} app_key={} display={} exe={:?} browser={} known_action={:?} known_effective_category={:?} known_categories={:?} active_profile={}",
+            process.pid,
+            process.name,
+            normalized_name,
+            running_candidate.app_key,
+            running_candidate.display_name,
+            process.exe_path,
+            browser,
+            known_app.map(|app| app.classification_action),
+            known_app.and_then(|app| app.effective_category.as_deref()),
+            known_app.map(|app| app.categories.clone()).unwrap_or_default(),
+            active_profile,
+        );
 
         if classification_popups_enabled
             && known_app
@@ -3319,6 +3466,13 @@ fn build_enforcement_candidates(
                 .unwrap_or(false)
             && prompted_app_keys.insert(running_candidate.app_key.clone())
         {
+            log::debug!(
+                "[enforcement] unknown app prompt emitted: app_key={} display={} process={} category_guess={:?}",
+                running_candidate.app_key,
+                running_candidate.display_name,
+                process.name,
+                running_candidate.category_guess,
+            );
             let _ = app.emit(
                 "unknown-app-detected",
                 serde_json::json!({
@@ -3334,6 +3488,12 @@ fn build_enforcement_candidates(
 
         if browser {
             if !focused_window_matches_process(focused_window, process) {
+                log::debug!(
+                    "[enforcement] browser skipped: pid={} name={} reason=not_focused focused={:?}",
+                    process.pid,
+                    process.name,
+                    focused_window,
+                );
                 continue;
             }
 
@@ -3341,6 +3501,18 @@ fn build_enforcement_candidates(
             let matched_target = title
                 .as_deref()
                 .and_then(|cleaned| match_browser_target(cleaned, known_browser_targets));
+            log::debug!(
+                "[enforcement] browser focused: pid={} name={} title={:?} matched_target={:?}",
+                process.pid,
+                process.name,
+                title,
+                matched_target.as_ref().map(|target| (
+                    target.target_key.as_str(),
+                    target.display_name.as_str(),
+                    target.category_name.as_deref(),
+                    target.classification_action
+                )),
+            );
             if let Some(target) = matched_target.clone() {
                 let _ = mark_browser_target_seen(connection, &target.target_key);
                 if classification_popups_enabled
@@ -3374,6 +3546,14 @@ fn build_enforcement_candidates(
                 legacy_action,
             );
             let Some(action) = resolved_action else {
+                log::debug!(
+                    "[enforcement] browser allowed: pid={} name={} title={:?} legacy_action={:?} matched_target={:?}",
+                    process.pid,
+                    process.name,
+                    title,
+                    legacy_action,
+                    matched_target.as_ref().map(|target| target.target_key.as_str()),
+                );
                 continue;
             };
             let key = format!(
@@ -3385,8 +3565,22 @@ fn build_enforcement_candidates(
                     .unwrap_or_else(|| title.clone().unwrap_or_default())
             );
             if !seen_browser.insert(key.clone()) {
+                log::debug!(
+                    "[enforcement] browser candidate deduped: key={} pid={} name={}",
+                    key,
+                    process.pid,
+                    process.name,
+                );
                 continue;
             }
+            log::debug!(
+                "[enforcement] browser candidate added: key={} pid={} name={} action={} title={:?}",
+                key,
+                process.pid,
+                process.name,
+                process_action_to_str(action),
+                title,
+            );
             candidates.push(EnforcementCandidate {
                 key,
                 process_name: process.name.clone(),
@@ -3412,18 +3606,41 @@ fn build_enforcement_candidates(
         let Some(action) =
             resolve_effective_action(connection, active_profile, known_app, None, legacy_action)
         else {
+            log::debug!(
+                "[enforcement] app allowed: pid={} name={} app_key={} legacy_action={:?}",
+                process.pid,
+                process.name,
+                running_candidate.app_key,
+                legacy_action,
+            );
             continue;
         };
 
         if should_enforce_action(action) {
+            let key = format!("app:{normalized_name}:{}", process.pid);
+            log::debug!(
+                "[enforcement] app candidate added: key={} pid={} name={} action={} legacy_action={:?}",
+                key,
+                process.pid,
+                process.name,
+                process_action_to_str(action),
+                legacy_action,
+            );
             candidates.push(EnforcementCandidate {
-                key: normalized_name,
+                key,
                 process_name: process.name.clone(),
                 window_title: None,
                 match_reason: None,
                 pid: process.pid,
                 action,
             });
+        } else {
+            log::debug!(
+                "[enforcement] app action ignored: pid={} name={} action={}",
+                process.pid,
+                process.name,
+                process_action_to_str(action),
+            );
         }
     }
 
@@ -3568,6 +3785,13 @@ fn resolve_effective_action(
 ) -> Option<ProcessAction> {
     if let Some(legacy_action) = legacy_action {
         if legacy_action != ProcessAction::AlwaysAllow {
+            log::debug!(
+                "[enforcement] action resolved: source=legacy_process_rule action={} active_profile={} app_key={:?} browser_target={:?}",
+                process_action_to_str(legacy_action),
+                active_profile,
+                known_app.map(|app| app.app_key.as_str()),
+                browser_target.map(|target| target.target_key.as_str()),
+            );
             return Some(legacy_action);
         }
     }
@@ -3579,6 +3803,12 @@ fn resolve_effective_action(
             .map(|target| target.classification_action == ClassificationAction::AlwaysBan)
             .unwrap_or(false)
     {
+        log::debug!(
+            "[enforcement] action resolved: source=classification_always_ban action=alwaysBlock active_profile={} app_key={:?} browser_target={:?}",
+            active_profile,
+            known_app.map(|app| app.app_key.as_str()),
+            browser_target.map(|target| target.target_key.as_str()),
+        );
         return Some(ProcessAction::AlwaysBlock);
     }
 
@@ -3586,6 +3816,14 @@ fn resolve_effective_action(
     if let Some(decision) =
         resolve_profile_override_decision(connection, &lineage, known_app, browser_target)
     {
+        log::debug!(
+            "[enforcement] profile override matched: active_profile={} lineage={:?} decision={:?} app_key={:?} browser_target={:?}",
+            active_profile,
+            lineage,
+            decision,
+            known_app.map(|app| app.app_key.as_str()),
+            browser_target.map(|target| target.target_key.as_str()),
+        );
         return match decision {
             EnforcementDecision::Block => Some(if active_profile == "rest" {
                 ProcessAction::AlwaysBlock
@@ -3607,14 +3845,45 @@ fn resolve_effective_action(
     match classification_action {
         ClassificationAction::AlwaysBan => return Some(ProcessAction::AlwaysBlock),
         ClassificationAction::BanDuringWork if active_profile != "rest" => {
+            log::debug!(
+                "[enforcement] action resolved: source=classification_ban_during_work action=blockDuringWork active_profile={} app_key={:?} browser_target={:?}",
+                active_profile,
+                known_app.map(|app| app.app_key.as_str()),
+                browser_target.map(|target| target.target_key.as_str()),
+            );
             return Some(ProcessAction::BlockDuringWork);
         }
-        ClassificationAction::NeverBan => return None,
-        ClassificationAction::BanDuringWork => return None,
+        ClassificationAction::NeverBan => {
+            log::debug!(
+                "[enforcement] action resolved: source=classification_never_ban action=allow active_profile={} app_key={:?} browser_target={:?}",
+                active_profile,
+                known_app.map(|app| app.app_key.as_str()),
+                browser_target.map(|target| target.target_key.as_str()),
+            );
+            return None;
+        }
+        ClassificationAction::BanDuringWork => {
+            log::debug!(
+                "[enforcement] action resolved: source=classification_ban_during_work_rest action=allow active_profile={} app_key={:?} browser_target={:?}",
+                active_profile,
+                known_app.map(|app| app.app_key.as_str()),
+                browser_target.map(|target| target.target_key.as_str()),
+            );
+            return None;
+        }
         ClassificationAction::Unclassified => {}
     }
 
-    resolve_category_default_action(known_app, browser_target, active_profile)
+    let category_action =
+        resolve_category_default_action(known_app, browser_target, active_profile);
+    log::debug!(
+        "[enforcement] category default resolved: active_profile={} app_key={:?} browser_target={:?} action={:?}",
+        active_profile,
+        known_app.map(|app| app.app_key.as_str()),
+        browser_target.map(|target| target.target_key.as_str()),
+        category_action.map(process_action_to_str),
+    );
+    category_action
 }
 
 fn resolve_category_default_action(
@@ -3721,7 +3990,19 @@ fn resolve_profile_override_decision(
             }
 
             let mut category_decision = None;
+            let mut category_names = Vec::new();
+            if let Some(category_name) = known_app.effective_category.as_ref() {
+                category_names.push(category_name.as_str());
+            }
+            if let Some(category_name) = known_app.category_guess.as_ref() {
+                category_names.push(category_name.as_str());
+            }
             for category_name in &known_app.categories {
+                category_names.push(category_name.as_str());
+            }
+            category_names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+
+            for category_name in category_names {
                 if let Ok(Some(decision)) =
                     get_profile_override(connection, profile_name, "category", category_name)
                 {
@@ -3775,12 +4056,22 @@ fn should_enforce_action(action: ProcessAction) -> bool {
 fn kill_process(pid: u32) -> bool {
     let mut system = System::new_all();
     system.refresh_processes(ProcessesToUpdate::All, true);
-    system
+    let Some((_, process)) = system
         .processes()
         .iter()
         .find(|(process_pid, _)| process_pid.as_u32() == pid)
-        .map(|(_, process)| process.kill_with(Signal::Kill).unwrap_or(false))
-        .unwrap_or(false)
+    else {
+        return true;
+    };
+
+    let signal_reported = process.kill_with(Signal::Kill).unwrap_or(false);
+    thread::sleep(Duration::from_millis(250));
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    let still_running = system
+        .processes()
+        .keys()
+        .any(|process_pid| process_pid.as_u32() == pid);
+    signal_reported || !still_running
 }
 
 #[cfg(target_os = "macos")]
@@ -4448,6 +4739,16 @@ mod tests {
     }
 
     #[test]
+    fn steam_client_bundle_process_is_a_user_facing_game() {
+        let path = "/Users/test/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/steam_osx";
+        let (category, confidence) = classify_app_candidate("steam_osx", Some(path));
+
+        assert!(super::is_user_facing_app(Some(std::path::Path::new(path))));
+        assert_eq!(category.as_deref(), Some("Games"));
+        assert!(confidence >= 0.95);
+    }
+
+    #[test]
     fn builtin_game_category_blocks_unclassified_apps_during_custom_work_profiles() {
         let app = KnownApp {
             app_key: "steam".to_string(),
@@ -4472,6 +4773,47 @@ mod tests {
         let action = super::resolve_category_default_action(Some(&app), None, "school");
 
         assert_eq!(action, Some(ProcessAction::AlwaysBlock));
+    }
+
+    #[test]
+    fn effective_category_profile_override_allows_app_without_memberships() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        run_migrations(&connection).expect("migrations should run");
+        super::ensure_enforcement_defaults(&connection).expect("defaults should be present");
+        super::set_enforcement_profile_override(
+            &connection,
+            crate::processes::models::EnforcementProfileOverrideInput {
+                profile_name: "work".to_string(),
+                subject_type: "category".to_string(),
+                subject_key: "Entertainment".to_string(),
+                decision: crate::processes::models::EnforcementDecision::Allow,
+            },
+        )
+        .expect("override should save");
+
+        let app = KnownApp {
+            app_key: "qqmusic".to_string(),
+            display_name: "QQMusic".to_string(),
+            executable_name: Some("QQMusic".to_string()),
+            executable_path: Some("/Applications/QQMusic.app/Contents/MacOS/QQMusic".to_string()),
+            app_path: Some("/Applications/QQMusic.app".to_string()),
+            platform: "macos".to_string(),
+            source: "process".to_string(),
+            category_guess: Some("Entertainment".to_string()),
+            category_override: Some("Entertainment".to_string()),
+            effective_category: Some("Entertainment".to_string()),
+            categories: vec![],
+            classification_action: ClassificationAction::Unclassified,
+            confidence: 0.95,
+            classification_status: "unclassified".to_string(),
+            first_seen_at: 0,
+            last_seen_running_at: Some(0),
+            updated_at: 0,
+        };
+
+        let action = super::resolve_effective_action(&connection, "work", Some(&app), None, None);
+
+        assert_eq!(action, None);
     }
 
     #[test]

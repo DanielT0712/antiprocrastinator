@@ -74,12 +74,15 @@ export function WarningPopup() {
     const refreshActiveWarning = async () => {
       try {
         const active = await api.getActiveWarning();
+        if (cancelled) return;
         if (
-          cancelled ||
           !active ||
           !['process', 'process_kill_failed'].includes(active.kind) ||
           !active.processName
-        ) return;
+        ) {
+          setProcWarns(new Map());
+          return;
+        }
         setProcWarns((prev) => {
           const next = new Map(prev);
           next.set(active.processName!, {
@@ -105,6 +108,7 @@ export function WarningPopup() {
           next.set(p.processName, {
             processName: p.processName,
             secondsUntilKill: p.secondsUntilKill,
+            failed: false,
             receivedAt: Date.now(),
           });
           return next;
@@ -116,10 +120,14 @@ export function WarningPopup() {
     (async () => {
       const u = await onAppEvent('process-killed', (p) => {
         setProcWarns((prev) => {
-          if (!prev.has(p.processName)) return prev;
+          const killed = p.processName.toLowerCase();
           const next = new Map(prev);
-          next.delete(p.processName);
-          return next;
+          for (const [key, warning] of prev) {
+            if (warning.processName.toLowerCase() === killed) {
+              next.delete(key);
+            }
+          }
+          return next.size === prev.size ? prev : next;
         });
       });
       if (cancelled) u();
@@ -137,6 +145,7 @@ export function WarningPopup() {
       else cleanups.push(u);
     })();
     const sweep = setInterval(() => {
+      refreshActiveWarning();
       setProcWarns((prev) => {
         const now = Date.now();
         let changed = false;

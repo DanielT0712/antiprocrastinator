@@ -35,6 +35,15 @@ const inputStyle: CSSProperties = {
   boxSizing: 'border-box',
 };
 
+const readOnlyFieldStyle: CSSProperties = {
+  ...inputStyle,
+  color: 'var(--muted)',
+  minHeight: 34,
+  display: 'flex',
+  alignItems: 'center',
+  fontFamily: 'var(--font-mono)',
+};
+
 const DAY_MS = 86_400_000;
 const HOUR_MS = 60 * 60 * 1_000;
 const DEFAULT_TIMELINE_PX_PER_HOUR = 56;
@@ -368,9 +377,17 @@ interface InspectorProps {
 }
 
 function Inspector({ block, tasks, onClose, onSave, onDelete }: InspectorProps) {
-  const [draft, setDraft] = useState<TimeBlock | null>(block);
-  useEffect(() => setDraft(block), [block?.id]);
-  if (!draft) return null;
+  if (!block) return null;
+  const linkedTask = block.taskId == null
+    ? null
+    : tasks.find((task) => task.id === block.taskId) ?? null;
+  const blockTypeLabel =
+    block.blockType.charAt(0).toUpperCase() + block.blockType.slice(1).replace('_', ' ');
+  const profileLabel = block.enforcementProfile == null
+    ? 'Inherit'
+    : block.enforcementProfile === 'deep_work'
+      ? 'Deep Work'
+      : block.enforcementProfile.charAt(0).toUpperCase() + block.enforcementProfile.slice(1);
 
   return (
     <aside style={{
@@ -402,14 +419,9 @@ function Inspector({ block, tasks, onClose, onSave, onDelete }: InspectorProps) 
         </button>
       </div>
 
-      <input
-        value={draft.title}
-        onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+      <div
         style={{
           width: '100%',
-          background: 'transparent',
-          border: 'none',
-          outline: 'none',
           color: 'var(--ink)',
           fontFamily: 'var(--font-display)',
           fontSize: 22,
@@ -417,82 +429,19 @@ function Inspector({ block, tasks, onClose, onSave, onDelete }: InspectorProps) 
           padding: 0,
           marginBottom: 16,
         }}
-      />
-
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ ...labelStyle, marginBottom: 6 }}>Type</div>
-        <Dropdown
-          value={draft.blockType}
-          onChange={(v) => setDraft({ ...draft, blockType: v })}
-          style={inputStyle}
-          options={[
-            { value: 'work', label: 'Work' },
-            { value: 'break', label: 'Break' },
-            { value: 'sleep', label: 'Sleep' },
-            { value: 'meal', label: 'Meal' },
-            { value: 'custom', label: 'Custom' },
-          ]}
-        />
+      >
+        {block.title}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
         <div>
           <div style={{ ...labelStyle, marginBottom: 6 }}>Start</div>
-          <input
-            type="datetime-local"
-            value={dateInputFromEpoch(draft.startTime)}
-            onChange={(e) => {
-              const t = epochFromDateInput(e.target.value);
-              if (t != null) setDraft({ ...draft, startTime: t });
-            }}
-            style={inputStyle}
-          />
+          <div style={readOnlyFieldStyle}>{formatHHMM(block.startTime)}</div>
         </div>
         <div>
           <div style={{ ...labelStyle, marginBottom: 6 }}>End</div>
-          <input
-            type="datetime-local"
-            value={dateInputFromEpoch(draft.endTime)}
-            onChange={(e) => {
-              const t = epochFromDateInput(e.target.value);
-              if (t != null) setDraft({ ...draft, endTime: t });
-            }}
-            style={inputStyle}
-          />
+          <div style={readOnlyFieldStyle}>{formatHHMM(block.endTime)}</div>
         </div>
-      </div>
-
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ ...labelStyle, marginBottom: 6 }}>Linked task</div>
-        <Dropdown
-          value={draft.taskId == null ? '' : String(draft.taskId)}
-          onChange={(v) =>
-            setDraft({ ...draft, taskId: v === '' ? null : Number(v) })
-          }
-          style={inputStyle}
-          options={[
-            { value: '', label: 'No task' },
-            ...tasks.map((t) => ({ value: String(t.id), label: t.name })),
-          ]}
-        />
-      </div>
-
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ ...labelStyle, marginBottom: 6 }}>Profile</div>
-        <Dropdown
-          value={draft.enforcementProfile ?? ''}
-          onChange={(v) =>
-            setDraft({ ...draft, enforcementProfile: v === '' ? null : v })
-          }
-          style={inputStyle}
-          options={[
-            { value: '', label: 'Inherit' },
-            { value: 'rest', label: 'Rest' },
-            { value: 'work', label: 'Work' },
-            { value: 'deep_work', label: 'Deep Work' },
-            { value: 'emergency', label: 'Emergency' },
-          ]}
-        />
       </div>
 
       <label style={{
@@ -506,8 +455,10 @@ function Inspector({ block, tasks, onClose, onSave, onDelete }: InspectorProps) 
       }}>
         <input
           type="checkbox"
-          checked={draft.isProtected}
-          onChange={(e) => setDraft({ ...draft, isProtected: e.target.checked })}
+          checked={block.isProtected}
+          onChange={(e) => {
+            void onSave(block.id, { isProtected: e.target.checked });
+          }}
           style={{ accentColor: 'var(--accent)' }}
         />
         Protect from rebuild
@@ -526,20 +477,28 @@ function Inspector({ block, tasks, onClose, onSave, onDelete }: InspectorProps) 
         gridTemplateColumns: '1fr 1fr',
         rowGap: 4,
       }}>
+        <span>Type</span>
+        <span style={{ color: 'var(--ink)', textAlign: 'right' }}>{blockTypeLabel}</span>
+        <span>Linked task</span>
+        <span style={{ color: 'var(--ink)', textAlign: 'right' }}>
+          {linkedTask?.name ?? 'None'}
+        </span>
+        <span>Profile</span>
+        <span style={{ color: 'var(--ink)', textAlign: 'right' }}>{profileLabel}</span>
         <span>Status</span>
-        <span style={{ color: 'var(--ink)', textAlign: 'right' }}>{draft.status}</span>
+        <span style={{ color: 'var(--ink)', textAlign: 'right' }}>{block.status}</span>
         <span>Source</span>
-        <span style={{ color: 'var(--ink)', textAlign: 'right' }}>{draft.source}</span>
+        <span style={{ color: 'var(--ink)', textAlign: 'right' }}>{block.source}</span>
         <span>Duration</span>
         <span style={{ color: 'var(--ink)', textAlign: 'right' }}>
-          {formatDuration(Math.round((draft.endTime - draft.startTime) / 60_000))}
+          {formatDuration(Math.round((block.endTime - block.startTime) / 60_000))}
         </span>
       </div>
 
       <div style={{ display: 'flex', gap: 8 }}>
         <button
           onClick={() => {
-            if (confirm(`Delete block "${draft.title}"?`)) onDelete(draft.id);
+            if (confirm(`Delete block "${block.title}"?`)) onDelete(block.id);
           }}
           style={{
             padding: '7px 12px',
@@ -555,45 +514,6 @@ function Inspector({ block, tasks, onClose, onSave, onDelete }: InspectorProps) 
           }}
         >
           <Icons.trash size={12} /> Delete
-        </button>
-        <span style={{ flex: 1 }} />
-        <button
-          onClick={onClose}
-          style={{
-            padding: '7px 14px',
-            background: 'var(--bg-raise)',
-            border: '1px solid var(--line)',
-            borderRadius: 5,
-            color: 'var(--ink)',
-            fontSize: 12.5,
-            cursor: 'pointer',
-          }}
-        >
-          Cancel
-        </button>
-        <button
-          onClick={() =>
-            onSave(draft.id, {
-              title: draft.title,
-              blockType: draft.blockType,
-              startTime: draft.startTime,
-              endTime: draft.endTime,
-              taskId: draft.taskId,
-              enforcementProfile: draft.enforcementProfile,
-              isProtected: draft.isProtected,
-            })
-          }
-          style={{
-            padding: '7px 14px',
-            background: 'var(--accent)',
-            color: 'oklch(0.18 0.04 60)',
-            border: '1px solid var(--accent)',
-            borderRadius: 5,
-            fontSize: 12.5,
-            cursor: 'pointer',
-          }}
-        >
-          Save
         </button>
       </div>
     </aside>

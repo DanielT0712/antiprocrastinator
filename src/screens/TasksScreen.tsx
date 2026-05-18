@@ -579,7 +579,7 @@ function Drawer({
     (draft.kind !== 'fixed' ||
       (draft.fixedWindowStartMinute != null &&
         draft.fixedWindowEndMinute != null &&
-        draft.fixedWindowEndMinute > draft.fixedWindowStartMinute)) &&
+        draft.fixedWindowEndMinute !== draft.fixedWindowStartMinute)) &&
     (draft.kind !== 'fixed' || draft.recurrenceKind !== 'none') &&
     (draft.recurrenceKind !== 'weekly' || draft.recurrenceDaysMask !== 0) &&
     (draft.recurrenceKind !== 'once' ||
@@ -1847,9 +1847,16 @@ const SLEEP_TASK_ID = -1;
 const ALL_WEEKDAYS_MASK = 0b1111111;
 
 function sleepTaskFromTemplate(template: unknown): Task {
-  const days = (template as { days?: Array<{ sleepStartMinute?: number | null; sleepEndMinute?: number | null }> } | null)?.days ?? [];
+  const parsed = template as {
+    days?: Array<{ sleepStartMinute?: number | null; sleepEndMinute?: number | null }>;
+    sleepEnforcementProfile?: string | null;
+  } | null;
+  const days = parsed?.days ?? [];
   const start = days.find((day) => day.sleepStartMinute != null)?.sleepStartMinute ?? 23 * 60;
   const end = days.find((day) => day.sleepEndMinute != null)?.sleepEndMinute ?? 7 * 60;
+  const profile = ['rest', 'work', 'deep_work'].includes(parsed?.sleepEnforcementProfile ?? '')
+    ? parsed!.sleepEnforcementProfile!
+    : 'rest';
   const overrides: Record<string, { startMin?: number; endMin?: number }> = {};
   days.forEach((day, idx) => {
     const s = day.sleepStartMinute;
@@ -1880,7 +1887,7 @@ function sleepTaskFromTemplate(template: unknown): Task {
     workRatio: null,
     restRatio: null,
     protectGeneratedBlocks: true,
-    enforcementProfile: 'rest',
+    enforcementProfile: profile,
     kind: 'fixed',
     fixedWindowStartMinute: start,
     fixedWindowEndMinute: end,
@@ -2111,6 +2118,8 @@ export function TasksScreen() {
         }
         await api.saveWeeklyTemplate({
           ...existing,
+          sleepEnforcementProfile:
+            updates.enforcementProfile ?? currentSleep.enforcementProfile ?? 'rest',
           days: baseDays.map((day, idx) => {
             const ov = overrides[String(idx)] ?? {};
             return {
@@ -2124,6 +2133,25 @@ export function TasksScreen() {
             (existing?.fixedBlocks as unknown[] | undefined) ?? [],
         });
         await api.rebuildSchedule();
+        if (updates.enforcementProfile !== undefined) {
+          const profile = updates.enforcementProfile ?? 'rest';
+          const now = Date.now();
+          const blocks = await api.getScheduleRange(
+            now - 24 * 60 * 60_000,
+            now + 14 * 24 * 60 * 60_000,
+          );
+          await Promise.all(
+            blocks
+              .filter((block) => block.blockType === 'sleep')
+              .map((block) =>
+                api.updateTimeBlock(block.id, {
+                  blockType: block.blockType,
+                  taskId: block.taskId,
+                  enforcementProfile: profile,
+                }),
+              ),
+          );
+        }
         refresh();
         return;
       }

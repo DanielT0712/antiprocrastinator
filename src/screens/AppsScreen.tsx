@@ -461,6 +461,57 @@ function decisionsFor(
   return out;
 }
 
+function categoryDefaultDecision(
+  categoryName: string | null | undefined,
+  profileName: string,
+): EnforcementDecision {
+  if (!categoryName) return 'allow';
+  const normalized = categoryName.toLowerCase();
+  if (normalized === 'games') return 'block';
+  if (
+    (normalized === 'social media' || normalized === 'entertainment') &&
+    profileName !== 'rest'
+  ) {
+    return 'block';
+  }
+  return 'allow';
+}
+
+function resolvedCategoryDecision(
+  categoryName: string,
+  profileName: string,
+  decisions: Record<string, EnforcementDecision | null>,
+): EnforcementDecision {
+  return decisions[profileName] ?? categoryDefaultDecision(categoryName, profileName);
+}
+
+function resolvedAppDecision({
+  app,
+  subjectType,
+  profileName,
+  appDecisions,
+  categoryDecisions,
+}: {
+  app: KnownApp;
+  subjectType: 'app' | 'browser_target';
+  profileName: string;
+  appDecisions: Record<string, EnforcementDecision | null>;
+  categoryDecisions: Record<string, EnforcementDecision | null>;
+}): EnforcementDecision {
+  if (app.classificationAction === 'always_ban') return 'block';
+  if (appDecisions[profileName]) return appDecisions[profileName]!;
+  if (categoryDecisions[profileName]) return categoryDecisions[profileName]!;
+  if (app.classificationAction === 'never_ban') return 'allow';
+  if (app.classificationAction === 'ban_during_work') {
+    return profileName === 'rest' ? 'allow' : 'block';
+  }
+  const categoryName =
+    subjectType === 'browser_target'
+      ? app.effectiveCategory
+      : app.effectiveCategory ?? app.categoryGuess;
+  return categoryDefaultDecision(categoryName, profileName);
+}
+
 function CategorySection({
   category,
   apps,
@@ -508,12 +559,7 @@ function CategorySection({
 
   const verdictForActive: EnforcementDecision = hardLocked
     ? 'block'
-    : categoryDecisions[activeProfile] ??
-      (categoryPreset === 'always-allow' ||
-      (categoryPreset === 'block-work' &&
-        (activeProfile === 'rest' || activeProfile === 'emergency'))
-        ? 'allow'
-        : 'block');
+    : resolvedCategoryDecision(category.name, activeProfile, categoryDecisions);
 
   return (
     <div style={{
@@ -656,12 +702,7 @@ function CategorySection({
               {profileNames.map((n) => {
                 const d = hardLocked
                   ? 'block'
-                  : categoryDecisions[n] ??
-                    (categoryPreset === 'always-allow' ||
-                    (categoryPreset === 'block-work' &&
-                      (n === 'rest' || n === 'emergency'))
-                      ? 'allow'
-                      : 'block');
+                  : resolvedCategoryDecision(category.name, n, categoryDecisions);
                 return (
                   <span key={n}>
                     {(PROFILE_DISPLAY[n] ?? n).toLowerCase()} →{' '}
@@ -694,6 +735,7 @@ function CategorySection({
                 activeProfile={activeProfile}
                 hardLocked={hardLocked}
                 overrides={overrides}
+                categoryDecisions={categoryDecisions}
                 categoryPreset={categoryPreset}
                 onApplyAppPreset={(p) =>
                   onApplyPreset(rowSubjectType, app.appKey, p)
@@ -739,6 +781,7 @@ function AppRow({
   activeProfile,
   hardLocked,
   overrides,
+  categoryDecisions,
   categoryPreset,
   onApplyAppPreset,
   onClearAppOverrides,
@@ -754,6 +797,7 @@ function AppRow({
   activeProfile: string;
   hardLocked: boolean;
   overrides: Map<string, EnforcementProfileOverride>;
+  categoryDecisions: Record<string, EnforcementDecision | null>;
   categoryPreset: PresetId;
   onApplyAppPreset: (preset: PresetId) => void;
   onClearAppOverrides: () => void;
@@ -775,12 +819,13 @@ function AppRow({
     : PRESETS.find((p) => p.id === effectivePreset)?.label ?? effectivePreset;
   const verdict: EnforcementDecision = hardLocked
     ? 'block'
-    : appDecisions[activeProfile] ??
-      (effectivePreset === 'always-allow' ||
-      (effectivePreset === 'block-work' &&
-        (activeProfile === 'rest' || activeProfile === 'emergency'))
-        ? 'allow'
-        : 'block');
+    : resolvedAppDecision({
+        app,
+        subjectType,
+        profileName: activeProfile,
+        appDecisions,
+        categoryDecisions,
+      });
 
   const [iconData, setIconData] = useState<string | null>(null);
   const [shouldFetchIcon, setShouldFetchIcon] = useState(false);

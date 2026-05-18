@@ -116,6 +116,7 @@ pub fn built_in_categories() -> Vec<ProcessCategory> {
             name: "Games".to_string(),
             process_names: vec![
                 "steam".to_string(),
+                "steam_osx".to_string(),
                 "epicgameslauncher".to_string(),
                 "riot client".to_string(),
                 "battle.net".to_string(),

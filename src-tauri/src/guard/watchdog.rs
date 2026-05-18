@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
@@ -12,8 +13,18 @@ use std::{
 use std::path::PathBuf as TestPathBuf;
 
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
+use once_cell::sync::Lazy;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+
+#[cfg(target_os = "macos")]
+use objc2::{
+    msg_send,
+    runtime::{AnyClass, AnyObject},
+};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSString, NSRect};
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -35,6 +46,31 @@ pub const GUARD_POLL_INTERVAL_SECS: u64 = 5;
 pub const GUARD_LAUNCH_GRACE_SECS: u64 = 20;
 pub const GUARD_RESTART_WINDOW_SECS: u64 = 600;
 pub const GUARD_MAX_RESTARTS_PER_WINDOW: u32 = 3;
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+struct NativeWarningPanel {
+    panel: usize,
+    headline: usize,
+    detail: usize,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+struct MacFullscreenFrame {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[cfg(target_os = "macos")]
+static NATIVE_WARNING_PANELS: Lazy<Mutex<HashMap<String, NativeWarningPanel>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(target_os = "macos")]
+static NATIVE_WARNING_REFRESHES: Lazy<Mutex<HashSet<String>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
 
 pub struct GuardState {
     active: Mutex<bool>,
@@ -312,6 +348,18 @@ pub fn show_main_window<R: Runtime, M: Manager<R>>(manager: &M) -> Result<(), St
 /// countdown text lives in a separate unclosable popup window.
 pub fn show_warning_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let monitors = app.available_monitors().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    let native_fullscreen_frame = macos_frontmost_fullscreen_frame().unwrap_or_else(|error| {
+        log::warn!("failed to detect frontmost fullscreen bounds for native warning panel: {error}");
+        None
+    });
+    #[cfg(not(target_os = "macos"))]
+    let native_fullscreen_frame = None;
+    log::debug!(
+        "show_warning_overlay requested: monitor_count={} native_fullscreen_frame={:?}",
+        monitors.len(),
+        native_fullscreen_frame,
+    );
     for (idx, monitor) in monitors.iter().enumerate() {
         let label = format!("{WARNING_OVERLAY_LABEL_PREFIX}{idx}");
         let window = match app.get_webview_window(&label) {
@@ -338,11 +386,21 @@ pub fn show_warning_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
         };
         let size = monitor.size();
         let pos = monitor.position();
+        log::debug!(
+            "preparing warning overlay: label={} monitor_index={} monitor_pos=({}, {}) monitor_size={}x{} scale={}",
+            label,
+            idx,
+            pos.x,
+            pos.y,
+            size.width,
+            size.height,
+            monitor.scale_factor(),
+        );
         let _ = window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y));
         let _ = window.set_size(tauri::PhysicalSize::new(size.width, size.height));
         let _ = window.set_ignore_cursor_events(true);
         let _ = window.set_always_on_top(true);
-        let _ = window.show();
+        show_warning_surface(&window, native_fullscreen_frame);
     }
     Ok(())
 }
@@ -356,6 +414,8 @@ pub fn hide_warning_overlay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String
             let _ = win.hide();
         }
     }
+    #[cfg(target_os = "macos")]
+    hide_native_warning_panels(app);
     Ok(())
 }
 
@@ -393,15 +453,683 @@ pub fn show_warning_popup<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> 
         // Center horizontally near the top of the primary monitor.
         let scale = monitor.scale_factor().max(1.0);
         let win_w = (480.0 * scale) as i32;
-        let win_h = (160.0 * scale) as i32;
         let x = m_pos.x + (m_size.width as i32 - win_w) / 2;
         let y = m_pos.y + (m_size.height as i32 / 12).max(48);
         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
     }
 
     let _ = window.set_always_on_top(true);
-    let _ = window.show();
+    show_warning_surface(&window, None);
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn show_warning_surface<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    native_fullscreen_frame: Option<MacFullscreenFrame>,
+) {
+    let window = window.clone();
+    if let Err(error) = window.clone().run_on_main_thread(move || {
+        configure_warning_surface_macos_now(&window);
+        let _ = window.show();
+        if should_show_native_warning_panel_macos_now(&window, native_fullscreen_frame) {
+            if let Some(fullscreen_frame) = native_fullscreen_frame {
+                show_native_warning_panel_macos_now(&window, fullscreen_frame);
+            }
+        } else {
+            hide_native_warning_panel_macos_now(window.label());
+        }
+        order_warning_surface_front_macos(&window);
+    }) {
+        log::error!("failed to schedule macOS warning surface configuration: {error}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_warning_surface<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    _native_fullscreen_frame: Option<()>,
+) {
+    let _ = window.show();
+}
+
+#[cfg(target_os = "macos")]
+fn configure_warning_surface_macos_now<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    if ns_window.is_null() {
+        return;
+    }
+
+    // AppKit fullscreen apps live in their own Space. `always_on_top` only
+    // wins inside the current Space unless the warning window explicitly joins
+    // all Spaces and is allowed as a fullscreen auxiliary window.
+    const NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES: usize = 1 << 0;
+    const NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY: usize = 1 << 4;
+    const NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+    const NS_WINDOW_STYLE_MASK_NONACTIVATING_PANEL: usize = 1 << 7;
+    const NS_SCREEN_SAVER_WINDOW_LEVEL: isize = 1000;
+
+    let behavior = NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES
+        | NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY
+        | NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY;
+
+    unsafe {
+        let ns_window = ns_window.cast::<AnyObject>();
+        let style_mask: usize = msg_send![ns_window, styleMask];
+        let _: () =
+            msg_send![ns_window, setStyleMask: style_mask | NS_WINDOW_STYLE_MASK_NONACTIVATING_PANEL];
+        let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
+        let _: () = msg_send![ns_window, setLevel: NS_SCREEN_SAVER_WINDOW_LEVEL];
+        let _: () = msg_send![ns_window, setCanHide: false];
+        let configured_level: isize = msg_send![ns_window, level];
+        let configured_behavior: usize = msg_send![ns_window, collectionBehavior];
+        let configured_style_mask: usize = msg_send![ns_window, styleMask];
+        let window_number: isize = msg_send![ns_window, windowNumber];
+        let is_visible: bool = msg_send![ns_window, isVisible];
+        log::debug!(
+            "configured macOS warning surface: label={} window_number={} visible={} level={} behavior={:#x} style_mask={:#x}",
+            window.label(),
+            window_number,
+            is_visible,
+            configured_level,
+            configured_behavior,
+            configured_style_mask,
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn should_show_native_warning_panel_macos_now<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    native_fullscreen_frame: Option<MacFullscreenFrame>,
+) -> bool {
+    if !window.label().starts_with(WARNING_OVERLAY_LABEL_PREFIX) {
+        return false;
+    }
+    let Some(target) = native_fullscreen_frame else {
+        return false;
+    };
+    let Ok(ns_window) = window.ns_window() else {
+        return false;
+    };
+    if ns_window.is_null() {
+        return false;
+    }
+
+    unsafe {
+        let ns_window = ns_window.cast::<AnyObject>();
+        let frame: NSRect = msg_send![ns_window, frame];
+        let screen: *mut AnyObject = msg_send![ns_window, screen];
+        let screen_frame: Option<NSRect> = if screen.is_null() {
+            None
+        } else {
+            Some(msg_send![screen, frame])
+        };
+        let overlay_center_x = frame.origin.x + frame.size.width / 2.0;
+        let overlay_center_y = frame.origin.y + frame.size.height / 2.0;
+        let target_min_x = target.x;
+        let target_max_x = target.x + target.width;
+        let target_min_y = target.y;
+        let target_max_y = target.y + target.height;
+        let x_matches = overlay_center_x >= target_min_x && overlay_center_x <= target_max_x;
+        let y_matches = overlay_center_y >= target_min_y && overlay_center_y <= target_max_y;
+        let overlaps = x_matches;
+        log::debug!(
+            "native macOS warning panel monitor match: label={} overlay_frame={:?} overlay_screen_frame={:?} fullscreen_target={:?} x_matches={} y_matches={} overlaps={}",
+            window.label(),
+            frame,
+            screen_frame,
+            target,
+            x_matches,
+            y_matches,
+            overlaps,
+        );
+        overlaps
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn show_native_warning_panel_macos_now<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    fullscreen_frame: MacFullscreenFrame,
+) {
+    if !window.label().starts_with(WARNING_OVERLAY_LABEL_PREFIX) {
+        return;
+    }
+
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    if ns_window.is_null() {
+        return;
+    }
+
+    // A Tauri webview window remains an NSWindow. macOS fullscreen Spaces only
+    // allow proper non-activating overlay behavior for a real NSPanel.
+    const NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES: usize = 1 << 0;
+    const NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY: usize = 1 << 4;
+    const NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE: usize = 1 << 6;
+    const NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+    const NS_WINDOW_STYLE_MASK_NONACTIVATING_PANEL: usize = 1 << 7;
+    const NS_BACKING_STORE_BUFFERED: usize = 2;
+    const NS_SCREEN_SAVER_WINDOW_LEVEL: isize = 1000;
+
+    let behavior = NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES
+        | NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY
+        | NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE
+        | NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY;
+
+    unsafe {
+        let ns_window = ns_window.cast::<AnyObject>();
+        let source_frame: NSRect = msg_send![ns_window, frame];
+        let screen: *mut AnyObject = msg_send![ns_window, screen];
+        let screen_frame: Option<NSRect> = if screen.is_null() {
+            None
+        } else {
+            Some(msg_send![screen, frame])
+        };
+        let screen_visible_frame: Option<NSRect> = if screen.is_null() {
+            None
+        } else {
+            Some(msg_send![screen, visibleFrame])
+        };
+        let mut frame = screen_frame.unwrap_or(source_frame);
+        frame.size.width = fullscreen_frame.width;
+        frame.size.height = fullscreen_frame.height;
+        if frame.size.width <= 0.0 || frame.size.height <= 0.0 {
+            log::warn!(
+                "skipping native macOS warning NSPanel with invalid frame: label={} frame={:?}",
+                window.label(),
+                frame,
+            );
+            return;
+        }
+
+        let Some(panel_class) = AnyClass::get(c"NSPanel") else {
+            log::error!("failed to find NSPanel class for warning overlay");
+            return;
+        };
+        let Some(text_field_class) = AnyClass::get(c"NSTextField") else {
+            log::error!("failed to find NSTextField class for warning overlay");
+            return;
+        };
+        let Some(font_class) = AnyClass::get(c"NSFont") else {
+            log::error!("failed to find NSFont class for warning overlay");
+            return;
+        };
+        let Some(color_class) = AnyClass::get(c"NSColor") else {
+            log::error!("failed to find NSColor class for warning overlay");
+            return;
+        };
+
+        let native = {
+            let mut panels = NATIVE_WARNING_PANELS.lock().unwrap();
+            if let Some(native) = panels.get(window.label()).copied() {
+                native
+            } else {
+                let panel: *mut AnyObject = msg_send![panel_class, alloc];
+                let panel: *mut AnyObject = msg_send![
+                    panel,
+                    initWithContentRect: frame,
+                    styleMask: NS_WINDOW_STYLE_MASK_NONACTIVATING_PANEL,
+                    backing: NS_BACKING_STORE_BUFFERED,
+                    defer: false
+                ];
+                let content_view: *mut AnyObject = msg_send![panel, contentView];
+                let content_bounds: NSRect = msg_send![content_view, bounds];
+                let (headline_frame, detail_frame) = native_warning_text_frames(content_bounds);
+
+                let headline: *mut AnyObject = msg_send![text_field_class, alloc];
+                let headline: *mut AnyObject =
+                    msg_send![headline, initWithFrame: headline_frame];
+                let detail: *mut AnyObject = msg_send![text_field_class, alloc];
+                let detail: *mut AnyObject = msg_send![detail, initWithFrame: detail_frame];
+
+                let _: () = msg_send![content_view, addSubview: headline];
+                let _: () = msg_send![content_view, addSubview: detail];
+
+                let native = NativeWarningPanel {
+                    panel: panel as usize,
+                    headline: headline as usize,
+                    detail: detail as usize,
+                };
+                panels.insert(window.label().to_string(), native);
+                native
+            }
+        };
+
+        let panel = native.panel as *mut AnyObject;
+        let headline = native.headline as *mut AnyObject;
+        let detail = native.detail as *mut AnyObject;
+        if panel.is_null() || headline.is_null() || detail.is_null() {
+            log::error!("failed to create native macOS warning NSPanel");
+            return;
+        }
+
+        let panel_color: *mut AnyObject = msg_send![
+            color_class,
+            colorWithDeviceRed: 0.78f64,
+            green: 0.47f64,
+            blue: 0.12f64,
+            alpha: 0.20f64
+        ];
+        let text_color: *mut AnyObject = msg_send![color_class, whiteColor];
+        let headline_font: *mut AnyObject = msg_send![font_class, boldSystemFontOfSize: 30.0f64];
+        let detail_font: *mut AnyObject = msg_send![font_class, systemFontOfSize: 17.0f64];
+        let (headline_text, detail_text) = native_warning_text_from_app(window.app_handle());
+        let headline_string = NSString::from_str(&headline_text);
+        let detail_string = NSString::from_str(&detail_text);
+
+        let _: () = msg_send![panel, setFrame: frame, display: true];
+        let content_view: *mut AnyObject = msg_send![panel, contentView];
+        let content_bounds: NSRect = msg_send![content_view, bounds];
+        let (headline_frame, detail_frame) = native_warning_text_frames(content_bounds);
+        let _: () = msg_send![panel, setOpaque: false];
+        let _: () = msg_send![panel, setBackgroundColor: panel_color];
+        let _: () = msg_send![panel, setIgnoresMouseEvents: true];
+        let _: () = msg_send![panel, setHidesOnDeactivate: false];
+        let _: () = msg_send![panel, setCanHide: false];
+        let _: () = msg_send![panel, setReleasedWhenClosed: false];
+        let _: () = msg_send![panel, setCollectionBehavior: behavior];
+        let _: () = msg_send![panel, setLevel: NS_SCREEN_SAVER_WINDOW_LEVEL];
+
+        for text_field in [headline, detail] {
+            let _: () = msg_send![text_field, setBezeled: false];
+            let _: () = msg_send![text_field, setDrawsBackground: false];
+            let _: () = msg_send![text_field, setEditable: false];
+            let _: () = msg_send![text_field, setSelectable: false];
+            let _: () = msg_send![text_field, setTextColor: text_color];
+            let _: () = msg_send![text_field, setAlignment: 2usize];
+        }
+        let _: () = msg_send![headline, setFont: headline_font];
+        let _: () = msg_send![detail, setFont: detail_font];
+        let _: () = msg_send![headline, setFrame: headline_frame];
+        let _: () = msg_send![detail, setFrame: detail_frame];
+        let _: () = msg_send![headline, setStringValue: &*headline_string];
+        let _: () = msg_send![detail, setStringValue: &*detail_string];
+        center_native_warning_text_fields(content_bounds, headline, detail);
+
+        let _: () = msg_send![panel, orderFrontRegardless];
+        start_native_warning_refresh(window);
+
+        let configured_level: isize = msg_send![panel, level];
+        let configured_behavior: usize = msg_send![panel, collectionBehavior];
+        let configured_style_mask: usize = msg_send![panel, styleMask];
+        let window_number: isize = msg_send![panel, windowNumber];
+        let is_visible: bool = msg_send![panel, isVisible];
+        log::debug!(
+            "configured native macOS warning NSPanel: label={} window_number={} visible={} level={} behavior={:#x} style_mask={:#x} source_frame={:?} screen_frame={:?} screen_visible_frame={:?} fullscreen_frame={:?} panel_frame={:?} content_bounds={:?} headline_frame={:?} detail_frame={:?} headline={} detail={}",
+            window.label(),
+            window_number,
+            is_visible,
+            configured_level,
+            configured_behavior,
+            configured_style_mask,
+            source_frame,
+            screen_frame,
+            screen_visible_frame,
+            fullscreen_frame,
+            frame,
+            content_bounds,
+            headline_frame,
+            detail_frame,
+            headline_text,
+            detail_text,
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_warning_text_frames(frame: NSRect) -> (NSRect, NSRect) {
+    let content_width = frame.size.width;
+    let left = 0.0;
+    let headline_height = 64.0;
+    let detail_height = 44.0;
+    let gap = 8.0;
+    let block_height = headline_height + gap + detail_height;
+    let top_padding = frame.size.height * 0.08;
+    let block_bottom = frame.size.height - top_padding - block_height;
+
+    let mut detail_frame = NSRect::ZERO;
+    detail_frame.origin.x = left;
+    detail_frame.origin.y = block_bottom;
+    detail_frame.size.width = content_width;
+    detail_frame.size.height = detail_height;
+
+    let mut headline_frame = NSRect::ZERO;
+    headline_frame.origin.x = left;
+    headline_frame.origin.y = block_bottom + detail_height + gap;
+    headline_frame.size.width = content_width;
+    headline_frame.size.height = headline_height;
+    (headline_frame, detail_frame)
+}
+
+#[cfg(target_os = "macos")]
+fn center_native_warning_text_fields(
+    content_bounds: NSRect,
+    headline: *mut AnyObject,
+    detail: *mut AnyObject,
+) {
+    unsafe {
+        for text_field in [headline, detail] {
+            if text_field.is_null() {
+                continue;
+            }
+            let original_frame: NSRect = msg_send![text_field, frame];
+            let _: () = msg_send![text_field, sizeToFit];
+            let measured_frame: NSRect = msg_send![text_field, frame];
+            let width = measured_frame
+                .size
+                .width
+                .min(content_bounds.size.width * 0.92)
+                .max(1.0);
+            let mut centered_frame = original_frame;
+            centered_frame.size.width = width;
+            centered_frame.origin.x =
+                content_bounds.origin.x + (content_bounds.size.width - width) / 2.0;
+            let _: () = msg_send![text_field, setFrame: centered_frame];
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_warning_text_from_app<R: Runtime>(app: &AppHandle<R>) -> (String, String) {
+    let warning = app.state::<GuardState>().active_warning();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+
+    let Some(warning) = warning else {
+        return (
+            "Blocked app detected".to_string(),
+            "The app will close if it remains open.".to_string(),
+        );
+    };
+
+    if warning.kind == "process_kill_failed" {
+        return (
+            "Close failed".to_string(),
+            warning.message,
+        );
+    }
+
+    if warning.kind == "process" {
+        let process_name = warning
+            .process_name
+            .as_deref()
+            .unwrap_or("Blocked app");
+        let seconds = warning
+            .kill_at
+            .map(|kill_at| (kill_at - now).max(0) / 1_000)
+            .unwrap_or(0);
+        return (
+            "Blocked app detected".to_string(),
+            format!("{process_name} closing in {seconds}s"),
+        );
+    }
+
+    (
+        warning.title.unwrap_or_else(|| "Block starting soon".to_string()),
+        warning.message,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn start_native_warning_refresh<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    let label = window.label().to_string();
+    {
+        let mut refreshes = NATIVE_WARNING_REFRESHES.lock().unwrap();
+        if !refreshes.insert(label.clone()) {
+            return;
+        }
+    }
+
+    let app = window.app_handle().clone();
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(1));
+        let should_continue = NATIVE_WARNING_REFRESHES
+            .lock()
+            .map(|refreshes| refreshes.contains(&label))
+            .unwrap_or(false);
+        if !should_continue {
+            break;
+        }
+
+        let label_for_update = label.clone();
+        let app_for_update = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            update_native_warning_panel_text_macos_now(&app_for_update, &label_for_update);
+        }) {
+            log::error!("failed to schedule native macOS warning text refresh: {error}");
+            break;
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn update_native_warning_panel_text_macos_now<R: Runtime>(app: &AppHandle<R>, label: &str) {
+    if app.state::<GuardState>().active_warning().is_none() {
+        log::debug!(
+            "stopping native macOS warning NSPanel refresh with no active warning: label={}",
+            label,
+        );
+        hide_native_warning_panel_macos_now(label);
+        return;
+    }
+
+    let native = NATIVE_WARNING_PANELS
+        .lock()
+        .unwrap()
+        .get(label)
+        .copied();
+    let Some(native) = native else {
+        return;
+    };
+
+    unsafe {
+        let panel = native.panel as *mut AnyObject;
+        if panel.is_null() {
+            return;
+        }
+        let is_visible: bool = msg_send![panel, isVisible];
+        if !is_visible {
+            if let Ok(mut refreshes) = NATIVE_WARNING_REFRESHES.lock() {
+                refreshes.remove(label);
+            }
+            return;
+        }
+
+        let headline = native.headline as *mut AnyObject;
+        let detail = native.detail as *mut AnyObject;
+        if headline.is_null() || detail.is_null() {
+            return;
+        }
+
+        let (headline_text, detail_text) = native_warning_text_from_app(app);
+        let headline_string = NSString::from_str(&headline_text);
+        let detail_string = NSString::from_str(&detail_text);
+        let _: () = msg_send![headline, setStringValue: &*headline_string];
+        let _: () = msg_send![detail, setStringValue: &*detail_string];
+        let panel_frame: NSRect = msg_send![panel, frame];
+        let content_view: *mut AnyObject = msg_send![panel, contentView];
+        let content_bounds: Option<NSRect> = if content_view.is_null() {
+            None
+        } else {
+            Some(msg_send![content_view, bounds])
+        };
+        if let Some(content_bounds) = content_bounds {
+            center_native_warning_text_fields(content_bounds, headline, detail);
+        }
+        let headline_frame: NSRect = msg_send![headline, frame];
+        let detail_frame: NSRect = msg_send![detail, frame];
+        let screen: *mut AnyObject = msg_send![panel, screen];
+        let screen_frame: Option<NSRect> = if screen.is_null() {
+            None
+        } else {
+            Some(msg_send![screen, frame])
+        };
+        log::debug!(
+            "refreshed native macOS warning NSPanel text: label={} panel_frame={:?} screen_frame={:?} content_bounds={:?} headline_frame={:?} detail_frame={:?} headline={} detail={}",
+            label,
+            panel_frame,
+            screen_frame,
+            content_bounds,
+            headline_frame,
+            detail_frame,
+            headline_text,
+            detail_text,
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn hide_native_warning_panels<R: Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        let panels = NATIVE_WARNING_PANELS.lock().unwrap();
+        for (label, native) in panels.iter() {
+            hide_native_warning_panel_ptr_macos_now(label, *native);
+        }
+    }) {
+        log::error!("failed to schedule native macOS warning panel hide: {error}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn hide_native_warning_panel_macos_now(label: &str) {
+    if let Ok(mut refreshes) = NATIVE_WARNING_REFRESHES.lock() {
+        refreshes.remove(label);
+    }
+    let native = NATIVE_WARNING_PANELS
+        .lock()
+        .unwrap()
+        .get(label)
+        .copied();
+    if let Some(native) = native {
+        hide_native_warning_panel_ptr_macos_now(label, native);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn hide_native_warning_panel_ptr_macos_now(label: &str, native: NativeWarningPanel) {
+    if let Ok(mut refreshes) = NATIVE_WARNING_REFRESHES.lock() {
+        refreshes.remove(label);
+    }
+    let panel = native.panel as *mut AnyObject;
+    if panel.is_null() {
+        return;
+    }
+    unsafe {
+        let _: () = msg_send![panel, orderOut: std::ptr::null_mut::<AnyObject>()];
+        let is_visible: bool = msg_send![panel, isVisible];
+        log::debug!(
+            "hid native macOS warning NSPanel: label={} visible={}",
+            label,
+            is_visible,
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_frontmost_fullscreen_frame() -> Result<Option<MacFullscreenFrame>, String> {
+    let script = r#"
+tell application "System Events"
+    set frontProc to first application process whose frontmost is true
+    set appName to name of frontProc
+    try
+        set frontWindow to front window of frontProc
+        set windowTitle to ""
+        try
+            set windowTitle to name of frontWindow
+        end try
+        set fullscreenValue to false
+        try
+            set fullscreenValue to value of attribute "AXFullScreen" of frontWindow
+        end try
+        set windowPosition to position of frontWindow
+        set windowSize to size of frontWindow
+        return (fullscreenValue as text) & linefeed & appName & linefeed & windowTitle & linefeed & (item 1 of windowPosition as text) & linefeed & (item 2 of windowPosition as text) & linefeed & (item 1 of windowSize as text) & linefeed & (item 2 of windowSize as text)
+    on error
+        return "missing-window" & linefeed & appName
+    end try
+end tell
+"#;
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines().map(str::trim);
+    let fullscreen_flag = lines.next().unwrap_or("");
+    let app_name = lines.next().unwrap_or("");
+    let window_title = lines.next().unwrap_or("");
+    if fullscreen_flag == "missing-window" {
+        log::debug!(
+            "macOS fullscreen AX detection: missing front window app={}",
+            app_name,
+        );
+        return Ok(None);
+    }
+    let parse = |value: Option<&str>| -> Result<f64, String> {
+        value
+            .ok_or_else(|| "missing fullscreen window frame value".to_string())?
+            .parse::<f64>()
+            .map_err(|error| error.to_string())
+    };
+    let frame = MacFullscreenFrame {
+        x: parse(lines.next())?,
+        y: parse(lines.next())?,
+        width: parse(lines.next())?,
+        height: parse(lines.next())?,
+    };
+    let fullscreen = fullscreen_flag.eq_ignore_ascii_case("true");
+    let fullscreen_like = frame.width >= 1200.0 && frame.height >= 800.0;
+    log::debug!(
+        "macOS fullscreen AX detection: app={} title={} fullscreen_flag={} frame={:?} fullscreen_like={}",
+        app_name,
+        window_title,
+        fullscreen_flag,
+        frame,
+        fullscreen_like,
+    );
+    if fullscreen || fullscreen_like {
+        Ok(Some(frame))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn order_warning_surface_front_macos<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    if ns_window.is_null() {
+        return;
+    }
+    unsafe {
+        let ns_window = ns_window.cast::<AnyObject>();
+        let _: () = msg_send![ns_window, orderFrontRegardless];
+        let window_number: isize = msg_send![ns_window, windowNumber];
+        let is_visible: bool = msg_send![ns_window, isVisible];
+        let level: isize = msg_send![ns_window, level];
+        let behavior: usize = msg_send![ns_window, collectionBehavior];
+        log::debug!(
+            "ordered macOS warning surface front: label={} window_number={} visible={} level={} behavior={:#x}",
+            window.label(),
+            window_number,
+            is_visible,
+            level,
+            behavior,
+        );
+    }
 }
 
 pub fn hide_warning_popup<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {

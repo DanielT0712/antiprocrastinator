@@ -70,3 +70,12 @@ select option { background: var(--bg-raise); color: var(--ink); }
 ::-webkit-scrollbar-track { background: transparent; }
 
 #root { height: 100%; }
+
+html[data-view="overlay"],
+html[data-view="overlay"] body,
+html[data-view="overlay"] #root,
+html[data-view="popup"],
+html[data-view="popup"] body,
+html[data-view="popup"] #root {
+  background: transparent;
+}
