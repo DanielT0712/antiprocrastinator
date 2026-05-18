@@ -1,6 +1,6 @@
 {
   "name": "antiprocrastinator",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "should be evident from the name",
   "scripts": {
     "predev": "npm run helper:build",

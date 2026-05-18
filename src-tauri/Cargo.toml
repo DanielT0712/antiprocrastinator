@@ -1,6 +1,6 @@
 [package]
 name = "antiprocrastinator"
-version = "0.2.0"
+version = "0.2.1"
 description = "Time management app with process enforcement"
 authors = ["DanielT0712"]
 license = ""

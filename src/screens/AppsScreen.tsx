@@ -428,6 +428,7 @@ interface CategorySectionProps {
   // or cleared. 'app' for the Apps tab, 'browser_target' when the
   // section is rendering synthesized records from KnownBrowserTarget.
   rowSubjectType?: 'app' | 'browser_target';
+  profiles: EnforcementProfile[];
   activeProfile: string;
   profileNames: string[];
   isEmergency: boolean;
@@ -461,6 +462,27 @@ function decisionsFor(
   return out;
 }
 
+function inheritedDecisionFor(
+  subjectType: 'app' | 'category' | 'browser_target',
+  subjectKey: string,
+  profileName: string,
+  profiles: EnforcementProfile[],
+  overrides: Map<string, EnforcementProfileOverride>,
+): EnforcementDecision | null {
+  const byName = new Map(profiles.map((profile) => [profile.name, profile]));
+  let current: string | null = profileName;
+  const seen = new Set<string>();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const decision = overrides.get(
+      overrideMapKey({ profile: current, subjectType, subjectKey }),
+    )?.decision;
+    if (decision) return decision;
+    current = byName.get(current)?.parentName ?? null;
+  }
+  return null;
+}
+
 function categoryDefaultDecision(
   categoryName: string | null | undefined,
   profileName: string,
@@ -477,38 +499,52 @@ function categoryDefaultDecision(
   return 'allow';
 }
 
-function resolvedCategoryDecision(
-  categoryName: string,
-  profileName: string,
-  decisions: Record<string, EnforcementDecision | null>,
-): EnforcementDecision {
-  return decisions[profileName] ?? categoryDefaultDecision(categoryName, profileName);
-}
-
 function resolvedAppDecision({
   app,
   subjectType,
   profileName,
   appDecisions,
   categoryDecisions,
+  profiles,
+  overrides,
 }: {
   app: KnownApp;
   subjectType: 'app' | 'browser_target';
   profileName: string;
   appDecisions: Record<string, EnforcementDecision | null>;
   categoryDecisions: Record<string, EnforcementDecision | null>;
+  profiles: EnforcementProfile[];
+  overrides: Map<string, EnforcementProfileOverride>;
 }): EnforcementDecision {
   if (app.classificationAction === 'always_ban') return 'block';
   if (appDecisions[profileName]) return appDecisions[profileName]!;
   if (categoryDecisions[profileName]) return categoryDecisions[profileName]!;
-  if (app.classificationAction === 'never_ban') return 'allow';
-  if (app.classificationAction === 'ban_during_work') {
-    return profileName === 'rest' ? 'allow' : 'block';
-  }
+  const inheritedAppDecision = inheritedDecisionFor(
+    subjectType,
+    app.appKey,
+    profileName,
+    profiles,
+    overrides,
+  );
+  if (inheritedAppDecision) return inheritedAppDecision;
   const categoryName =
     subjectType === 'browser_target'
       ? app.effectiveCategory
       : app.effectiveCategory ?? app.categoryGuess;
+  if (categoryName) {
+    const inheritedCategoryDecision = inheritedDecisionFor(
+      'category',
+      categoryName,
+      profileName,
+      profiles,
+      overrides,
+    );
+    if (inheritedCategoryDecision) return inheritedCategoryDecision;
+  }
+  if (app.classificationAction === 'never_ban') return 'allow';
+  if (app.classificationAction === 'ban_during_work') {
+    return profileName === 'rest' ? 'allow' : 'block';
+  }
   return categoryDefaultDecision(categoryName, profileName);
 }
 
@@ -516,6 +552,7 @@ function CategorySection({
   category,
   apps,
   rowSubjectType = 'app',
+  profiles,
   activeProfile,
   profileNames,
   isEmergency,
@@ -559,7 +596,13 @@ function CategorySection({
 
   const verdictForActive: EnforcementDecision = hardLocked
     ? 'block'
-    : resolvedCategoryDecision(category.name, activeProfile, categoryDecisions);
+    : inheritedDecisionFor(
+        'category',
+        category.name,
+        activeProfile,
+        profiles,
+        overrides,
+      ) ?? categoryDefaultDecision(category.name, activeProfile);
 
   return (
     <div style={{
@@ -664,13 +707,19 @@ function CategorySection({
                 return (
                   <button
                     key={p.id}
-                    onClick={() => {
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
                       if (blockedByEmergency) return;
                       if (p.id === 'custom') {
                         onOpenCategoryDrawer(category);
                         return;
                       }
                       onApplyPreset('category', category.name, p.id);
+                    }}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
                     }}
                     title={
                       blockedByEmergency
@@ -702,7 +751,13 @@ function CategorySection({
               {profileNames.map((n) => {
                 const d = hardLocked
                   ? 'block'
-                  : resolvedCategoryDecision(category.name, n, categoryDecisions);
+                  : inheritedDecisionFor(
+                      'category',
+                      category.name,
+                      n,
+                      profiles,
+                      overrides,
+                    ) ?? categoryDefaultDecision(category.name, n);
                 return (
                   <span key={n}>
                     {(PROFILE_DISPLAY[n] ?? n).toLowerCase()} →{' '}
@@ -731,6 +786,7 @@ function CategorySection({
                 key={app.appKey}
                 app={app}
                 subjectType={rowSubjectType}
+                profiles={profiles}
                 profileNames={profileNames}
                 activeProfile={activeProfile}
                 hardLocked={hardLocked}
@@ -777,6 +833,7 @@ type AppRowMode = 'edit' | 'edit-custom';
 function AppRow({
   app,
   subjectType = 'app',
+  profiles,
   profileNames,
   activeProfile,
   hardLocked,
@@ -793,6 +850,7 @@ function AppRow({
   // synthesized KnownApp from a KnownBrowserTarget so overrides go to
   // the right subject type.
   subjectType?: 'app' | 'browser_target';
+  profiles: EnforcementProfile[];
   profileNames: string[];
   activeProfile: string;
   hardLocked: boolean;
@@ -825,6 +883,8 @@ function AppRow({
         profileName: activeProfile,
         appDecisions,
         categoryDecisions,
+        profiles,
+        overrides,
       });
 
   const [iconData, setIconData] = useState<string | null>(null);
@@ -1063,13 +1123,18 @@ function AppRow({
               <button
                 key={p.id}
                 title={p.hint}
-                onClick={(e) => {
+                onMouseDown={(e) => {
+                  e.preventDefault();
                   e.stopPropagation();
                   if (p.id === 'inherit') {
                     onClearAppOverrides();
                     return;
                   }
                   onApplyAppPreset(p.id);
+                }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
                 }}
                 style={presetChip(isActive, color)}
               >
@@ -1079,9 +1144,14 @@ function AppRow({
           })}
           <button
             title="Set different rules per profile"
-            onClick={(e) => {
+            onMouseDown={(e) => {
+              e.preventDefault();
               e.stopPropagation();
               onOpenApp('edit-custom');
+            }}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
             }}
             style={{
               ...presetChip(appPreset === 'custom', 'var(--muted)'),
@@ -2746,7 +2816,7 @@ export function AppsScreen() {
           });
         }
       }
-      refresh();
+      await refresh();
     } catch (err) {
       setError(String(err));
     }
@@ -2757,7 +2827,7 @@ export function AppsScreen() {
       for (const profile of profileNames) {
         await api.deleteEnforcementProfileOverride(profile, 'app', appKey);
       }
-      refresh();
+      await refresh();
     } catch (err) {
       setError(String(err));
     }
@@ -2772,7 +2842,7 @@ export function AppsScreen() {
           targetKey,
         );
       }
-      refresh();
+      await refresh();
     } catch (err) {
       setError(String(err));
     }
@@ -3062,6 +3132,7 @@ export function AppsScreen() {
                   key={cat.name}
                   category={cat as AppCategory}
                   apps={appsByCategory.get(cat.name) ?? []}
+                  profiles={profiles}
                   activeProfile={activeProfile}
                   profileNames={profileNames}
                   isEmergency={isEmergency}
@@ -3267,6 +3338,7 @@ export function AppsScreen() {
                     category={cat as AppCategory}
                     apps={byCat.get(cat.name) ?? []}
                     rowSubjectType="browser_target"
+                    profiles={profiles}
                     activeProfile={activeProfile}
                     profileNames={profileNames}
                     isEmergency={isEmergency}
@@ -3484,7 +3556,7 @@ export function AppsScreen() {
                   categoryName: patch.categoryName,
                   classificationAction: patch.classificationAction,
                 });
-                refresh();
+                await refresh();
               }}
             />
           );
@@ -3514,7 +3586,7 @@ export function AppsScreen() {
                     decision,
                   });
                 }
-                refresh();
+                await refresh();
               } catch (err) {
                 setError(String(err));
               }
@@ -3533,7 +3605,7 @@ export function AppsScreen() {
                   await applyPreset(subjectType, subjectKey, preset);
                   return;
                 }
-                refresh();
+                await refresh();
               } catch (err) {
                 setError(String(err));
               }
@@ -3553,7 +3625,7 @@ export function AppsScreen() {
                     categoryName: patch.categoryOverride ?? null,
                   });
                 }
-                refresh();
+                await refresh();
               } catch (err) {
                 setError(String(err));
               }
@@ -3586,7 +3658,7 @@ export function AppsScreen() {
                   decision,
                 });
               }
-              refresh();
+              await refresh();
             } catch (err) {
               setError(String(err));
             }
@@ -3607,7 +3679,7 @@ export function AppsScreen() {
                   drawerCategory.category.name,
                 );
               }
-              refresh();
+              await refresh();
             } catch (err) {
               setError(String(err));
             }
@@ -3631,11 +3703,11 @@ export function AppsScreen() {
           onClose={() => setCreatingProfile(false)}
           onCreate={async (name, parent) => {
             try {
-              await api.upsertEnforcementProfile({
+              const saved = await api.upsertEnforcementProfile({
                 name: name.trim(),
                 parentName: parent,
               });
-              setActiveProfile(name.trim().toLowerCase().replace(/\s+/g, '_'));
+              setActiveProfile(saved.name);
               setCreatingProfile(false);
               refresh();
             } catch (err) {
@@ -3666,6 +3738,7 @@ export function AppsScreen() {
           {error}
         </div>
       )}
+
     </div>
   );
 }

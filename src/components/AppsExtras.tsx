@@ -287,7 +287,7 @@ function AllowBlockToggle({
   blockedReason,
 }: {
   value: EnforcementDecision;
-  onChange: (next: EnforcementDecision) => void;
+  onChange: (next: EnforcementDecision) => Promise<void> | void;
   blocked?: boolean;
   blockedReason?: string;
 }) {
@@ -300,9 +300,15 @@ function AllowBlockToggle({
       background: 'var(--bg)',
     }}>
       <button
-        onClick={() => {
+        onMouseDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
           if (blocked) return;
-          onChange('allow');
+          void onChange('allow');
+        }}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
         }}
         disabled={blocked}
         title={blocked ? blockedReason : undefined}
@@ -322,7 +328,15 @@ function AllowBlockToggle({
         Allow
       </button>
       <button
-        onClick={() => onChange('block')}
+        onMouseDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          void onChange('block');
+        }}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
         style={{
           padding: '6px 12px',
           fontSize: 11.5,

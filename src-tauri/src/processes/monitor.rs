@@ -181,18 +181,6 @@ fn migrate_allowed_category_overrides(connection: &Connection) -> Result<(), Str
         .into_iter()
         .filter(|category| category.default_action == ProcessAction::AlwaysAllow)
     {
-        connection
-            .execute(
-                r#"
-                DELETE FROM enforcement_profile_overrides
-                WHERE subject_type = 'category'
-                  AND LOWER(subject_key) = LOWER(?1)
-                  AND decision = 'block'
-                "#,
-                params![category.name],
-            )
-            .map_err(|error| error.to_string())?;
-
         for profile in categories::built_in_profile_names() {
             connection
                 .execute(
@@ -200,9 +188,7 @@ fn migrate_allowed_category_overrides(connection: &Connection) -> Result<(), Str
                     INSERT INTO enforcement_profile_overrides
                         (profile_name, subject_type, subject_key, decision, created_at, updated_at)
                     VALUES (?1, 'category', ?2, 'allow', ?3, ?3)
-                    ON CONFLICT(profile_name, subject_type, subject_key) DO UPDATE SET
-                        decision = excluded.decision,
-                        updated_at = excluded.updated_at
+                    ON CONFLICT(profile_name, subject_type, subject_key) DO NOTHING
                     "#,
                     params![profile.name, category.name, now],
                 )
@@ -1551,16 +1537,15 @@ pub fn delete_enforcement_profile_override(
             params![profile_name, subject_type, subject_key],
         )
         .map_err(|error| error.to_string())?;
-    if deleted == 0 {
-        return Err("override does not exist".to_string());
+    if deleted > 0 {
+        record_enforcement_history(
+            connection,
+            "profile_override",
+            &format!("{profile_name}:{subject_type}:{subject_key}"),
+            "deleted",
+            serde_json::json!({}),
+        );
     }
-    record_enforcement_history(
-        connection,
-        "profile_override",
-        &format!("{profile_name}:{subject_type}:{subject_key}"),
-        "deleted",
-        serde_json::json!({}),
-    );
     Ok(())
 }
 
@@ -4814,6 +4799,102 @@ mod tests {
         let action = super::resolve_effective_action(&connection, "work", Some(&app), None, None);
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn inherited_browser_category_override_blocks_browser_apps() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        run_migrations(&connection).expect("migrations should run");
+        super::ensure_enforcement_defaults(&connection).expect("defaults should be present");
+        super::upsert_enforcement_profile(
+            &connection,
+            crate::processes::models::EnforcementProfileInput {
+                name: "focus_morning".to_string(),
+                parent_name: Some("work".to_string()),
+            },
+        )
+        .expect("profile should save");
+        super::set_enforcement_profile_override(
+            &connection,
+            crate::processes::models::EnforcementProfileOverrideInput {
+                profile_name: "work".to_string(),
+                subject_type: "category".to_string(),
+                subject_key: "Browsers".to_string(),
+                decision: crate::processes::models::EnforcementDecision::Block,
+            },
+        )
+        .expect("override should save");
+
+        let app = KnownApp {
+            app_key: "google chrome".to_string(),
+            display_name: "Google Chrome".to_string(),
+            executable_name: Some("Google Chrome".to_string()),
+            executable_path: Some(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string(),
+            ),
+            app_path: Some("/Applications/Google Chrome.app".to_string()),
+            platform: "macos".to_string(),
+            source: "process".to_string(),
+            category_guess: Some("Browsers".to_string()),
+            category_override: Some("Browsers".to_string()),
+            effective_category: Some("Browsers".to_string()),
+            categories: vec![],
+            classification_action: ClassificationAction::NeverBan,
+            confidence: 0.95,
+            classification_status: "confirmed".to_string(),
+            first_seen_at: 0,
+            last_seen_running_at: Some(0),
+            updated_at: 0,
+        };
+
+        let action =
+            super::resolve_effective_action(&connection, "focus_morning", Some(&app), None, None);
+
+        assert_eq!(action, Some(ProcessAction::BlockDuringWork));
+    }
+
+    #[test]
+    fn deleting_missing_profile_override_is_idempotent() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        run_migrations(&connection).expect("migrations should run");
+        super::ensure_enforcement_defaults(&connection).expect("defaults should be present");
+
+        super::delete_enforcement_profile_override(&connection, "work", "category", "Browsers")
+            .expect("missing override delete should be a no-op");
+    }
+
+    #[test]
+    fn default_seed_does_not_overwrite_user_category_override() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        run_migrations(&connection).expect("migrations should run");
+        super::ensure_enforcement_defaults(&connection).expect("defaults should be present");
+        super::set_enforcement_profile_override(
+            &connection,
+            crate::processes::models::EnforcementProfileOverrideInput {
+                profile_name: "work".to_string(),
+                subject_type: "category".to_string(),
+                subject_key: "Browsers".to_string(),
+                decision: crate::processes::models::EnforcementDecision::Block,
+            },
+        )
+        .expect("override should save");
+
+        super::ensure_enforcement_defaults(&connection).expect("defaults should be idempotent");
+
+        let overrides =
+            super::get_enforcement_profile_overrides(&connection, Some("work")).unwrap();
+        let browser_override = overrides
+            .iter()
+            .find(|override_entry| {
+                override_entry.subject_type == "category"
+                    && override_entry.subject_key == "Browsers"
+            })
+            .expect("browser override should exist");
+
+        assert_eq!(
+            browser_override.decision,
+            crate::processes::models::EnforcementDecision::Block
+        );
     }
 
     #[test]
